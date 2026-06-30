@@ -17,6 +17,7 @@ const STATUS_OPTIONS: Array<"all" | RunStatus> = [
   "completed",
   "failed",
   "failed_verification",
+  "cancelled",
 ];
 
 export default function RunsPage() {

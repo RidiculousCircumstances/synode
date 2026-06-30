@@ -23,6 +23,7 @@ import {
   getThread,
   listAgentGraphs,
   listModelProfiles,
+  stopRun,
   updateThread,
 } from "@/lib/api";
 import { formatDateTime, shortId } from "@/lib/format";
@@ -59,6 +60,14 @@ export default function ThreadDetailClient({ threadId }: { threadId: string }) {
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["thread", threadId] });
       void queryClient.invalidateQueries({ queryKey: ["threads"] });
+    },
+  });
+  const stopMutation = useMutation({
+    mutationFn: (runId: string) => stopRun(runId),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["thread", threadId] });
+      void queryClient.invalidateQueries({ queryKey: ["threads"] });
+      void queryClient.invalidateQueries({ queryKey: ["runs"] });
     },
   });
 
@@ -104,9 +113,12 @@ export default function ThreadDetailClient({ threadId }: { threadId: string }) {
         runsCount={detail.runs.length}
         archived={thread.status === "archived"}
         archivePending={archiveMutation.isPending}
+        stopPending={stopMutation.isPending}
         onArchive={() => archiveMutation.mutate(thread.id)}
+        onStopRun={latestRun && pending ? () => stopMutation.mutate(latestRun.id) : undefined}
         onOpenRuns={() => setRunsOpen(true)}
       />
+      {stopMutation.error ? <div className="error-line thread-inline-error">{stopMutation.error.message}</div> : null}
       <div
         ref={scrollRef}
         className="thread-message-scroll"
@@ -136,7 +148,9 @@ function ThreadTopBar({
   runsCount,
   archived,
   archivePending,
+  stopPending,
   onArchive,
+  onStopRun,
   onOpenRuns,
 }: {
   threadId: string;
@@ -146,7 +160,9 @@ function ThreadTopBar({
   runsCount: number;
   archived: boolean;
   archivePending: boolean;
+  stopPending: boolean;
   onArchive: () => void;
+  onStopRun?: () => void;
   onOpenRuns: () => void;
 }) {
   const queryClient = useQueryClient();
@@ -217,6 +233,18 @@ function ThreadTopBar({
       </div>
       {!editing ? (
         <div className="thread-toolbar-actions">
+          {onStopRun ? (
+            <button
+              type="button"
+              className="icon-button reject thread-topbar-action"
+              onClick={onStopRun}
+              disabled={stopPending}
+              aria-label="Stop latest run"
+              title="Stop latest run"
+            >
+              {stopPending ? <RefreshCw size={15} className="spin" aria-hidden /> : <X size={15} aria-hidden />}
+            </button>
+          ) : null}
           {latestRun ? (
             <Link className="icon-button thread-topbar-action" href={`/runs/${latestRun.id}`} aria-label="Open latest run" title="Open latest run">
               <GitBranch size={15} aria-hidden />

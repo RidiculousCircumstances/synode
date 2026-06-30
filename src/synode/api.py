@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
-from typing import Any, AsyncIterator, Coroutine
+from typing import AsyncIterator
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -30,6 +30,7 @@ from synode.schemas import (
     RunMode,
     RunResponse,
     RunStatus,
+    RunStopRequest,
     SecretCreateRequest,
     SecretResponse,
     SecretUpdateRequest,
@@ -45,8 +46,12 @@ from synode.schemas import (
 )
 
 
-def _schedule_background(coro: Coroutine[Any, Any, None]) -> None:
-    asyncio.create_task(coro)
+def _page_limit(value: int, maximum: int = 200) -> int:
+    return max(1, min(value, maximum))
+
+
+def _page_offset(value: int) -> int:
+    return max(0, value)
 
 
 @asynccontextmanager
@@ -96,7 +101,12 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         if detail.thread.latest_run_id is None:
             raise HTTPException(status_code=500, detail="thread was created without a run")
-        _schedule_background(service.execute_run(detail.thread.latest_run_id))
+        try:
+            await service.start_run(detail.thread.latest_run_id)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         return detail
 
     @app.get("/threads", response_model=list[ThreadResponse])
@@ -108,13 +118,31 @@ def create_app() -> FastAPI:
         offset: int = 0,
     ) -> list[ThreadResponse]:
         service: OrchestrationService = request.app.state.service
-        return await service.list_threads(status=status, search=search, limit=min(limit, 200), offset=offset)
+        return await service.list_threads(
+            status=status,
+            search=search,
+            limit=_page_limit(limit),
+            offset=_page_offset(offset),
+        )
 
     @app.get("/threads/{thread_id}", response_model=ThreadDetailResponse)
-    async def get_thread(thread_id: str, request: Request) -> ThreadDetailResponse:
+    async def get_thread(
+        thread_id: str,
+        request: Request,
+        runs_limit: int = 50,
+        runs_offset: int = 0,
+        messages_limit: int = 200,
+        messages_offset: int = 0,
+    ) -> ThreadDetailResponse:
         service: OrchestrationService = request.app.state.service
         try:
-            return await service.get_thread(thread_id)
+            return await service.get_thread(
+                thread_id,
+                runs_limit=_page_limit(runs_limit),
+                runs_offset=_page_offset(runs_offset),
+                messages_limit=_page_limit(messages_limit, maximum=500),
+                messages_offset=_page_offset(messages_offset),
+            )
         except LookupError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -137,10 +165,19 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.get("/threads/{thread_id}/messages", response_model=list[ThreadMessageResponse])
-    async def list_thread_messages(thread_id: str, request: Request) -> list[ThreadMessageResponse]:
+    async def list_thread_messages(
+        thread_id: str,
+        request: Request,
+        limit: int = 200,
+        offset: int = 0,
+    ) -> list[ThreadMessageResponse]:
         service: OrchestrationService = request.app.state.service
         try:
-            return await service.list_thread_messages(thread_id)
+            return await service.list_thread_messages(
+                thread_id,
+                limit=_page_limit(limit, maximum=500),
+                offset=_page_offset(offset),
+            )
         except LookupError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -164,7 +201,12 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
-        _schedule_background(service.execute_run(run.id))
+        try:
+            await service.start_run(run.id)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         return run
 
     @app.post("/runs", response_model=RunResponse)
@@ -184,7 +226,12 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        _schedule_background(service.execute_run(run.id))
+        try:
+            await service.start_run(run.id)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         return run
 
     @app.get("/runs", response_model=list[RunResponse])
@@ -196,7 +243,12 @@ def create_app() -> FastAPI:
         offset: int = 0,
     ) -> list[RunResponse]:
         service: OrchestrationService = request.app.state.service
-        return await service.list_runs(status=status, mode=mode, limit=min(limit, 200), offset=offset)
+        return await service.list_runs(
+            status=status,
+            mode=mode,
+            limit=_page_limit(limit),
+            offset=_page_offset(offset),
+        )
 
     @app.get("/runs/{run_id}", response_model=RunResponse)
     async def get_run(run_id: str, request: Request) -> RunResponse:
@@ -207,9 +259,14 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.get("/runs/{run_id}/events", response_model=list[RunEventResponse])
-    async def get_events(run_id: str, request: Request, after_id: int = 0) -> list[RunEventResponse]:
+    async def get_events(
+        run_id: str,
+        request: Request,
+        after_id: int = 0,
+        limit: int = 200,
+    ) -> list[RunEventResponse]:
         service: OrchestrationService = request.app.state.service
-        return await service.list_event_responses(run_id, after_id=after_id)
+        return await service.list_event_responses(run_id, after_id=after_id, limit=_page_limit(limit, maximum=500))
 
     @app.get("/runs/{run_id}/events/stream")
     async def stream_events(run_id: str, request: Request, after_id: int = 0) -> StreamingResponse:
@@ -219,7 +276,7 @@ def create_app() -> FastAPI:
             header_last_id = request.headers.get("last-event-id")
             cursor = int(header_last_id) if header_last_id and header_last_id.isdigit() else after_id
             while True:
-                events = await service.list_event_responses(run_id, after_id=cursor)
+                events = await service.list_event_responses(run_id, after_id=cursor, limit=200)
                 for event in events:
                     cursor = event.id
                     yield (
@@ -228,7 +285,7 @@ def create_app() -> FastAPI:
                         f"data: {event.model_dump_json()}\n\n"
                     )
                 run = await service.get_run(run_id)
-                if run.status.value in {"completed", "failed", "failed_verification", "waiting_approval"}:
+                if run.status.value in {"completed", "failed", "failed_verification", "waiting_approval", "cancelled"}:
                     break
                 if not events:
                     yield ": heartbeat\n\n"
@@ -237,19 +294,34 @@ def create_app() -> FastAPI:
         return StreamingResponse(generator(), media_type="text/event-stream")
 
     @app.get("/runs/{run_id}/artifacts", response_model=list[ArtifactResponse])
-    async def get_artifacts(run_id: str, request: Request) -> list[ArtifactResponse]:
+    async def get_artifacts(
+        run_id: str,
+        request: Request,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[ArtifactResponse]:
         service: OrchestrationService = request.app.state.service
-        return await service.list_artifacts(run_id)
+        return await service.list_artifacts(run_id, limit=_page_limit(limit), offset=_page_offset(offset))
 
     @app.get("/runs/{run_id}/tool-audit", response_model=list[ToolAuditResponse])
-    async def get_tool_audit(run_id: str, request: Request) -> list[ToolAuditResponse]:
+    async def get_tool_audit(
+        run_id: str,
+        request: Request,
+        limit: int = 200,
+        offset: int = 0,
+    ) -> list[ToolAuditResponse]:
         service: OrchestrationService = request.app.state.service
-        return await service.list_tool_audit(run_id)
+        return await service.list_tool_audit(run_id, limit=_page_limit(limit, maximum=500), offset=_page_offset(offset))
 
     @app.get("/runs/{run_id}/approvals", response_model=list[ApprovalResponse])
-    async def get_run_approvals(run_id: str, request: Request) -> list[ApprovalResponse]:
+    async def get_run_approvals(
+        run_id: str,
+        request: Request,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[ApprovalResponse]:
         service: OrchestrationService = request.app.state.service
-        return await service.list_approvals(run_id=run_id)
+        return await service.list_approvals(run_id=run_id, limit=_page_limit(limit), offset=_page_offset(offset))
 
     @app.get("/runs/{run_id}/metrics", response_model=RunMetricsResponse)
     async def get_run_metrics(run_id: str, request: Request) -> RunMetricsResponse:
@@ -262,8 +334,25 @@ def create_app() -> FastAPI:
     @app.post("/runs/{run_id}/resume")
     async def resume_run(run_id: str, request: Request) -> dict[str, str]:
         service: OrchestrationService = request.app.state.service
-        _schedule_background(service.resume_run(run_id))
+        try:
+            await service.start_run(run_id)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         return {"status": "scheduled"}
+
+    @app.post("/runs/{run_id}/stop", response_model=RunResponse)
+    async def stop_run(
+        run_id: str,
+        request: Request,
+        payload: RunStopRequest | None = None,
+    ) -> RunResponse:
+        service: OrchestrationService = request.app.state.service
+        try:
+            return await service.stop_run(run_id, payload.reason if payload else None)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.post("/approvals/{approval_id}/approve")
     async def approve(approval_id: str, payload: ApprovalDecision, request: Request) -> dict[str, str]:
@@ -279,15 +368,18 @@ def create_app() -> FastAPI:
 
     @app.get("/approvals", response_model=list[ApprovalResponse])
     async def list_approvals(
-        request: Request, status: ApprovalStatus | None = None
+        request: Request,
+        status: ApprovalStatus | None = None,
+        limit: int = 50,
+        offset: int = 0,
     ) -> list[ApprovalResponse]:
         service: OrchestrationService = request.app.state.service
-        return await service.list_approvals(status=status)
+        return await service.list_approvals(status=status, limit=_page_limit(limit), offset=_page_offset(offset))
 
     @app.get("/secrets", response_model=list[SecretResponse])
-    async def list_secrets(request: Request) -> list[SecretResponse]:
+    async def list_secrets(request: Request, limit: int = 50, offset: int = 0) -> list[SecretResponse]:
         service: OrchestrationService = request.app.state.service
-        return await service.list_secrets()
+        return await service.list_secrets(limit=_page_limit(limit), offset=_page_offset(offset))
 
     @app.post("/secrets", response_model=SecretResponse)
     async def create_secret(payload: SecretCreateRequest, request: Request) -> SecretResponse:
@@ -312,9 +404,13 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.get("/model-profiles", response_model=list[ModelProfileResponse])
-    async def list_model_profiles(request: Request) -> list[ModelProfileResponse]:
+    async def list_model_profiles(
+        request: Request,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[ModelProfileResponse]:
         service: OrchestrationService = request.app.state.service
-        return await service.list_model_profiles()
+        return await service.list_model_profiles(limit=_page_limit(limit), offset=_page_offset(offset))
 
     @app.post("/model-profiles", response_model=ModelProfileResponse)
     async def create_model_profile(
@@ -340,9 +436,9 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.get("/agents", response_model=list[AgentRoleResponse])
-    async def agents(request: Request) -> list[AgentRoleResponse]:
+    async def agents(request: Request, limit: int = 100, offset: int = 0) -> list[AgentRoleResponse]:
         service: OrchestrationService = request.app.state.service
-        return await service.list_agent_roles()
+        return await service.list_agent_roles(limit=_page_limit(limit, maximum=500), offset=_page_offset(offset))
 
     @app.post("/agents", response_model=AgentRoleResponse)
     async def create_agent(payload: AgentRoleCreateRequest, request: Request) -> AgentRoleResponse:
@@ -362,9 +458,9 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.get("/agent-graphs", response_model=list[AgentGraphResponse])
-    async def list_agent_graphs(request: Request) -> list[AgentGraphResponse]:
+    async def list_agent_graphs(request: Request, limit: int = 50, offset: int = 0) -> list[AgentGraphResponse]:
         service: OrchestrationService = request.app.state.service
-        return await service.list_agent_graphs()
+        return await service.list_agent_graphs(limit=_page_limit(limit), offset=_page_offset(offset))
 
     @app.post("/agent-graphs", response_model=AgentGraphResponse)
     async def create_agent_graph(
@@ -402,9 +498,9 @@ def create_app() -> FastAPI:
         return {"tools": [name for name in service.tools.list_names() if name.startswith("mcp.")]}
 
     @app.get("/models/health")
-    async def models_health(request: Request) -> list[dict[str, object]]:
+    async def models_health(request: Request, limit: int = 50, offset: int = 0) -> list[dict[str, object]]:
         service: OrchestrationService = request.app.state.service
-        return await service.model_health()
+        return await service.model_health(limit=_page_limit(limit), offset=_page_offset(offset))
 
     @app.get("/metrics/system", response_model=SystemMetricsResponse)
     async def metrics_system(request: Request) -> SystemMetricsResponse:

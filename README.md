@@ -88,6 +88,13 @@ run-detail tabs, agent graph monitoring, timeline, approvals, artifacts,
 diff/tests, settings, and observability views. Threads are the user-facing
 workspace; runs are immutable execution attempts inside a thread.
 
+Active runs can be stopped from the API/UI. A stopped run becomes terminal
+`cancelled`, emits `run_cancelled`, rejects pending approvals, and unblocks the
+thread for a new follow-up run. Rejecting an approval also cancels that run,
+because the rejected mutation must not resume implicitly. Growing list
+endpoints accept `limit` and `offset`; repository queries apply pagination in
+the database.
+
 Deterministic test smoke without a real model:
 
 ```bash
@@ -104,7 +111,8 @@ uv run synode run "Inspect this repo and propose a tiny README wording change" \
 ```
 
 File mutations require approval. Use `synode approve` and `synode resume` to
-continue a waiting run.
+continue a waiting run, or reject/stop it to cancel the run and continue the
+thread with a new request.
 
 Configuration UI:
 

@@ -194,6 +194,13 @@ export function createRun(payload: {
   });
 }
 
+export function stopRun(runId: string, reason = "Stopped from UI"): Promise<Run> {
+  return request<Run>(`/runs/${runId}/stop`, {
+    method: "POST",
+    body: JSON.stringify({ reason }),
+  });
+}
+
 export function listEvents(runId: string, afterId = 0): Promise<RunEvent[]> {
   return request<RunEvent[]>(`/runs/${runId}/events?after_id=${afterId}`);
 }

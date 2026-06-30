@@ -21,6 +21,7 @@ const EVENT_TYPES = [
   "verification_completed",
   "run_completed",
   "run_failed",
+  "run_cancelled",
 ];
 
 export function useRunEvents(runId: string | null): RunEvent[] {

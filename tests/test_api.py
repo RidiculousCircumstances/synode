@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import pathlib
-from collections.abc import Coroutine
-from typing import Any
 
 import httpx
 import pytest
@@ -41,10 +39,10 @@ async def test_api_exposes_run_read_models(service: OrchestrationService, tmp_pa
 async def test_api_exposes_thread_workflow(
     service: OrchestrationService, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    def discard_background_task(coro: Coroutine[Any, Any, Any]) -> None:
-        coro.close()
+    async def discard_background_run(run_id: str) -> None:
+        assert run_id
 
-    monkeypatch.setattr("synode.api._schedule_background", discard_background_task)
+    monkeypatch.setattr(service, "start_run", discard_background_run)
     app = create_app()
     app.state.service = service
     transport = httpx.ASGITransport(app=app)
@@ -81,6 +79,15 @@ async def test_api_exposes_thread_workflow(
         ).json()
         detail = (await client.get(f"/threads/{thread_id}")).json()
         messages = (await client.get(f"/threads/{thread_id}/messages")).json()
+        paged_detail = (
+            await client.get(
+                f"/threads/{thread_id}",
+                params={"runs_limit": 1, "messages_limit": 1, "messages_offset": 1},
+            )
+        ).json()
+        paged_messages = (
+            await client.get(f"/threads/{thread_id}/messages", params={"limit": 1, "offset": 1})
+        ).json()
         archived = (await client.post(f"/threads/{thread_id}/archive")).json()
         blocked = await client.post(
             f"/threads/{thread_id}/runs",
@@ -95,8 +102,31 @@ async def test_api_exposes_thread_workflow(
     assert follow_up["thread_id"] == thread_id
     assert {run["id"] for run in detail["runs"]} == {first_run_id, follow_up["id"]}
     assert [message["author_type"] for message in messages].count("user") == 2
+    assert len(paged_detail["runs"]) == 1
+    assert len(paged_detail["messages"]) == 1
+    assert paged_detail["messages"][0]["content"] == messages[1]["content"]
+    assert len(paged_messages) == 1
+    assert paged_messages[0]["content"] == messages[1]["content"]
     assert archived["status"] == "archived"
     assert blocked.status_code == 409
+
+
+async def test_api_stops_run_without_request_body(service: OrchestrationService, tmp_path: pathlib.Path) -> None:
+    run = await service.create_run("Inspect this later", workspace=str(tmp_path), model_provider="fake")
+
+    app = create_app()
+    app.state.service = service
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://synode.test") as client:
+        stopped = (await client.post(f"/runs/{run.id}/stop")).json()
+        events = (await client.get(f"/runs/{run.id}/events")).json()
+
+    assert stopped["status"] == RunStatus.CANCELLED.value
+    assert stopped["final_answer"] == "Run stopped by user."
+    assert any(
+        event["event_type"] == "run_cancelled" and event["payload"]["reason"] == "Run stopped by user."
+        for event in events
+    )
 
 
 async def test_api_streams_sse_events(service: OrchestrationService, tmp_path: pathlib.Path) -> None:

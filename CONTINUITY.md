@@ -33,6 +33,9 @@
 - Threads are the user-facing work unit. Runs are immutable execution attempts
   inside a thread; continuing a conversation creates a new run in the same
   thread after the previous run reaches a terminal state.
+- Explicit run stops and approval rejections cancel the affected run, reject
+  pending approvals, emit observable cancellation state, and unblock the thread
+  for a new run.
 
 ## State:
 ### Done:
@@ -97,12 +100,24 @@
   llama.cpp-style `/v1/chat/completions` endpoints.
 - Verification passed for this configuration work: `uv run ruff check src tests`,
   `uv run pytest`, `npm run lint`, `npm run build`, and `npm run test:e2e`.
+- Run cancellation is implemented end-to-end: tracked background run tasks,
+  `POST /runs/{run_id}/stop`, terminal `cancelled` status, `run_cancelled`
+  events, UI stop controls, and approval rejection that cancels the run instead
+  of leaving the thread stuck in `waiting_approval`.
+- Growing API lists use DB-level pagination parameters (`limit`/`offset`, plus
+  event cursors where appropriate) through repository queries.
+- Verification passed for cancellation/pagination work: `uv run ruff check src
+  tests`, `uv run pytest`, `uv run mypy`, `python3 tools/guardrails.py`,
+  `npm run lint`, `npm run build`, `npm run test:e2e`, `uv run synode db
+  upgrade`, and `git diff --check`.
 
 ### Now:
 - MVP backend and operator UI include DB-backed runtime configuration screens
   for model profiles, agent roles, and agent graphs.
 - Ollama runs as a system service and serves `qwen2.5-coder:7b` on
   `127.0.0.1:11434`.
+- Threads can be continued after stopping a run or rejecting an approval,
+  because both paths now produce terminal `cancelled` runs.
 
 ### Next:
 - Tune real-model prompts against broader local workloads.

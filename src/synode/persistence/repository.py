@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from synode.persistence.models import (
@@ -168,11 +168,18 @@ class Repository:
         await self.session.flush()
         return message
 
-    async def list_thread_messages(self, thread_id: str) -> list[ThreadMessageRecord]:
+    async def list_thread_messages(
+        self,
+        thread_id: str,
+        limit: int = 200,
+        offset: int = 0,
+    ) -> list[ThreadMessageRecord]:
         result = await self.session.execute(
             select(ThreadMessageRecord)
             .where(ThreadMessageRecord.thread_id == thread_id)
             .order_by(ThreadMessageRecord.id)
+            .limit(limit)
+            .offset(offset)
         )
         return list(result.scalars().all())
 
@@ -185,11 +192,13 @@ class Repository:
         )
         return result.scalars().first()
 
-    async def list_thread_runs(self, thread_id: str) -> list[RunRecord]:
+    async def list_thread_runs(self, thread_id: str, limit: int = 50, offset: int = 0) -> list[RunRecord]:
         result = await self.session.execute(
             select(RunRecord)
             .where(RunRecord.thread_id == thread_id)
             .order_by(RunRecord.created_at.desc(), RunRecord.id.desc())
+            .limit(limit)
+            .offset(offset)
         )
         return list(result.scalars().all())
 
@@ -220,10 +229,27 @@ class Repository:
         result = await self.session.execute(query.limit(limit).offset(offset))
         return list(result.scalars().all())
 
-    async def list_events(self, run_id: str, after_id: int = 0) -> list[RunEventRecord]:
+    async def list_events(self, run_id: str, after_id: int = 0, limit: int = 200) -> list[RunEventRecord]:
         result = await self.session.execute(
             select(RunEventRecord)
             .where(RunEventRecord.run_id == run_id, RunEventRecord.id > after_id)
+            .order_by(RunEventRecord.id)
+            .limit(limit)
+        )
+        return list(result.scalars().all())
+
+    async def count_events(self, run_id: str) -> int:
+        return int(
+            await self.session.scalar(
+                select(func.count()).select_from(RunEventRecord).where(RunEventRecord.run_id == run_id)
+            )
+            or 0
+        )
+
+    async def model_invocation_events(self, run_id: str) -> list[RunEventRecord]:
+        result = await self.session.execute(
+            select(RunEventRecord)
+            .where(RunEventRecord.run_id == run_id, RunEventRecord.event_type == EventType.MODEL_INVOKED.value)
             .order_by(RunEventRecord.id)
         )
         return list(result.scalars().all())
@@ -303,16 +329,50 @@ class Repository:
         await self.session.flush()
         return approval
 
+    async def reject_pending_approvals(self, run_id: str, decision_reason: str | None = None) -> list[ApprovalRecord]:
+        result = await self.session.execute(
+            select(ApprovalRecord)
+            .where(ApprovalRecord.run_id == run_id, ApprovalRecord.status == ApprovalStatus.PENDING.value)
+            .order_by(ApprovalRecord.created_at)
+        )
+        approvals = list(result.scalars().all())
+        for approval in approvals:
+            approval.status = ApprovalStatus.REJECTED.value
+            approval.decision_reason = decision_reason
+            approval.decided_at = datetime.now(UTC)
+            await self.add_event(
+                approval.run_id,
+                EventType.APPROVAL_DECIDED.value,
+                None,
+                {
+                    "approval_id": approval.id,
+                    "status": ApprovalStatus.REJECTED.value,
+                    "decision_reason": decision_reason,
+                },
+            )
+        await self.session.flush()
+        return approvals
+
     async def list_approvals(
-        self, run_id: str | None = None, status: ApprovalStatus | None = None
+        self,
+        run_id: str | None = None,
+        status: ApprovalStatus | None = None,
+        limit: int = 50,
+        offset: int = 0,
     ) -> list[ApprovalRecord]:
         query = select(ApprovalRecord).order_by(ApprovalRecord.created_at.desc())
         if run_id is not None:
             query = query.where(ApprovalRecord.run_id == run_id)
         if status is not None:
             query = query.where(ApprovalRecord.status == status.value)
-        result = await self.session.execute(query)
+        result = await self.session.execute(query.limit(limit).offset(offset))
         return list(result.scalars().all())
+
+    async def count_approvals(self, run_id: str, status: ApprovalStatus | None = None) -> int:
+        query = select(func.count()).select_from(ApprovalRecord).where(ApprovalRecord.run_id == run_id)
+        if status is not None:
+            query = query.where(ApprovalRecord.status == status.value)
+        return int(await self.session.scalar(query) or 0)
 
     async def add_tool_audit(
         self,
@@ -368,21 +428,31 @@ class Repository:
         )
         return result.scalars().first()
 
-    async def list_artifacts(self, run_id: str) -> list[ArtifactRecord]:
+    async def list_artifacts(self, run_id: str, limit: int = 100, offset: int = 0) -> list[ArtifactRecord]:
         result = await self.session.execute(
             select(ArtifactRecord)
             .where(ArtifactRecord.run_id == run_id)
             .order_by(ArtifactRecord.created_at.desc(), ArtifactRecord.id.desc())
+            .limit(limit)
+            .offset(offset)
         )
         return list(result.scalars().all())
 
-    async def list_tool_audit(self, run_id: str) -> list[ToolAuditRecord]:
+    async def list_tool_audit(self, run_id: str, limit: int = 200, offset: int = 0) -> list[ToolAuditRecord]:
         result = await self.session.execute(
             select(ToolAuditRecord)
             .where(ToolAuditRecord.run_id == run_id)
             .order_by(ToolAuditRecord.id)
+            .limit(limit)
+            .offset(offset)
         )
         return list(result.scalars().all())
+
+    async def count_tool_audit(self, run_id: str, statuses: set[str] | None = None) -> int:
+        query = select(func.count()).select_from(ToolAuditRecord).where(ToolAuditRecord.run_id == run_id)
+        if statuses:
+            query = query.where(ToolAuditRecord.status.in_(statuses))
+        return int(await self.session.scalar(query) or 0)
 
     async def create_secret(self, name: str, encrypted_value: str) -> SecretRecord:
         record = SecretRecord(id=new_id(), name=name, encrypted_value=encrypted_value)
@@ -395,8 +465,8 @@ class Repository:
             return None
         return await self.session.get(SecretRecord, secret_id)
 
-    async def list_secrets(self) -> list[SecretRecord]:
-        result = await self.session.execute(select(SecretRecord).order_by(SecretRecord.name))
+    async def list_secrets(self, limit: int = 50, offset: int = 0) -> list[SecretRecord]:
+        result = await self.session.execute(select(SecretRecord).order_by(SecretRecord.name).limit(limit).offset(offset))
         return list(result.scalars().all())
 
     async def update_secret(self, secret_id: str, encrypted_value: str) -> SecretRecord:
@@ -439,11 +509,16 @@ class Repository:
             return None
         return await self.session.get(ModelProfileRecord, profile_id)
 
-    async def list_model_profiles(self, enabled_only: bool = False) -> list[ModelProfileRecord]:
+    async def list_model_profiles(
+        self,
+        enabled_only: bool = False,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[ModelProfileRecord]:
         query = select(ModelProfileRecord).order_by(ModelProfileRecord.name)
         if enabled_only:
             query = query.where(ModelProfileRecord.enabled.is_(True))
-        result = await self.session.execute(query)
+        result = await self.session.execute(query.limit(limit).offset(offset))
         return list(result.scalars().all())
 
     async def update_model_profile(self, profile_id: str, values: dict[str, Any]) -> ModelProfileRecord:
@@ -496,11 +571,16 @@ class Repository:
         result = await self.session.execute(select(AgentRoleRecord).where(AgentRoleRecord.name == name))
         return result.scalars().first()
 
-    async def list_agent_roles(self, enabled_only: bool = False) -> list[AgentRoleRecord]:
+    async def list_agent_roles(
+        self,
+        enabled_only: bool = False,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[AgentRoleRecord]:
         query = select(AgentRoleRecord).order_by(AgentRoleRecord.name)
         if enabled_only:
             query = query.where(AgentRoleRecord.enabled.is_(True))
-        result = await self.session.execute(query)
+        result = await self.session.execute(query.limit(limit).offset(offset))
         return list(result.scalars().all())
 
     async def update_agent_role(self, role_id: str, values: dict[str, Any]) -> AgentRoleRecord:
@@ -554,11 +634,16 @@ class Repository:
         )
         return result.scalars().first()
 
-    async def list_agent_graphs(self, enabled_only: bool = False) -> list[AgentGraphRecord]:
+    async def list_agent_graphs(
+        self,
+        enabled_only: bool = False,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[AgentGraphRecord]:
         query = select(AgentGraphRecord).order_by(AgentGraphRecord.is_default.desc(), AgentGraphRecord.name)
         if enabled_only:
             query = query.where(AgentGraphRecord.enabled.is_(True))
-        result = await self.session.execute(query)
+        result = await self.session.execute(query.limit(limit).offset(offset))
         return list(result.scalars().all())
 
     async def update_agent_graph(self, graph_id: str, values: dict[str, Any]) -> AgentGraphRecord:
@@ -611,7 +696,7 @@ class Repository:
             if record.name not in {"supervisor", "reviewer"}:
                 worker_ids.append(record.id)
         if await self.get_default_agent_graph() is None:
-            by_name = {role.name: role for role in await self.list_agent_roles(enabled_only=True)}
+            by_name = {role.name: role for role in await self.list_agent_roles(enabled_only=True, limit=1000)}
             edges: list[dict[str, str]] = []
             supervisor = by_name.get("supervisor")
             reviewer = by_name.get("reviewer")
@@ -647,7 +732,7 @@ class Repository:
         )
 
     async def _clear_default_graphs(self) -> None:
-        for graph in await self.list_agent_graphs():
+        for graph in await self.list_agent_graphs(limit=1000):
             graph.is_default = False
 
     async def _validate_graph_refs(

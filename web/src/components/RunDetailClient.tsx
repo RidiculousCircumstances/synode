@@ -37,6 +37,7 @@ import {
   listArtifacts,
   listRunApprovals,
   listToolAudit,
+  stopRun,
 } from "@/lib/api";
 import {
   asPercent,
@@ -66,6 +67,7 @@ const RUN_TABS: Array<{
   { id: "approvals", label: "Approvals", description: "gates", icon: ShieldCheck },
   { id: "metrics", label: "Metrics", description: "usage", icon: Activity },
 ];
+const RUN_ACTIVE_STATUSES = new Set(["created", "running", "waiting_approval"]);
 
 export default function RunDetailClient({ runId }: { runId: string }) {
   const router = useRouter();
@@ -119,6 +121,14 @@ export default function RunDetailClient({ runId }: { runId: string }) {
   const approvals = approvalsQuery.data ?? [];
   const metrics = metricsQuery.data ?? null;
   const system = systemMetricsQuery.data ?? null;
+  const stopMutation = useMutation({
+    mutationFn: () => stopRun(runId),
+    onSuccess: () => {
+      void runQuery.refetch();
+      void metricsQuery.refetch();
+      void approvalsQuery.refetch();
+    },
+  });
 
   const tabItems = RUN_TABS.map((tab) => ({
     ...tab,
@@ -151,8 +161,16 @@ export default function RunDetailClient({ runId }: { runId: string }) {
         title={run.task}
         description={run.workspace ?? "No workspace configured"}
         icon={TerminalSquare}
-        summary={<RunSummary run={run} metrics={metrics} />}
+        summary={
+          <RunSummary
+            run={run}
+            metrics={metrics}
+            onStop={RUN_ACTIVE_STATUSES.has(run.status) ? () => stopMutation.mutate() : undefined}
+            stopping={stopMutation.isPending}
+          />
+        }
       />
+      {stopMutation.error ? <div className="error-line">{stopMutation.error.message}</div> : null}
       <PageTabs active={activeTab} items={tabItems} onChange={setTab} ariaLabel="Run detail tabs" />
       {activeTab === "overview" ? (
         <OverviewTab run={run} events={events} artifacts={artifacts} approvals={approvals} metrics={metrics} />
@@ -171,7 +189,17 @@ export default function RunDetailClient({ runId }: { runId: string }) {
   );
 }
 
-function RunSummary({ run, metrics }: { run: Run; metrics: RunMetrics | null }) {
+function RunSummary({
+  run,
+  metrics,
+  onStop,
+  stopping,
+}: {
+  run: Run;
+  metrics: RunMetrics | null;
+  onStop?: () => void;
+  stopping?: boolean;
+}) {
   return (
     <div className="summary-grid">
       <MetricTile label="Status" value={<StatusBadge value={run.status} />} />
@@ -179,7 +207,19 @@ function RunSummary({ run, metrics }: { run: Run; metrics: RunMetrics | null }) 
       <MetricTile label="Provider" value={run.model_provider} />
       <MetricTile label="Events" value={metrics?.event_count ?? 0} />
       <MetricTile label="Tokens" value={metrics?.token_usage.total_tokens ?? "n/a"} />
-      <MetricTile label="Updated" value={formatDateTime(run.updated_at)} />
+      <MetricTile
+        label={onStop ? "Control" : "Updated"}
+        value={
+          onStop ? (
+            <button className="secondary-button danger-button compact-control" type="button" onClick={onStop} disabled={stopping}>
+              <X size={14} aria-hidden />
+              {stopping ? "Stopping" : "Stop"}
+            </button>
+          ) : (
+            formatDateTime(run.updated_at)
+          )
+        }
+      />
     </div>
   );
 }

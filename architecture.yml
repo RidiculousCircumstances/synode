@@ -9,7 +9,7 @@ components:
       - Model provider abstraction, DB-backed model profiles, Ollama provider, and OpenAI-compatible provider
       - Tool policy, native tools, and MCP bridge
       - Persistence, conversational threads, agent graphs, encrypted secrets, audit log, and approval state
-      - Structured run read models, SSE event stream, and metrics endpoints
+      - Structured run read models, SSE event stream, run cancellation, and metrics endpoints
       - Optional Langfuse trace emission
   - name: web
     path: web
@@ -63,6 +63,8 @@ rules:
   - DB secrets must be encrypted with `SYNODE_SECRETS_KEY`; missing keys are explicit errors.
   - Runtime decisions must use structured model output or fail explicitly.
   - Coding workflow mutations must pass patch proposal, approval, patch apply, verification, and review.
+  - Rejected approvals and explicit stops must move runs to terminal cancelled state and unblock the thread.
+  - API lists that can grow must accept pagination and apply limit/offset in persistence queries.
   - Langfuse must remain optional and fail startup when enabled without required credentials.
 
 entrypoints:
@@ -106,6 +108,8 @@ critical_flows:
     description: Run creation resolves a DB agent graph, model profile bindings, and role records into an immutable run snapshot before LangGraph execution.
   - name: approval
     description: Risky tool requests pause through approval state before execution can resume.
+  - name: run-cancellation
+    description: Operator stop or approval rejection cancels the run, records a cancellation event, rejects pending approvals, and allows a new run in the same thread.
   - name: mcp-tool-call
     description: MCP discovery and calls are normalized into governed tool invocations.
   - name: operator-ui

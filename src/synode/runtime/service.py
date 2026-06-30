@@ -4,7 +4,7 @@ import asyncio
 import os
 import shutil
 import time
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from typing import Any, AsyncIterator
 
 from langgraph.checkpoint.memory import MemorySaver
@@ -70,6 +70,13 @@ ACTIVE_RUN_STATUSES = {
     RunStatus.WAITING_APPROVAL.value,
 }
 
+TERMINAL_RUN_STATUSES = {
+    RunStatus.COMPLETED.value,
+    RunStatus.FAILED.value,
+    RunStatus.FAILED_VERIFICATION.value,
+    RunStatus.CANCELLED.value,
+}
+
 
 class OrchestrationService:
     def __init__(
@@ -89,6 +96,34 @@ class OrchestrationService:
         self.observability = observability or Observability(settings)
         self.secret_cipher = SecretCipher(settings) if settings.secrets_key else None
         self.tool_executor = ToolExecutor(database, roles, tools, settings, self.observability)
+        self._run_tasks: dict[str, asyncio.Task[None]] = {}
+        self._stop_reasons: dict[str, str] = {}
+
+    async def start_run(self, run_id: str) -> None:
+        async with self.database.session() as session:
+            repo = Repository(session)
+            run = await repo.get_run(run_id)
+            if run is None:
+                raise LookupError(f"run not found: {run_id}")
+            if run.status in TERMINAL_RUN_STATUSES:
+                raise ValueError(f"run is terminal: {run_id}")
+        task = self._run_tasks.get(run_id)
+        if task is not None and not task.done():
+            raise ValueError(f"run already has an active executor task: {run_id}")
+        self._run_tasks[run_id] = asyncio.create_task(self._execute_run_background(run_id))
+
+    async def _execute_run_background(self, run_id: str) -> None:
+        try:
+            await self.execute_run(run_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # execute_run records failure state and thread-visible error messages.
+            pass
+        finally:
+            task = self._run_tasks.get(run_id)
+            if task is asyncio.current_task():
+                self._run_tasks.pop(run_id, None)
 
     async def create_run(
         self,
@@ -182,10 +217,24 @@ class OrchestrationService:
                 )
             return responses
 
-    async def get_thread(self, thread_id: str) -> ThreadDetailResponse:
+    async def get_thread(
+        self,
+        thread_id: str,
+        runs_limit: int = 50,
+        runs_offset: int = 0,
+        messages_limit: int = 200,
+        messages_offset: int = 0,
+    ) -> ThreadDetailResponse:
         async with self.database.session() as session:
             repo = Repository(session)
-            return await self._thread_detail(repo, thread_id)
+            return await self._thread_detail(
+                repo,
+                thread_id,
+                runs_limit=runs_limit,
+                runs_offset=runs_offset,
+                messages_limit=messages_limit,
+                messages_offset=messages_offset,
+            )
 
     async def update_thread_title(self, thread_id: str, title: str) -> ThreadResponse:
         async with self.database.session() as session:
@@ -251,12 +300,20 @@ class OrchestrationService:
             )
             return to_run_response(run)
 
-    async def list_thread_messages(self, thread_id: str) -> list[ThreadMessageResponse]:
+    async def list_thread_messages(
+        self,
+        thread_id: str,
+        limit: int = 200,
+        offset: int = 0,
+    ) -> list[ThreadMessageResponse]:
         async with self.database.session() as session:
             repo = Repository(session)
             if await repo.get_thread(thread_id) is None:
                 raise LookupError(f"thread not found: {thread_id}")
-            return [to_thread_message_response(message) for message in await repo.list_thread_messages(thread_id)]
+            return [
+                to_thread_message_response(message)
+                for message in await repo.list_thread_messages(thread_id, limit=limit, offset=offset)
+            ]
 
     async def list_runs(
         self,
@@ -278,10 +335,10 @@ class OrchestrationService:
                 raise LookupError(f"run not found: {run_id}")
             return to_run_response(run)
 
-    async def list_events(self, run_id: str, after_id: int = 0) -> list[dict[str, Any]]:
+    async def list_events(self, run_id: str, after_id: int = 0, limit: int = 200) -> list[dict[str, Any]]:
         async with self.database.session() as session:
             repo = Repository(session)
-            events = await repo.list_events(run_id, after_id=after_id)
+            events = await repo.list_events(run_id, after_id=after_id, limit=limit)
             return [
                 {
                     "id": event.id,
@@ -294,10 +351,15 @@ class OrchestrationService:
                 for event in events
             ]
 
-    async def list_event_responses(self, run_id: str, after_id: int = 0) -> list[RunEventResponse]:
+    async def list_event_responses(
+        self,
+        run_id: str,
+        after_id: int = 0,
+        limit: int = 200,
+    ) -> list[RunEventResponse]:
         async with self.database.session() as session:
             repo = Repository(session)
-            events = await repo.list_events(run_id, after_id=after_id)
+            events = await repo.list_events(run_id, after_id=after_id, limit=limit)
             return [
                 RunEventResponse(
                     id=event.id,
@@ -310,10 +372,10 @@ class OrchestrationService:
                 for event in events
             ]
 
-    async def list_artifacts(self, run_id: str) -> list[ArtifactResponse]:
+    async def list_artifacts(self, run_id: str, limit: int = 100, offset: int = 0) -> list[ArtifactResponse]:
         async with self.database.session() as session:
             repo = Repository(session)
-            artifacts = await repo.list_artifacts(run_id)
+            artifacts = await repo.list_artifacts(run_id, limit=limit, offset=offset)
             return [
                 ArtifactResponse(
                     id=artifact.id,
@@ -326,10 +388,10 @@ class OrchestrationService:
                 for artifact in artifacts
             ]
 
-    async def list_tool_audit(self, run_id: str) -> list[ToolAuditResponse]:
+    async def list_tool_audit(self, run_id: str, limit: int = 200, offset: int = 0) -> list[ToolAuditResponse]:
         async with self.database.session() as session:
             repo = Repository(session)
-            audit = await repo.list_tool_audit(run_id)
+            audit = await repo.list_tool_audit(run_id, limit=limit, offset=offset)
             return [
                 ToolAuditResponse(
                     id=record.id,
@@ -347,11 +409,15 @@ class OrchestrationService:
             ]
 
     async def list_approvals(
-        self, run_id: str | None = None, status: ApprovalStatus | None = None
+        self,
+        run_id: str | None = None,
+        status: ApprovalStatus | None = None,
+        limit: int = 50,
+        offset: int = 0,
     ) -> list[ApprovalResponse]:
         async with self.database.session() as session:
             repo = Repository(session)
-            approvals = await repo.list_approvals(run_id=run_id, status=status)
+            approvals = await repo.list_approvals(run_id=run_id, status=status, limit=limit, offset=offset)
             return [
                 ApprovalResponse(
                     id=approval.id,
@@ -396,6 +462,8 @@ class OrchestrationService:
             run = await repo.get_run(run_id)
             if run is None:
                 raise LookupError(f"run not found: {run_id}")
+            if run.status in TERMINAL_RUN_STATUSES:
+                return
             await repo.set_run_status(run_id, RunStatus.RUNNING)
             await repo.add_event(run_id, EventType.RUN_STARTED.value, None, {})
             task = run.task
@@ -483,10 +551,15 @@ class OrchestrationService:
                         run_id=run_id,
                         metadata={"status": RunStatus.COMPLETED.value},
                     )
+        except asyncio.CancelledError:
+            await self._mark_run_cancelled(run_id, self._stop_reasons.pop(run_id, "Run stopped by user."))
+            raise
         except Exception as exc:
             async with self.database.session() as session:
                 repo = Repository(session)
                 run = await repo.get_run(run_id)
+                if run is not None and run.status == RunStatus.CANCELLED.value:
+                    return
                 await repo.set_run_status(run_id, RunStatus.FAILED, error=str(exc))
                 await repo.add_event(run_id, EventType.RUN_FAILED.value, None, {"error": str(exc)})
                 if run is not None:
@@ -532,15 +605,62 @@ class OrchestrationService:
                     run_id=run.id,
                     metadata={"approval_id": approval.id, "status": ApprovalStatus.REJECTED.value},
                 )
+        await self._mark_run_cancelled(approval.run_id, f"Approval rejected for {approval.tool_name}.")
 
     async def resume_run(self, run_id: str) -> None:
+        async with self.database.session() as session:
+            repo = Repository(session)
+            run = await repo.get_run(run_id)
+            if run is None:
+                raise LookupError(f"run not found: {run_id}")
+            if run.status in TERMINAL_RUN_STATUSES:
+                raise ValueError(f"run is terminal: {run_id}")
         await self.execute_run(run_id)
 
-    async def model_health(self) -> list[dict[str, object]]:
+    async def stop_run(self, run_id: str, reason: str | None = None) -> RunResponse:
+        async with self.database.session() as session:
+            repo = Repository(session)
+            run = await repo.get_run(run_id)
+            if run is None:
+                raise LookupError(f"run not found: {run_id}")
+            if run.status in TERMINAL_RUN_STATUSES:
+                return to_run_response(run)
+        task = self._run_tasks.get(run_id)
+        if task is not None and not task.done():
+            self._stop_reasons[run_id] = reason or "Run stopped by user."
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+        else:
+            await self._mark_run_cancelled(run_id, reason or "Run stopped by user.")
+        return await self.get_run(run_id)
+
+    async def _mark_run_cancelled(self, run_id: str, reason: str) -> None:
+        async with self.database.session() as session:
+            repo = Repository(session)
+            run = await repo.get_run(run_id)
+            if run is None:
+                raise LookupError(f"run not found: {run_id}")
+            if run.status in TERMINAL_RUN_STATUSES:
+                return
+            await repo.reject_pending_approvals(run_id, reason)
+            await repo.set_run_status(run_id, RunStatus.CANCELLED, final_answer=reason, error=reason)
+            await repo.add_event(run_id, EventType.RUN_CANCELLED.value, None, {"reason": reason})
+            await repo.add_thread_message(
+                run.thread_id,
+                author_type=ThreadMessageAuthorType.SYSTEM,
+                author_name="runtime",
+                message_type=ThreadMessageType.RUN_SUMMARY,
+                content=f"Run cancelled: {reason}",
+                run_id=run_id,
+                metadata={"status": RunStatus.CANCELLED.value},
+            )
+
+    async def model_health(self, limit: int = 50, offset: int = 0) -> list[dict[str, object]]:
         async with self.database.session() as session:
             repo = Repository(session)
             await self._ensure_default_configuration(repo)
-            profiles = await repo.list_model_profiles()
+            profiles = await repo.list_model_profiles(limit=limit, offset=offset)
             results: list[dict[str, object]] = []
             for profile in profiles:
                 item = {
@@ -565,10 +685,10 @@ class OrchestrationService:
                 results.append(item)
             return results
 
-    async def list_secrets(self) -> list[SecretResponse]:
+    async def list_secrets(self, limit: int = 50, offset: int = 0) -> list[SecretResponse]:
         async with self.database.session() as session:
             repo = Repository(session)
-            return [to_secret_response(secret) for secret in await repo.list_secrets()]
+            return [to_secret_response(secret) for secret in await repo.list_secrets(limit=limit, offset=offset)]
 
     async def create_secret(self, payload: SecretCreateRequest) -> SecretResponse:
         async with self.database.session() as session:
@@ -582,11 +702,14 @@ class OrchestrationService:
             secret = await repo.update_secret(secret_id, self._cipher().encrypt(payload.value))
             return to_secret_response(secret)
 
-    async def list_model_profiles(self) -> list[ModelProfileResponse]:
+    async def list_model_profiles(self, limit: int = 50, offset: int = 0) -> list[ModelProfileResponse]:
         async with self.database.session() as session:
             repo = Repository(session)
             await self._ensure_default_configuration(repo)
-            return [to_model_profile_response(profile) for profile in await repo.list_model_profiles()]
+            return [
+                to_model_profile_response(profile)
+                for profile in await repo.list_model_profiles(limit=limit, offset=offset)
+            ]
 
     async def create_model_profile(self, payload: ModelProfileCreateRequest) -> ModelProfileResponse:
         async with self.database.session() as session:
@@ -615,11 +738,11 @@ class OrchestrationService:
             )
             return to_model_profile_response(profile)
 
-    async def list_agent_roles(self) -> list[AgentRoleResponse]:
+    async def list_agent_roles(self, limit: int = 100, offset: int = 0) -> list[AgentRoleResponse]:
         async with self.database.session() as session:
             repo = Repository(session)
             await self._ensure_default_configuration(repo)
-            return [to_agent_role_response(role) for role in await repo.list_agent_roles()]
+            return [to_agent_role_response(role) for role in await repo.list_agent_roles(limit=limit, offset=offset)]
 
     async def create_agent_role(self, payload: AgentRoleCreateRequest) -> AgentRoleResponse:
         async with self.database.session() as session:
@@ -642,11 +765,11 @@ class OrchestrationService:
             role = await repo.update_agent_role(role_id, payload.model_dump(exclude_unset=True))
             return to_agent_role_response(role)
 
-    async def list_agent_graphs(self) -> list[AgentGraphResponse]:
+    async def list_agent_graphs(self, limit: int = 50, offset: int = 0) -> list[AgentGraphResponse]:
         async with self.database.session() as session:
             repo = Repository(session)
             await self._ensure_default_configuration(repo)
-            return [to_agent_graph_response(graph) for graph in await repo.list_agent_graphs()]
+            return [to_agent_graph_response(graph) for graph in await repo.list_agent_graphs(limit=limit, offset=offset)]
 
     async def create_agent_graph(self, payload: AgentGraphCreateRequest) -> AgentGraphResponse:
         async with self.database.session() as session:
@@ -681,11 +804,13 @@ class OrchestrationService:
             run = await repo.get_run(run_id)
             if run is None:
                 raise LookupError(f"run not found: {run_id}")
-            events = await repo.list_events(run_id)
-            audit = await repo.list_tool_audit(run_id)
-            approvals = await repo.list_approvals(run_id=run_id)
+            event_count = await repo.count_events(run_id)
+            model_events = await repo.model_invocation_events(run_id)
+            tool_call_count = await repo.count_tool_audit(run_id)
+            failed_tool_call_count = await repo.count_tool_audit(run_id, statuses={"denied", "error"})
+            approval_count = await repo.count_approvals(run_id)
+            pending_approval_count = await repo.count_approvals(run_id, status=ApprovalStatus.PENDING)
 
-        model_events = [event for event in events if event.event_type == EventType.MODEL_INVOKED.value]
         token_usage = _sum_token_usage(event.payload.get("usage", {}) for event in model_events)
         provider_usage: dict[str, TokenUsage] = {}
         latency_ms_by_role: dict[str, float] = {}
@@ -705,14 +830,12 @@ class OrchestrationService:
             run_id=run_id,
             status=RunStatus(run.status),
             duration_ms=duration_ms,
-            event_count=len(events),
+            event_count=event_count,
             model_call_count=len(model_events),
-            tool_call_count=len(audit),
-            approval_count=len(approvals),
-            pending_approval_count=len(
-                [approval for approval in approvals if approval.status == ApprovalStatus.PENDING.value]
-            ),
-            failed_tool_call_count=len([record for record in audit if record.status in {"denied", "error"}]),
+            tool_call_count=tool_call_count,
+            approval_count=approval_count,
+            pending_approval_count=pending_approval_count,
+            failed_tool_call_count=failed_tool_call_count,
             token_usage=token_usage,
             provider_usage=provider_usage,
             latency_ms_by_role=latency_ms_by_role,
@@ -946,15 +1069,30 @@ class OrchestrationService:
             yield MemorySaver()
 
     async def close(self) -> None:
+        for task in list(self._run_tasks.values()):
+            if not task.done():
+                task.cancel()
+        for task in list(self._run_tasks.values()):
+            with suppress(asyncio.CancelledError):
+                await task
+        self._run_tasks.clear()
         await self.database.close()
         self.observability.shutdown()
 
-    async def _thread_detail(self, repo: Repository, thread_id: str) -> ThreadDetailResponse:
+    async def _thread_detail(
+        self,
+        repo: Repository,
+        thread_id: str,
+        runs_limit: int = 50,
+        runs_offset: int = 0,
+        messages_limit: int = 200,
+        messages_offset: int = 0,
+    ) -> ThreadDetailResponse:
         thread = await repo.get_thread(thread_id)
         if thread is None:
             raise LookupError(f"thread not found: {thread_id}")
-        runs = await repo.list_thread_runs(thread_id)
-        messages = await repo.list_thread_messages(thread_id)
+        runs = await repo.list_thread_runs(thread_id, limit=runs_limit, offset=runs_offset)
+        messages = await repo.list_thread_messages(thread_id, limit=messages_limit, offset=messages_offset)
         latest_run = runs[0] if runs else None
         latest_message = messages[-1] if messages else None
         return ThreadDetailResponse(

@@ -31,6 +31,9 @@ summary.
 - Treat `thread` as the user-facing work unit and `run` as an immutable
   execution attempt inside a thread. New user follow-ups create new runs in the
   same thread; completed runs are not edited in place.
+- Explicit run stops and rejected approvals must transition the affected run to
+  terminal `cancelled`, record observable state, and leave the thread able to
+  accept a new follow-up run.
 - Model profiles, agent roles, and agent graphs are DB-backed runtime
   configuration. Builtin role YAML files are seed data, not the live runtime
   source after startup.
@@ -43,6 +46,8 @@ summary.
 - New mutable state must have one owner, one source of truth, and observable
   failure behavior.
 - State that can grow must have a retention or cleanup story.
+- List APIs over growing state must expose pagination, and persistence queries
+  must apply `limit`/`offset` at the database layer.
 
 ## Tool And MCP Rules
 

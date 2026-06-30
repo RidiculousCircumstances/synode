@@ -18,6 +18,7 @@ class RunStatus(StrEnum):
     COMPLETED = "completed"
     FAILED = "failed"
     FAILED_VERIFICATION = "failed_verification"
+    CANCELLED = "cancelled"
 
 
 class RunMode(StrEnum):
@@ -78,6 +79,7 @@ class EventType(StrEnum):
     VERIFICATION_COMPLETED = "verification_completed"
     RUN_COMPLETED = "run_completed"
     RUN_FAILED = "run_failed"
+    RUN_CANCELLED = "run_cancelled"
 
 
 class RoleName(StrEnum):
@@ -370,6 +372,10 @@ class ThreadDetailResponse(BaseModel):
 
 
 class ApprovalDecision(BaseModel):
+    reason: str | None = None
+
+
+class RunStopRequest(BaseModel):
     reason: str | None = None
 
 

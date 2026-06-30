@@ -4,7 +4,8 @@ export type RunStatus =
   | "waiting_approval"
   | "completed"
   | "failed"
-  | "failed_verification";
+  | "failed_verification"
+  | "cancelled";
 
 export type RunMode = "general" | "coding";
 
