@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from typing import Any, Protocol
 
 import httpx
@@ -45,6 +46,10 @@ class ModelResponse(BaseModel):
     structured: dict[str, Any] = Field(default_factory=dict)
     provider: str
     model: str | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    total_tokens: int | None = None
+    latency_ms: float | None = None
 
 
 class ModelHealth(BaseModel):
@@ -75,6 +80,10 @@ class FakeModelProvider:
                 structured=structured,
                 provider=self.name,
                 model="fake",
+                input_tokens=0,
+                output_tokens=0,
+                total_tokens=0,
+                latency_ms=0.0,
             )
         summary = request.prompt.strip().splitlines()[0][:160] if request.prompt.strip() else "No prompt"
         return ModelResponse(
@@ -82,6 +91,10 @@ class FakeModelProvider:
             structured={"provider": self.name, "role": request.role, "tools": request.tools},
             provider=self.name,
             model="fake",
+            input_tokens=0,
+            output_tokens=0,
+            total_tokens=0,
+            latency_ms=0.0,
         )
 
     async def health(self) -> ModelHealth:
@@ -186,6 +199,7 @@ class OllamaProvider:
                 },
             ]
         timeout = request.timeout_seconds or self.timeout_seconds
+        started = time.perf_counter()
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
                 response = await client.post(f"{self.base_url}/api/chat", json=payload)
@@ -202,7 +216,19 @@ class OllamaProvider:
         structured: dict[str, Any] = {}
         if request.response_schema is not None:
             structured = self._validate_structured(request.response_schema, content)
-        return ModelResponse(content=content, structured=structured, provider=self.name, model=self.model)
+        input_tokens = _optional_int(body.get("prompt_eval_count"))
+        output_tokens = _optional_int(body.get("eval_count"))
+        total_tokens = input_tokens + output_tokens if input_tokens is not None and output_tokens is not None else None
+        return ModelResponse(
+            content=content,
+            structured=structured,
+            provider=self.name,
+            model=self.model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            total_tokens=total_tokens,
+            latency_ms=(time.perf_counter() - started) * 1000,
+        )
 
     async def health(self) -> ModelHealth:
         try:
@@ -270,3 +296,11 @@ class ModelProviderRegistry:
 
     async def health(self) -> list[ModelHealth]:
         return [await provider.health() for provider in self._providers.values()]
+
+
+def _optional_int(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    return None

@@ -22,10 +22,20 @@ class Repository:
         self.session = session
 
     async def create_run(
-        self, task: str, model_provider: str, workspace: str | None = None, mode: RunMode = RunMode.GENERAL
+        self,
+        task: str,
+        model_provider: str,
+        workspace: str | None = None,
+        mode: RunMode = RunMode.GENERAL,
+        observability_trace_id: str | None = None,
     ) -> RunRecord:
         run = RunRecord(
-            id=new_id(), task=task, model_provider=model_provider, workspace=workspace, mode=mode.value
+            id=new_id(),
+            task=task,
+            model_provider=model_provider,
+            workspace=workspace,
+            mode=mode.value,
+            observability_trace_id=observability_trace_id,
         )
         self.session.add(run)
         await self.session.flush()
@@ -34,6 +44,21 @@ class Repository:
 
     async def get_run(self, run_id: str) -> RunRecord | None:
         return await self.session.get(RunRecord, run_id)
+
+    async def list_runs(
+        self,
+        status: RunStatus | None = None,
+        mode: RunMode | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[RunRecord]:
+        query = select(RunRecord).order_by(RunRecord.created_at.desc(), RunRecord.id.desc())
+        if status is not None:
+            query = query.where(RunRecord.status == status.value)
+        if mode is not None:
+            query = query.where(RunRecord.mode == mode.value)
+        result = await self.session.execute(query.limit(limit).offset(offset))
+        return list(result.scalars().all())
 
     async def list_events(self, run_id: str, after_id: int = 0) -> list[RunEventRecord]:
         result = await self.session.execute(
@@ -93,8 +118,29 @@ class Repository:
         approval.status = status.value
         approval.decision_reason = decision_reason
         approval.decided_at = datetime.now(UTC)
+        await self.add_event(
+            approval.run_id,
+            EventType.APPROVAL_DECIDED.value,
+            None,
+            {
+                "approval_id": approval.id,
+                "status": status.value,
+                "decision_reason": decision_reason,
+            },
+        )
         await self.session.flush()
         return approval
+
+    async def list_approvals(
+        self, run_id: str | None = None, status: ApprovalStatus | None = None
+    ) -> list[ApprovalRecord]:
+        query = select(ApprovalRecord).order_by(ApprovalRecord.created_at.desc())
+        if run_id is not None:
+            query = query.where(ApprovalRecord.run_id == run_id)
+        if status is not None:
+            query = query.where(ApprovalRecord.status == status.value)
+        result = await self.session.execute(query)
+        return list(result.scalars().all())
 
     async def add_tool_audit(
         self,
@@ -132,6 +178,12 @@ class Repository:
     ) -> ArtifactRecord:
         artifact = ArtifactRecord(id=new_id(), run_id=run_id, kind=kind, path=path, content=content)
         self.session.add(artifact)
+        await self.add_event(
+            run_id,
+            EventType.ARTIFACT_CREATED.value,
+            None,
+            {"artifact_id": artifact.id, "kind": kind, "path": path},
+        )
         await self.session.flush()
         return artifact
 
@@ -144,6 +196,22 @@ class Repository:
         )
         return result.scalars().first()
 
+    async def list_artifacts(self, run_id: str) -> list[ArtifactRecord]:
+        result = await self.session.execute(
+            select(ArtifactRecord)
+            .where(ArtifactRecord.run_id == run_id)
+            .order_by(ArtifactRecord.created_at.desc(), ArtifactRecord.id.desc())
+        )
+        return list(result.scalars().all())
+
+    async def list_tool_audit(self, run_id: str) -> list[ToolAuditRecord]:
+        result = await self.session.execute(
+            select(ToolAuditRecord)
+            .where(ToolAuditRecord.run_id == run_id)
+            .order_by(ToolAuditRecord.id)
+        )
+        return list(result.scalars().all())
+
 
 def to_run_response(run: RunRecord) -> RunResponse:
     return RunResponse(
@@ -153,6 +221,7 @@ def to_run_response(run: RunRecord) -> RunResponse:
         task=run.task,
         workspace=run.workspace,
         model_provider=run.model_provider,
+        observability_trace_id=run.observability_trace_id,
         final_answer=run.final_answer,
         created_at=run.created_at,
         updated_at=run.updated_at,

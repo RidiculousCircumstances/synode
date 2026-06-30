@@ -8,7 +8,8 @@ Use risk-based verification.
 - `docs`: `git diff --check`.
 - `small-code`: focused tests plus `make lint`.
 - `critical-code`: focused tests, `make test`, `make lint`,
-  `make typecheck`, and `make guardrails`.
+  `make typecheck`, `make guardrails`, `make ui-lint`, `make ui-build`, and
+  `make ui-test` when UI code changes.
 
 ## Local Commands
 
@@ -17,6 +18,9 @@ make test
 make lint
 make typecheck
 make guardrails
+make ui-lint
+make ui-build
+make ui-test
 make smoke
 make docker-smoke
 ```
@@ -31,3 +35,22 @@ explicit `--model-provider ollama` run.
 - Ollama is running outside Docker and reachable from the API container through
   host networking at `http://127.0.0.1:11434`.
 - `qwen2.5-coder:7b` is installed in Ollama.
+
+Docker config checks:
+
+```bash
+docker compose config
+docker compose --env-file .env.observability.example \
+  -f docker-compose.yaml \
+  -f docker-compose.observability.yaml \
+  --profile observability \
+  config
+```
+
+UI checks:
+
+- `make ui-lint` validates TypeScript/React lint rules.
+- `make ui-build` validates the production Next.js standalone build.
+- `make ui-test` runs Playwright desktop and mobile layout smoke for chat,
+  runs, run detail tabs, agent graph, timeline, artifacts, diff/tests,
+  observability, settings, and browser API auto-resolution.

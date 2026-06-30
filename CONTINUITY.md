@@ -10,8 +10,8 @@
 - Default tool mode is read-only; mutating actions require approval.
 - Postgres is the default state store.
 - SearxNG is the default local web-search backend.
-- No Web UI, production auth, distributed queue, vector DB, deploy automation,
-  or database writes in MVP.
+- Web UI is local-only and unauthenticated. Production auth, distributed queue,
+  vector DB, deploy automation, and database writes are not in MVP.
 
 ## Key decisions:
 - Use Python with `uv`.
@@ -24,6 +24,9 @@
   states.
 - Real-provider target is Ollama with `qwen2.5-coder:7b`; fake provider is
   explicit test/diagnostic only.
+- Realtime UI transport is SSE first. WebSocket is deferred.
+- Langfuse self-hosting is optional and enabled through an explicit Compose
+  overlay plus `.env.observability`.
 
 ## State:
 ### Done:
@@ -58,15 +61,31 @@
   API host networking at `127.0.0.1:11434`.
 - Docker Compose deployment was validated with `docker compose up -d --build`
   and `make docker-smoke`.
+- Structured API read models are implemented for runs, events, artifacts,
+  approvals, tool audit, run metrics, and system metrics.
+- SSE now emits event ids, event names, JSON data envelopes, and heartbeats.
+- Next.js operator UI is implemented in `web/` with chat/run launcher, runs
+  list, run detail tabs, approvals, full-size artifacts, coding diff/tests,
+  timeline, graph, observability, and settings screens.
+- UI Docker image and Compose `ui` service are implemented. UI is served on
+  `http://127.0.0.1:3000` by default.
+- UI runtime config defaults to `apiBaseUrl=auto`: browser clients resolve API
+  as `http(s)://<current-ui-host>:8787`, so LAN access does not call client-side
+  `127.0.0.1`.
+- Optional Langfuse tracing is implemented through `synode.observability` and
+  instruments runs, graph nodes, model calls, and tool calls.
+- `docker-compose.observability.yaml` adds Langfuse web/worker plus separate
+  Postgres, ClickHouse, Redis, and MinIO services.
 
 ### Now:
-- MVP implementation is ready for local use.
+- MVP backend and operator UI implementation are ready for local verification.
 - Ollama runs as a system service and serves `qwen2.5-coder:7b` on
   `127.0.0.1:11434`.
 
 ### Next:
 - Tune real-model prompts against broader local workloads.
-- Add a Web UI only if needed later.
+- Add production auth before exposing UI/API outside localhost.
+- Add Prometheus/Grafana metrics if host-level dashboards are required.
 
 ## Open questions:
 - None.
@@ -74,3 +93,7 @@
 ## Working set (files/ids/commands):
 - `/home/rd/proj/synode`
 - Compose Postgres and SearxNG services were started for verification.
+- Frontend commands: `make ui-lint`, `make ui-build`, `make ui-test`,
+  `make ui-dev`.
+- Observability commands: copy `.env.observability.example` to
+  `.env.observability`, then `make docker-observability-up`.

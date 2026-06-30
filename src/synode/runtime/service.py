@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import os
+import shutil
+import time
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator
 
@@ -8,11 +11,28 @@ from langgraph.checkpoint.memory import MemorySaver
 
 from synode.config import Settings
 from synode.models.provider import ModelProviderRegistry
+from synode.observability import Observability
 from synode.persistence.database import Database
 from synode.persistence.repository import Repository, to_run_response
 from synode.registry import RoleRegistry
 from synode.runtime.graph import GraphDependencies, build_graph
-from synode.schemas import ApprovalStatus, EventType, RunMode, RunResponse, RunStatus
+from synode.schemas import (
+    ApprovalResponse,
+    ApprovalStatus,
+    ArtifactResponse,
+    EventType,
+    GpuMetrics,
+    ProcessMetrics,
+    RunEventResponse,
+    RunMetricsResponse,
+    RunMode,
+    RunResponse,
+    RunStatus,
+    SystemMetricsResponse,
+    TokenUsage,
+    ToolAuditResponse,
+    ToolRisk,
+)
 from synode.tools import ToolExecutor, ToolRegistry, build_tool_registry
 
 
@@ -24,13 +44,15 @@ class OrchestrationService:
         roles: RoleRegistry,
         models: ModelProviderRegistry,
         tools: ToolRegistry,
+        observability: Observability | None = None,
     ):
         self.settings = settings
         self.database = database
         self.roles = roles
         self.models = models
         self.tools = tools
-        self.tool_executor = ToolExecutor(database, roles, tools, settings)
+        self.observability = observability or Observability(settings)
+        self.tool_executor = ToolExecutor(database, roles, tools, settings, self.observability)
 
     async def create_run(
         self,
@@ -40,10 +62,29 @@ class OrchestrationService:
         mode: RunMode = RunMode.GENERAL,
     ) -> RunResponse:
         provider = model_provider or self.settings.model_provider
+        trace_id = self.observability.create_trace_id()
         async with self.database.session() as session:
             repo = Repository(session)
-            run = await repo.create_run(task=task, workspace=workspace, model_provider=provider, mode=mode)
+            run = await repo.create_run(
+                task=task,
+                workspace=workspace,
+                model_provider=provider,
+                mode=mode,
+                observability_trace_id=trace_id,
+            )
             return to_run_response(run)
+
+    async def list_runs(
+        self,
+        status: RunStatus | None = None,
+        mode: RunMode | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[RunResponse]:
+        async with self.database.session() as session:
+            repo = Repository(session)
+            runs = await repo.list_runs(status=status, mode=mode, limit=limit, offset=offset)
+            return [to_run_response(run) for run in runs]
 
     async def get_run(self, run_id: str) -> RunResponse:
         async with self.database.session() as session:
@@ -69,6 +110,80 @@ class OrchestrationService:
                 for event in events
             ]
 
+    async def list_event_responses(self, run_id: str, after_id: int = 0) -> list[RunEventResponse]:
+        async with self.database.session() as session:
+            repo = Repository(session)
+            events = await repo.list_events(run_id, after_id=after_id)
+            return [
+                RunEventResponse(
+                    id=event.id,
+                    run_id=event.run_id,
+                    event_type=event.event_type,
+                    role=event.role,
+                    payload=event.payload,
+                    created_at=event.created_at,
+                )
+                for event in events
+            ]
+
+    async def list_artifacts(self, run_id: str) -> list[ArtifactResponse]:
+        async with self.database.session() as session:
+            repo = Repository(session)
+            artifacts = await repo.list_artifacts(run_id)
+            return [
+                ArtifactResponse(
+                    id=artifact.id,
+                    run_id=artifact.run_id,
+                    kind=artifact.kind,
+                    path=artifact.path,
+                    content=artifact.content,
+                    created_at=artifact.created_at,
+                )
+                for artifact in artifacts
+            ]
+
+    async def list_tool_audit(self, run_id: str) -> list[ToolAuditResponse]:
+        async with self.database.session() as session:
+            repo = Repository(session)
+            audit = await repo.list_tool_audit(run_id)
+            return [
+                ToolAuditResponse(
+                    id=record.id,
+                    run_id=record.run_id,
+                    role=record.role,
+                    tool_name=record.tool_name,
+                    risk=ToolRisk(record.risk),
+                    status=record.status,
+                    input=record.input,
+                    output=record.output,
+                    approval_id=record.approval_id,
+                    created_at=record.created_at,
+                )
+                for record in audit
+            ]
+
+    async def list_approvals(
+        self, run_id: str | None = None, status: ApprovalStatus | None = None
+    ) -> list[ApprovalResponse]:
+        async with self.database.session() as session:
+            repo = Repository(session)
+            approvals = await repo.list_approvals(run_id=run_id, status=status)
+            return [
+                ApprovalResponse(
+                    id=approval.id,
+                    run_id=approval.run_id,
+                    tool_name=approval.tool_name,
+                    action=approval.action,
+                    reason=approval.reason,
+                    payload=approval.payload,
+                    status=ApprovalStatus(approval.status),
+                    decision_reason=approval.decision_reason,
+                    created_at=approval.created_at,
+                    decided_at=approval.decided_at,
+                )
+                for approval in approvals
+            ]
+
     async def run_task(
         self,
         task: str,
@@ -92,6 +207,7 @@ class OrchestrationService:
             workspace = run.workspace
             model_provider = run.model_provider
             mode = run.mode
+            trace_id = run.observability_trace_id
 
         try:
             state: dict[str, Any] = {
@@ -100,9 +216,18 @@ class OrchestrationService:
                 "workspace": workspace,
                 "model_provider": model_provider,
                 "mode": mode,
+                "observability_trace_id": trace_id,
                 "worker_outputs": [],
             }
-            final_state = await self._invoke_graph(run_id, state)
+            with self.observability.observation(
+                "synode.run",
+                trace_id,
+                as_type="chain",
+                input_payload={"task": task, "workspace": workspace, "mode": mode},
+                metadata={"run_id": run_id, "model_provider": model_provider},
+            ):
+                final_state = await self._invoke_graph(run_id, state)
+                self.observability.update_current_span(output={"status": "finished"})
             review = final_state.get("review", {})
             final_answer = final_state.get("final_answer", "")
             async with self.database.session() as session:
@@ -138,12 +263,73 @@ class OrchestrationService:
     async def model_health(self) -> list[dict[str, object]]:
         return [health.model_dump(mode="json") for health in await self.models.health()]
 
+    async def run_metrics(self, run_id: str) -> RunMetricsResponse:
+        async with self.database.session() as session:
+            repo = Repository(session)
+            run = await repo.get_run(run_id)
+            if run is None:
+                raise LookupError(f"run not found: {run_id}")
+            events = await repo.list_events(run_id)
+            audit = await repo.list_tool_audit(run_id)
+            approvals = await repo.list_approvals(run_id=run_id)
+
+        model_events = [event for event in events if event.event_type == EventType.MODEL_INVOKED.value]
+        token_usage = _sum_token_usage(event.payload.get("usage", {}) for event in model_events)
+        provider_usage: dict[str, TokenUsage] = {}
+        latency_ms_by_role: dict[str, float] = {}
+        for event in model_events:
+            provider = str(event.payload.get("provider") or "unknown")
+            provider_usage[provider] = _add_token_usage(
+                provider_usage.get(provider),
+                event.payload.get("usage", {}),
+            )
+            role = str(event.payload.get("role") or event.role or "unknown")
+            latency_ms = event.payload.get("latency_ms")
+            if isinstance(latency_ms, int | float):
+                latency_ms_by_role[role] = latency_ms_by_role.get(role, 0.0) + float(latency_ms)
+
+        duration_ms = (run.updated_at - run.created_at).total_seconds() * 1000 if run.updated_at else None
+        return RunMetricsResponse(
+            run_id=run_id,
+            status=RunStatus(run.status),
+            duration_ms=duration_ms,
+            event_count=len(events),
+            model_call_count=len(model_events),
+            tool_call_count=len(audit),
+            approval_count=len(approvals),
+            pending_approval_count=len(
+                [approval for approval in approvals if approval.status == ApprovalStatus.PENDING.value]
+            ),
+            failed_tool_call_count=len([record for record in audit if record.status in {"denied", "error"}]),
+            token_usage=token_usage,
+            provider_usage=provider_usage,
+            latency_ms_by_role=latency_ms_by_role,
+        )
+
+    async def system_metrics(self) -> SystemMetricsResponse:
+        try:
+            import psutil
+        except ImportError as exc:
+            raise RuntimeError("psutil is required for system metrics") from exc
+
+        process = psutil.Process(os.getpid())
+        with process.oneshot():
+            process_metrics = ProcessMetrics(
+                pid=process.pid,
+                uptime_seconds=max(0.0, time.time() - process.create_time()),
+                cpu_percent=float(process.cpu_percent(interval=None)),
+                memory_rss_bytes=int(process.memory_info().rss),
+                memory_percent=float(process.memory_percent()),
+            )
+        return SystemMetricsResponse(process=process_metrics, gpu=await _gpu_metrics())
+
     async def _invoke_graph(self, run_id: str, state: dict[str, Any]) -> dict[str, Any]:
         deps = GraphDependencies(
             database=self.database,
             roles=self.roles,
             models=self.models,
             tool_executor=self.tool_executor,
+            observability=self.observability,
         )
         async with self._checkpointer() as checkpointer:
             graph = build_graph(deps, checkpointer=checkpointer)
@@ -166,10 +352,89 @@ class OrchestrationService:
         else:
             yield MemorySaver()
 
+    async def close(self) -> None:
+        await self.database.close()
+        self.observability.shutdown()
+
 
 async def create_service(settings: Settings, include_mcp: bool = True) -> OrchestrationService:
     database = Database(settings)
     roles = RoleRegistry.load_builtin()
     models = ModelProviderRegistry(settings)
+    observability = Observability(settings)
     tools = await build_tool_registry(settings, include_mcp=include_mcp)
-    return OrchestrationService(settings, database, roles, models, tools)
+    return OrchestrationService(settings, database, roles, models, tools, observability)
+
+
+def _sum_token_usage(items: Any) -> TokenUsage:
+    total = TokenUsage(input_tokens=0, output_tokens=0, total_tokens=0)
+    saw_any = False
+    for item in items:
+        total = _add_token_usage(total, item)
+        if isinstance(item, dict) and any(
+            isinstance(item.get(key), int) and not isinstance(item.get(key), bool)
+            for key in ("input_tokens", "output_tokens", "total_tokens")
+        ):
+            saw_any = True
+    if not saw_any:
+        return TokenUsage()
+    return total
+
+
+def _add_token_usage(existing: TokenUsage | None, item: Any) -> TokenUsage:
+    current = existing or TokenUsage(input_tokens=0, output_tokens=0, total_tokens=0)
+    if not isinstance(item, dict):
+        return current
+    return TokenUsage(
+        input_tokens=_sum_optional(current.input_tokens, item.get("input_tokens")),
+        output_tokens=_sum_optional(current.output_tokens, item.get("output_tokens")),
+        total_tokens=_sum_optional(current.total_tokens, item.get("total_tokens")),
+    )
+
+
+def _sum_optional(left: int | None, right: object) -> int | None:
+    if not isinstance(right, int) or isinstance(right, bool):
+        return left
+    return (left or 0) + right
+
+
+async def _gpu_metrics() -> list[GpuMetrics]:
+    if shutil.which("nvidia-smi") is None:
+        return [GpuMetrics(available=False)]
+    process = await asyncio.create_subprocess_exec(
+        "nvidia-smi",
+        "--query-gpu=name,utilization.gpu,memory.used,memory.total",
+        "--format=csv,noheader,nounits",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=3)
+    except TimeoutError:
+        process.kill()
+        await process.wait()
+        return [GpuMetrics(available=False, error="nvidia-smi timed out")]
+    if process.returncode != 0:
+        return [GpuMetrics(available=False, error=stderr.decode("utf-8", errors="replace")[-500:])]
+    metrics: list[GpuMetrics] = []
+    for line in stdout.decode("utf-8", errors="replace").splitlines():
+        parts = [part.strip() for part in line.split(",")]
+        if len(parts) != 4:
+            continue
+        metrics.append(
+            GpuMetrics(
+                available=True,
+                name=parts[0],
+                utilization_percent=_optional_float(parts[1]),
+                memory_used_mb=_optional_float(parts[2]),
+                memory_total_mb=_optional_float(parts[3]),
+            )
+        )
+    return metrics or [GpuMetrics(available=False, error="nvidia-smi returned no GPU rows")]
+
+
+def _optional_float(value: str) -> float | None:
+    try:
+        return float(value)
+    except ValueError:
+        return None

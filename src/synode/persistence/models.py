@@ -33,6 +33,7 @@ class RunRecord(Base):
     task: Mapped[str] = mapped_column(Text, nullable=False)
     workspace: Mapped[str | None] = mapped_column(Text, nullable=True)
     model_provider: Mapped[str] = mapped_column(String(80), nullable=False)
+    observability_trace_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     final_answer: Mapped[str | None] = mapped_column(Text, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

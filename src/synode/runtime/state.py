@@ -10,6 +10,7 @@ class SynodeState(TypedDict, total=False):
     workspace: str | None
     model_provider: str
     mode: str
+    observability_trace_id: str | None
     selected_roles: list[str]
     plan: list[dict[str, Any]]
     role_tool_calls: dict[str, list[dict[str, Any]]]

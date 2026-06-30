@@ -41,9 +41,16 @@ class ToolRisk(StrEnum):
 class EventType(StrEnum):
     RUN_CREATED = "run_created"
     RUN_STARTED = "run_started"
+    INTAKE_COMPLETED = "intake_completed"
+    NODE_STARTED = "node_started"
+    NODE_COMPLETED = "node_completed"
     ROLE_SELECTED = "role_selected"
+    MODEL_INVOKED = "model_invoked"
     TOOL_CALLED = "tool_called"
     APPROVAL_REQUIRED = "approval_required"
+    APPROVAL_DECIDED = "approval_decided"
+    ARTIFACT_CREATED = "artifact_created"
+    VERIFICATION_COMPLETED = "verification_completed"
     RUN_COMPLETED = "run_completed"
     RUN_FAILED = "run_failed"
 
@@ -97,6 +104,7 @@ class RunResponse(BaseModel):
     task: str
     workspace: str | None = None
     model_provider: str
+    observability_trace_id: str | None = None
     final_answer: str | None = None
     created_at: datetime
     updated_at: datetime
@@ -104,3 +112,90 @@ class RunResponse(BaseModel):
 
 class ApprovalDecision(BaseModel):
     reason: str | None = None
+
+
+class RunEventResponse(BaseModel):
+    id: int
+    run_id: str
+    event_type: str
+    role: str | None = None
+    payload: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime
+
+
+class ApprovalResponse(BaseModel):
+    id: str
+    run_id: str
+    tool_name: str
+    action: str
+    reason: str
+    payload: dict[str, Any] = Field(default_factory=dict)
+    status: ApprovalStatus
+    decision_reason: str | None = None
+    created_at: datetime
+    decided_at: datetime | None = None
+
+
+class ToolAuditResponse(BaseModel):
+    id: int
+    run_id: str
+    role: str
+    tool_name: str
+    risk: ToolRisk
+    status: str
+    input: dict[str, Any] = Field(default_factory=dict)
+    output: dict[str, Any] = Field(default_factory=dict)
+    approval_id: str | None = None
+    created_at: datetime
+
+
+class ArtifactResponse(BaseModel):
+    id: str
+    run_id: str
+    kind: str
+    path: str | None = None
+    content: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime
+
+
+class TokenUsage(BaseModel):
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    total_tokens: int | None = None
+
+
+class RunMetricsResponse(BaseModel):
+    run_id: str
+    status: RunStatus
+    duration_ms: float | None = None
+    event_count: int
+    model_call_count: int
+    tool_call_count: int
+    approval_count: int
+    pending_approval_count: int
+    failed_tool_call_count: int
+    token_usage: TokenUsage
+    provider_usage: dict[str, TokenUsage] = Field(default_factory=dict)
+    latency_ms_by_role: dict[str, float] = Field(default_factory=dict)
+
+
+class ProcessMetrics(BaseModel):
+    pid: int
+    uptime_seconds: float
+    cpu_percent: float
+    memory_rss_bytes: int
+    memory_percent: float
+
+
+class GpuMetrics(BaseModel):
+    available: bool
+    name: str | None = None
+    utilization_percent: float | None = None
+    memory_used_mb: float | None = None
+    memory_total_mb: float | None = None
+    error: str | None = None
+
+
+class SystemMetricsResponse(BaseModel):
+    process: ProcessMetrics
+    gpu: list[GpuMetrics] = Field(default_factory=list)

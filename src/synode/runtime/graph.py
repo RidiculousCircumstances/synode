@@ -11,6 +11,7 @@ from langgraph.types import Send
 from pydantic import BaseModel
 
 from synode.models.provider import ModelProviderRegistry, ModelRequest
+from synode.observability import Observability
 from synode.persistence.database import Database
 from synode.persistence.repository import Repository
 from synode.registry import RoleRegistry
@@ -35,19 +36,23 @@ class GraphDependencies:
     roles: RoleRegistry
     models: ModelProviderRegistry
     tool_executor: ToolExecutor
+    observability: Observability
 
 
 def build_graph(deps: GraphDependencies, checkpointer: Any | None = None) -> Any:
     builder = StateGraph(SynodeState)
-    builder.add_node("intake", _intake_node(deps))
-    builder.add_node("supervisor", _supervisor_node(deps))
-    builder.add_node("worker", _worker_node(deps))
-    builder.add_node("coding_inspect", _coding_inspect_node(deps))
-    builder.add_node("coding_patch_propose", _coding_patch_propose_node(deps))
-    builder.add_node("patch_apply", _patch_apply_node(deps))
-    builder.add_node("verify", _verify_node(deps))
-    builder.add_node("reviewer", _reviewer_node(deps))
-    builder.add_node("synthesizer", _synthesizer_node(deps))
+    builder.add_node("intake", _observed_node("intake", deps, _intake_node(deps)))
+    builder.add_node("supervisor", _observed_node("supervisor", deps, _supervisor_node(deps)))
+    builder.add_node("worker", _observed_node("worker", deps, _worker_node(deps)))
+    builder.add_node("coding_inspect", _observed_node("coding_inspect", deps, _coding_inspect_node(deps)))
+    builder.add_node(
+        "coding_patch_propose",
+        _observed_node("coding_patch_propose", deps, _coding_patch_propose_node(deps)),
+    )
+    builder.add_node("patch_apply", _observed_node("patch_apply", deps, _patch_apply_node(deps)))
+    builder.add_node("verify", _observed_node("verify", deps, _verify_node(deps)))
+    builder.add_node("reviewer", _observed_node("reviewer", deps, _reviewer_node(deps)))
+    builder.add_node("synthesizer", _observed_node("synthesizer", deps, _synthesizer_node(deps)))
     builder.add_edge(START, "intake")
     builder.add_edge("intake", "supervisor")
     builder.add_conditional_edges("supervisor", _route_after_supervisor)
@@ -61,12 +66,81 @@ def build_graph(deps: GraphDependencies, checkpointer: Any | None = None) -> Any
     return builder.compile(checkpointer=checkpointer)
 
 
+def _observed_node(name: str, deps: GraphDependencies, handler: Any):
+    async def node(state: SynodeState) -> SynodeState:
+        role = _node_role(name, state)
+        await _record_event(
+            deps,
+            state,
+            EventType.NODE_STARTED.value,
+            role,
+            {"node": name},
+        )
+        with deps.observability.observation(
+            f"node.{name}",
+            state.get("observability_trace_id"),
+            as_type="agent" if role else "span",
+            input_payload={"run_id": state["run_id"], "node": name, "role": role},
+            metadata={"mode": state.get("mode"), "model_provider": state.get("model_provider")},
+        ):
+            try:
+                result = await handler(state)
+            except Exception as exc:
+                await _record_event(
+                    deps,
+                    state,
+                    EventType.NODE_COMPLETED.value,
+                    role,
+                    {"node": name, "ok": False, "error": str(exc)},
+                )
+                deps.observability.update_current_span(level="ERROR", status_message=str(exc))
+                raise
+            await _record_event(
+                deps,
+                state,
+                EventType.NODE_COMPLETED.value,
+                role,
+                {"node": name, "ok": True, "output_keys": sorted(result.keys())},
+            )
+            deps.observability.update_current_span(output={"ok": True, "output_keys": sorted(result.keys())})
+            return result
+
+    return node
+
+
+def _node_role(name: str, state: SynodeState) -> str | None:
+    if name == "supervisor":
+        return RoleName.SUPERVISOR.value
+    if name == "worker":
+        return state.get("current_role")
+    if name in {"coding_inspect", "coding_patch_propose", "patch_apply", "verify"}:
+        return RoleName.CODER.value
+    if name == "reviewer":
+        return RoleName.REVIEWER.value
+    return None
+
+
+async def _record_event(
+    deps: GraphDependencies,
+    state: SynodeState,
+    event_type: str,
+    role: str | None,
+    payload: dict[str, Any],
+) -> None:
+    async with deps.database.session() as session:
+        repo = Repository(session)
+        await repo.add_event(state["run_id"], event_type, role, payload)
+
+
 def _intake_node(deps: GraphDependencies):
     async def node(state: SynodeState) -> SynodeState:
         async with deps.database.session() as session:
             repo = Repository(session)
             await repo.add_event(
-                state["run_id"], "intake_completed", None, {"task": state["task"], "mode": state["mode"]}
+                state["run_id"],
+                EventType.INTAKE_COMPLETED.value,
+                None,
+                {"task": state["task"], "mode": state["mode"]},
             )
         return {}
 
@@ -77,6 +151,8 @@ def _supervisor_node(deps: GraphDependencies):
     async def node(state: SynodeState) -> SynodeState:
         provider = deps.models.get(state["model_provider"])
         decision = await _invoke_structured(
+            deps,
+            state,
             provider,
             SupervisorDecision,
             ModelRequest(
@@ -136,7 +212,10 @@ def _worker_node(deps: GraphDependencies):
             result = await deps.tool_executor.execute(state["run_id"], role, state.get("workspace"), call)
             results.append(result)
         provider = deps.models.get(state["model_provider"])
-        model_response = await provider.invoke(
+        model_response = await _invoke_model(
+            deps,
+            state,
+            provider,
             ModelRequest(
                 role=role,
                 prompt=f"Summarize work for task: {state['task']}",
@@ -169,6 +248,8 @@ def _coding_inspect_node(deps: GraphDependencies):
             results.append(await deps.tool_executor.execute(state["run_id"], RoleName.CODER.value, state.get("workspace"), call))
         provider = deps.models.get(state["model_provider"])
         inspection = await _invoke_structured(
+            deps,
+            state,
             provider,
             CodingInspection,
             ModelRequest(
@@ -204,6 +285,8 @@ def _coding_patch_propose_node(deps: GraphDependencies):
         if state["model_provider"] == "fake":
             context["fake_patch_proposal"] = _fake_patch_proposal(file_context)
         proposal = await _invoke_structured(
+            deps,
+            state,
             provider,
             PatchProposal,
             ModelRequest(
@@ -252,6 +335,8 @@ def _verify_node(deps: GraphDependencies):
         proposal = PatchProposal.model_validate(state["patch_proposal"])
         provider = deps.models.get(state["model_provider"])
         plan = await _invoke_structured(
+            deps,
+            state,
             provider,
             VerificationPlan,
             ModelRequest(
@@ -267,6 +352,13 @@ def _verify_node(deps: GraphDependencies):
             state.get("workspace"),
             ToolCall(name="native.verify", arguments={"commands": plan.commands}),
         )
+        await _record_event(
+            deps,
+            state,
+            EventType.VERIFICATION_COMPLETED.value,
+            RoleName.CODER.value,
+            {"ok": result.ok, "error": result.error},
+        )
         return {"verification_result": result.model_dump(mode="json")}
 
     return node
@@ -277,6 +369,8 @@ def _reviewer_node(deps: GraphDependencies):
         blockers, advisory = _precheck_review_findings(state)
         provider = deps.models.get(state["model_provider"])
         decision = await _invoke_structured(
+            deps,
+            state,
             provider,
             ReviewerDecision,
             ModelRequest(
@@ -335,9 +429,80 @@ def _synthesizer_node(deps: GraphDependencies):
     return node
 
 
-async def _invoke_structured(provider: Any, schema: type[BaseModel], request: ModelRequest) -> Any:
-    response = await provider.invoke(request)
+async def _invoke_structured(
+    deps: GraphDependencies,
+    state: SynodeState,
+    provider: Any,
+    schema: type[BaseModel],
+    request: ModelRequest,
+) -> Any:
+    response = await _invoke_model(deps, state, provider, request)
     return schema.model_validate(response.structured)
+
+
+async def _invoke_model(
+    deps: GraphDependencies,
+    state: SynodeState,
+    provider: Any,
+    request: ModelRequest,
+) -> Any:
+    with deps.observability.observation(
+        f"model.{request.role}",
+        state.get("observability_trace_id"),
+        as_type="generation",
+        input_payload={
+            "role": request.role,
+            "prompt": request.prompt,
+            "context": request.context,
+            "tools": request.tools,
+        },
+        metadata={"run_id": state["run_id"], "response_schema": _schema_name(request.response_schema)},
+    ):
+        try:
+            response = await provider.invoke(request)
+        except Exception as exc:
+            await _record_event(
+                deps,
+                state,
+                EventType.MODEL_INVOKED.value,
+                request.role,
+                {"role": request.role, "ok": False, "error": str(exc)},
+            )
+            deps.observability.update_current_generation(level="ERROR", status_message=str(exc))
+            raise
+        usage = _response_usage(response)
+        await _record_event(
+            deps,
+            state,
+            EventType.MODEL_INVOKED.value,
+            request.role,
+            {
+                "role": request.role,
+                "ok": True,
+                "provider": response.provider,
+                "model": response.model,
+                "usage": usage,
+                "latency_ms": response.latency_ms,
+            },
+        )
+        deps.observability.update_current_generation(
+            output={"content": response.content[:4000], "structured": response.structured},
+            model=response.model,
+            usage_details={key: value for key, value in usage.items() if isinstance(value, int)},
+        )
+        return response
+
+
+def _response_usage(response: Any) -> dict[str, int | None]:
+    return {
+        "input_tokens": response.input_tokens,
+        "output_tokens": response.output_tokens,
+        "total_tokens": response.total_tokens,
+    }
+
+
+def _schema_name(schema: type[BaseModel] | None) -> str | None:
+    return schema.__name__ if schema is not None else None
 
 
 def _validate_supervisor_decision(decision: SupervisorDecision, deps: GraphDependencies) -> None:

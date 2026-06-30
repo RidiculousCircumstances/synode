@@ -9,6 +9,13 @@ components:
       - Model provider abstraction and Ollama provider
       - Tool policy, native tools, and MCP bridge
       - Persistence, audit log, and approval state
+      - Structured run read models, SSE event stream, and metrics endpoints
+      - Optional Langfuse trace emission
+  - name: web
+    path: web
+    responsibilities:
+      - Next.js operator UI for chat, runs, approvals, graph, timeline, artifacts, diff/tests, and metrics
+      - Runtime API base URL loading through env.js
   - name: agents
     path: src/synode/agents
     responsibilities:
@@ -25,23 +32,35 @@ components:
   - name: deploy
     path: docker-compose.yaml
     responsibilities:
-      - Local Docker Compose deployment for Synode API, Postgres, and SearxNG
+      - Local Docker Compose deployment for Synode UI, API, Postgres, and SearxNG
       - External host Ollama integration through API host networking
+  - name: observability-deploy
+    path: docker-compose.observability.yaml
+    responsibilities:
+      - Optional local Langfuse stack for traces and model/tool observability
+      - Separate Langfuse Postgres, ClickHouse, Redis, and MinIO services
   - name: docker
     path: Dockerfile
     responsibilities:
       - Container image for Synode API and CLI
       - Startup entrypoint that applies migrations before serving the API
+  - name: docker-ui
+    path: Dockerfile.ui
+    responsibilities:
+      - Container image for Synode operator UI
+      - Nginx runtime env.js generation for browser API configuration
 
 rules:
   - Orchestration may depend on model, tool, persistence, and registry modules.
   - Tool implementations must depend on policy and shared schemas, not on API entrypoints.
   - API and CLI must call the orchestration service, not duplicate graph behavior.
+  - UI must consume structured API read models and events, not parse final_answer.
   - MCP tools must pass the same policy and audit path as native tools.
   - Persistence owns mutable run, event, approval, artifact, audit, and memory state.
   - Agent role YAML files must not name concrete model IDs.
   - Runtime decisions must use structured model output or fail explicitly.
   - Coding workflow mutations must pass patch proposal, approval, patch apply, verification, and review.
+  - Langfuse must remain optional and fail startup when enabled without required credentials.
 
 entrypoints:
   - name: cli
@@ -64,6 +83,14 @@ entrypoints:
     path: docker-compose.yaml
     type: deployment
     command: docker compose up -d --build
+  - name: ui-dev
+    path: web
+    type: frontend
+    command: npm --prefix web run dev
+  - name: observability-compose
+    path: docker-compose.observability.yaml
+    type: deployment
+    command: make docker-observability-up
 
 critical_flows:
   - name: run-task
@@ -76,3 +103,7 @@ critical_flows:
     description: Risky tool requests pause through approval state before execution can resume.
   - name: mcp-tool-call
     description: MCP discovery and calls are normalized into governed tool invocations.
+  - name: operator-ui
+    description: Browser UI creates runs and monitors structured events, graph state, approvals, artifacts, diffs, tests, and metrics.
+  - name: observability
+    description: Enabled Langfuse config emits run, node, model, and tool observations linked by run trace id.

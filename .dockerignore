@@ -8,6 +8,10 @@ __pycache__/
 .env
 build/
 dist/
+web/dist/
+web/.next/
+web/node_modules/
+web/*.tsbuildinfo
 htmlcov/
 .coverage
 var/
