@@ -77,6 +77,15 @@ TERMINAL_RUN_STATUSES = {
     RunStatus.CANCELLED.value,
 }
 
+CONVERSATION_CONTEXT_MESSAGE_LIMIT = 30
+CONVERSATION_CONTEXT_SOURCE_LIMIT = 80
+CONVERSATION_CONTEXT_CHAR_LIMIT = 12_000
+CONVERSATION_CONTEXT_MESSAGE_TYPES = {
+    ThreadMessageType.TEXT.value,
+    ThreadMessageType.FINAL.value,
+    ThreadMessageType.APPROVAL_DECISION.value,
+}
+
 
 class OrchestrationService:
     def __init__(
@@ -479,6 +488,7 @@ class OrchestrationService:
             mode = run.mode
             trace_id = run.observability_trace_id
             thread_id = run.thread_id
+            conversation_context = await self._conversation_context(repo, thread_id, run_id)
             await repo.add_thread_message(
                 thread_id,
                 author_type=ThreadMessageAuthorType.SYSTEM,
@@ -492,7 +502,9 @@ class OrchestrationService:
         try:
             state: dict[str, Any] = {
                 "run_id": run_id,
+                "thread_id": thread_id,
                 "task": task,
+                "conversation_context": conversation_context,
                 "workspace": workspace,
                 "model_provider": model_provider,
                 "default_model_profile_id": default_model_profile_id,
@@ -589,6 +601,38 @@ class OrchestrationService:
                     run_id=run.id,
                     metadata={"approval_id": approval.id, "status": ApprovalStatus.APPROVED.value},
                 )
+
+    async def _conversation_context(
+        self,
+        repo: Repository,
+        thread_id: str,
+        run_id: str,
+    ) -> list[dict[str, Any]]:
+        messages = await repo.latest_thread_messages(thread_id, limit=CONVERSATION_CONTEXT_SOURCE_LIMIT)
+        selected: list[dict[str, Any]] = []
+        remaining_chars = CONVERSATION_CONTEXT_CHAR_LIMIT
+        for message in reversed(messages):
+            if len(selected) >= CONVERSATION_CONTEXT_MESSAGE_LIMIT or remaining_chars <= 0:
+                break
+            if message.run_id == run_id:
+                continue
+            if message.message_type not in CONVERSATION_CONTEXT_MESSAGE_TYPES:
+                continue
+            content = " ".join(message.content.split())
+            if not content:
+                continue
+            if len(content) > remaining_chars:
+                content = content[:remaining_chars].rstrip() + " ...[truncated]"
+            selected.append(
+                {
+                    "author_type": message.author_type,
+                    "author_name": message.author_name,
+                    "message_type": message.message_type,
+                    "content": content,
+                }
+            )
+            remaining_chars -= len(content)
+        return list(reversed(selected))
 
     async def reject(self, approval_id: str, reason: str | None = None) -> None:
         async with self.database.session() as session:

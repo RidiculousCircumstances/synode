@@ -182,7 +182,7 @@ class OllamaProvider:
         self.timeout_seconds = timeout_seconds
 
     async def invoke(self, request: ModelRequest) -> ModelResponse:
-        messages = request.messages or [{"role": "user", "content": request.prompt}]
+        messages = _request_messages(request)
         payload: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
@@ -274,7 +274,7 @@ class OpenAICompatibleProvider:
         self.timeout_seconds = timeout_seconds
 
     async def invoke(self, request: ModelRequest) -> ModelResponse:
-        messages = request.messages or [{"role": "user", "content": request.prompt}]
+        messages = _request_messages(request)
         payload: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
@@ -458,3 +458,22 @@ def _optional_int(value: object) -> int | None:
     if isinstance(value, int):
         return value
     return None
+
+
+def _request_messages(request: ModelRequest) -> list[dict[str, str]]:
+    context = _context_block(request.context)
+    if request.messages:
+        messages = list(request.messages)
+        if context:
+            messages.append({"role": "user", "content": context})
+        return messages
+    content = request.prompt
+    if context:
+        content = f"{content}\n\n{context}"
+    return [{"role": "user", "content": content}]
+
+
+def _context_block(context: dict[str, Any]) -> str:
+    if not context:
+        return ""
+    return "Context JSON:\n" + json.dumps(context, ensure_ascii=False, default=str)

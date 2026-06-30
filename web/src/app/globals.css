@@ -1202,6 +1202,10 @@ a {
   font-style: normal;
 }
 
+.thread-message.user .thread-message-meta {
+  justify-content: flex-end;
+}
+
 .thread-message-body {
   width: min(68rem, 94%);
   overflow-wrap: anywhere;
@@ -1227,33 +1231,34 @@ a {
 }
 
 .thread-service-event {
-  display: grid;
-  grid-template-columns: minmax(1rem, 1fr) auto minmax(1rem, 1fr);
-  gap: 0.55rem;
-  align-items: center;
-  width: 100%;
-  max-width: 78rem;
-  margin: 0.05rem auto;
+  display: block;
+  width: min(42rem, 94%);
+  margin: 0.05rem auto 0.05rem 0;
   color: var(--muted-foreground);
   font-size: 0.72rem;
 }
 
 .thread-service-line {
-  height: 1px;
-  background: var(--border);
+  display: none;
 }
 
 .thread-service-copy {
   display: flex;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-start;
   gap: 0.38rem;
   min-width: 0;
-  max-width: min(64rem, 86vw);
+  max-width: 100%;
   flex-wrap: wrap;
-  border: 1px solid transparent;
-  border-radius: 999px;
-  padding: 0.14rem 0.46rem;
+  border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
+  border-radius: 0.78rem;
+  background: color-mix(in srgb, var(--muted) 72%, white);
+  padding: 0.32rem 0.52rem;
+}
+
+.thread-service-event.live .thread-service-copy {
+  border-color: color-mix(in srgb, var(--primary) 24%, var(--border));
+  background: color-mix(in srgb, var(--primary-soft) 38%, var(--card));
 }
 
 .thread-service-kind {
@@ -1265,22 +1270,20 @@ a {
 
 .thread-service-text {
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 
 .thread-approval-event {
   display: grid;
-  width: min(48rem, 94%);
-  gap: 0.48rem;
+  width: min(42rem, 94%);
+  gap: 0.42rem;
   margin: 0.08rem auto 0.08rem 0;
   border: 1px solid var(--border);
-  border-left: 3px solid color-mix(in srgb, var(--warning) 58%, var(--border));
-  border-radius: 0.8rem;
-  background: color-mix(in srgb, var(--card) 96%, white);
+  border-left: 3px solid color-mix(in srgb, var(--warning) 42%, var(--border));
+  border-radius: 0.78rem;
+  background: var(--card);
   color: var(--foreground);
-  padding: 0.62rem 0.72rem;
+  padding: 0.54rem 0.64rem;
   font-size: 0.84rem;
   line-height: 1.45;
 }

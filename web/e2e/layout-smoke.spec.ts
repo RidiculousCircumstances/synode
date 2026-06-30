@@ -101,6 +101,21 @@ test("thread chat renders technical run summary compactly", async ({ page }) => 
   await expect(page.getByRole("dialog", { name: "Run history" })).toBeVisible();
 });
 
+test("thread approval approve resumes the run", async ({ page }) => {
+  await page.goto(`/threads/${threadId}`, { waitUntil: "domcontentloaded" });
+  const approveRequest = page.waitForRequest(
+    (request) => request.method() === "POST" && request.url().endsWith("/approvals/approval-1/approve"),
+  );
+  const resumeRequest = page.waitForRequest(
+    (request) => request.method() === "POST" && request.url().endsWith(`/runs/${runId}/resume`),
+  );
+
+  await page.getByRole("button", { name: "Approve" }).click();
+
+  await approveRequest;
+  await resumeRequest;
+});
+
 test("overlays do not shift the page layout", async ({ page }) => {
   await page.goto("/threads", { waitUntil: "domcontentloaded" });
   await expect(page.locator("#main-content")).toBeVisible();
@@ -262,6 +277,10 @@ async function installApiRoutes(page: Page) {
       await fulfillJson(route, runFixture());
       return;
     }
+    if (url.pathname === `/runs/${runId}/resume`) {
+      await fulfillJson(route, { status: "scheduled" });
+      return;
+    }
     if (url.pathname === `/runs/${runId}/events`) {
       await fulfillJson(route, eventsFixture());
       return;
@@ -288,6 +307,14 @@ async function installApiRoutes(page: Page) {
     }
     if (url.pathname === `/runs/${runId}/metrics`) {
       await fulfillJson(route, runMetricsFixture());
+      return;
+    }
+    if (url.pathname === "/approvals/approval-1/approve") {
+      await fulfillJson(route, { status: "approved" });
+      return;
+    }
+    if (url.pathname === "/approvals/approval-1/reject") {
+      await fulfillJson(route, { status: "rejected" });
       return;
     }
     await route.fulfill({ status: 404, contentType: "application/json", body: '{"detail":"not mocked"}' });

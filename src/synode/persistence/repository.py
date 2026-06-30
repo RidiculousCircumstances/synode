@@ -183,6 +183,19 @@ class Repository:
         )
         return list(result.scalars().all())
 
+    async def latest_thread_messages(
+        self,
+        thread_id: str,
+        limit: int = 30,
+    ) -> list[ThreadMessageRecord]:
+        result = await self.session.execute(
+            select(ThreadMessageRecord)
+            .where(ThreadMessageRecord.thread_id == thread_id)
+            .order_by(ThreadMessageRecord.id.desc())
+            .limit(limit)
+        )
+        return list(reversed(result.scalars().all()))
+
     async def latest_thread_message(self, thread_id: str) -> ThreadMessageRecord | None:
         result = await self.session.execute(
             select(ThreadMessageRecord)

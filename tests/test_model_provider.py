@@ -32,6 +32,30 @@ async def test_ollama_provider_maps_structured_response(monkeypatch: pytest.Monk
     assert response.structured["selected_roles"] == [RoleName.DATA_ANALYST.value]
 
 
+async def test_ollama_provider_sends_request_context(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured_payload: dict[str, object] = {}
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        captured_payload.update(json.loads(request.content))
+        return httpx.Response(200, json={"message": {"content": "ok"}})
+
+    _patch_async_client(monkeypatch, httpx.MockTransport(handle))
+    provider = OllamaProvider("http://ollama.test", "qwen2.5-coder:7b")
+
+    await provider.invoke(
+        ModelRequest(
+            role="coder",
+            prompt="Answer the follow-up",
+            context={"conversation_context": [{"author_type": "user", "content": "Earlier request"}]},
+        )
+    )
+
+    messages = captured_payload["messages"]
+    assert isinstance(messages, list)
+    assert "Context JSON" in messages[0]["content"]
+    assert "Earlier request" in messages[0]["content"]
+
+
 async def test_ollama_provider_rejects_invalid_structured_response(monkeypatch: pytest.MonkeyPatch) -> None:
     transport = httpx.MockTransport(lambda request: httpx.Response(200, json={"message": {"content": "not json"}}))
     _patch_async_client(monkeypatch, transport)

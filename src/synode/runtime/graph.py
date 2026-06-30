@@ -167,7 +167,11 @@ def _supervisor_node(deps: GraphDependencies):
             ModelRequest(
                 role=RoleName.SUPERVISOR.value,
                 prompt=_supervisor_prompt(state, deps),
-                context={"mode": state["mode"], "task": state["task"]},
+                context={
+                    "mode": state["mode"],
+                    "task": state["task"],
+                    "conversation_context": state.get("conversation_context", []),
+                },
                 response_schema=SupervisorDecision,
                 model_options=provider.model_options or {},
             ),
@@ -243,6 +247,8 @@ async def _run_worker_role(deps: GraphDependencies, state: SynodeState, role: st
             role=role,
             prompt=f"Summarize work for task: {state['task']}",
             context={
+                "task": state["task"],
+                "conversation_context": state.get("conversation_context", []),
                 "tool_results": [result.model_dump(mode="json") for result in results],
                 "previous_worker_outputs": state.get("worker_outputs", []),
             },
@@ -286,7 +292,11 @@ def _coding_inspect_node(deps: GraphDependencies):
             ModelRequest(
                 role=RoleName.CODER.value,
                 prompt="Inspect repository evidence and identify files/tests needed for the coding task.",
-                context={"task": state["task"], "tool_results": [result.model_dump(mode="json") for result in results]},
+                context={
+                    "task": state["task"],
+                    "conversation_context": state.get("conversation_context", []),
+                    "tool_results": [result.model_dump(mode="json") for result in results],
+                },
                 response_schema=CodingInspection,
                 model_options=provider.model_options or {},
             ),
@@ -311,6 +321,7 @@ def _coding_patch_propose_node(deps: GraphDependencies):
         provider = await _provider_for_role(deps, state, RoleName.CODER.value)
         context: dict[str, Any] = {
             "task": state["task"],
+            "conversation_context": state.get("conversation_context", []),
             "inspection": state.get("coding_inspection", {}),
             "files": file_context,
         }
@@ -378,7 +389,12 @@ def _verify_node(deps: GraphDependencies):
             ModelRequest(
                 role=RoleName.CODER.value,
                 prompt="Choose focused verification commands for the applied patch.",
-                context={"commands": proposal.verification_commands, "patch_proposal": proposal.model_dump(mode="json")},
+                context={
+                    "task": state["task"],
+                    "conversation_context": state.get("conversation_context", []),
+                    "commands": proposal.verification_commands,
+                    "patch_proposal": proposal.model_dump(mode="json"),
+                },
                 response_schema=VerificationPlan,
                 model_options=provider.model_options or {},
             ),
@@ -413,7 +429,12 @@ def _reviewer_node(deps: GraphDependencies):
             ModelRequest(
                 role=RoleName.REVIEWER.value,
                 prompt="Review worker outputs, patch results, verification, and policy signals.",
-                context={"blockers": blockers, "advisory": advisory, "state": _compact_state_for_review(state)},
+                context={
+                    "blockers": blockers,
+                    "advisory": advisory,
+                    "conversation_context": state.get("conversation_context", []),
+                    "state": _compact_state_for_review(state),
+                },
                 response_schema=ReviewerDecision,
                 model_options=provider.model_options or {},
             ),
@@ -589,6 +610,8 @@ def _supervisor_prompt(state: SynodeState, deps: GraphDependencies) -> str:
         f"Task: {state['task']}\n"
         f"Workspace: {state.get('workspace') or '<none>'}\n"
         f"Selectable worker roles: {json.dumps(roles, ensure_ascii=False)}\n"
+        "Use conversation_context as background only when it is provided in request context.\n"
+        "The current Task is the primary instruction.\n"
         "selected_roles and every plan item MUST use only selectable worker roles.\n"
         "Do not include supervisor or reviewer in selected_roles or plan.\n"
         "tool_calls MUST use only allowed_tools listed on that same role.\n"
@@ -793,6 +816,7 @@ def _classify_tool_result(result: dict[str, Any], blockers: list[str], advisory:
 def _compact_state_for_review(state: SynodeState) -> dict[str, Any]:
     return {
         "mode": state.get("mode"),
+        "conversation_context": state.get("conversation_context", []),
         "plan": state.get("plan", []),
         "worker_outputs": state.get("worker_outputs", []),
         "patch_results": state.get("patch_results", []),

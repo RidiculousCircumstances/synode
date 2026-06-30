@@ -128,6 +128,42 @@ async def test_rejecting_approval_cancels_run_and_unblocks_thread(
         await service.resume_run(first.id)
 
 
+async def test_follow_up_run_receives_thread_conversation_context(
+    service,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: pathlib.Path,
+) -> None:
+    (tmp_path / "data.csv").write_text("name,value\nalpha,1\nbeta,2\n", encoding="utf-8")
+    first = await service.run_task(
+        "First question about the dataset",
+        workspace=str(tmp_path),
+        model_provider="fake",
+    )
+    follow_up = await service.create_thread_run(
+        first.thread_id,
+        "Use that context for a follow-up",
+        workspace=str(tmp_path),
+        model_provider="fake",
+    )
+    captured_state: dict[str, object] = {}
+
+    async def capture_graph(run_id: str, state: dict[str, object]) -> dict[str, object]:
+        captured_state.update(state)
+        return {"review": {"can_proceed": True}, "final_answer": "done"}
+
+    monkeypatch.setattr(service, "_invoke_graph", capture_graph)
+
+    await service.execute_run(follow_up.id)
+
+    context = captured_state["conversation_context"]
+    assert isinstance(context, list)
+    assert captured_state["thread_id"] == first.thread_id
+    assert any(item["author_type"] == "user" and item["content"] == "First question about the dataset" for item in context)
+    assert any(item["message_type"] == "final" for item in context)
+    assert not any(item["message_type"] == "run_summary" for item in context)
+    assert not any(item["author_type"] == "user" and item["content"] == "Use that context for a follow-up" for item in context)
+
+
 async def test_stop_created_run_cancels_and_unblocks_thread(service, tmp_path: pathlib.Path) -> None:
     run_response = await service.create_run(
         "Inspect the workspace",

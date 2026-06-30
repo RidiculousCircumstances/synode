@@ -37,6 +37,7 @@ import {
   listArtifacts,
   listRunApprovals,
   listToolAudit,
+  resumeRun,
   stopRun,
 } from "@/lib/api";
 import {
@@ -412,16 +413,22 @@ function DiffTestsTab({ audit }: { audit: ToolAudit[] }) {
 function ApprovalsTab({ approvals, runId }: { approvals: Approval[]; runId: string }) {
   const queryClient = useQueryClient();
   const mutation = useMutation({
-    mutationFn: ({
+    mutationFn: async ({
       approvalId,
       decision,
     }: {
       approvalId: string;
       decision: "approve" | "reject";
-    }) => decideApproval(approvalId, decision, `${decision} from Synode UI`),
-    onSuccess: () => {
+    }) => {
+      await decideApproval(approvalId, decision, `${decision} from Synode UI`);
+      if (decision === "approve") {
+        await resumeRun(runId);
+      }
+    },
+    onSettled: () => {
       void queryClient.invalidateQueries({ queryKey: ["approvals", runId] });
       void queryClient.invalidateQueries({ queryKey: ["run", runId] });
+      void queryClient.invalidateQueries({ queryKey: ["runs"] });
       void queryClient.invalidateQueries({ queryKey: ["run-metrics", runId] });
     },
   });

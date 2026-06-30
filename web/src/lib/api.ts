@@ -201,6 +201,13 @@ export function stopRun(runId: string, reason = "Stopped from UI"): Promise<Run>
   });
 }
 
+export function resumeRun(runId: string): Promise<{ status: string }> {
+  return request<{ status: string }>(`/runs/${runId}/resume`, {
+    method: "POST",
+    body: "{}",
+  });
+}
+
 export function listEvents(runId: string, afterId = 0): Promise<RunEvent[]> {
   return request<RunEvent[]>(`/runs/${runId}/events?after_id=${afterId}`);
 }

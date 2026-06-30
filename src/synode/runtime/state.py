@@ -6,7 +6,9 @@ from typing import Annotated, Any, TypedDict
 
 class SynodeState(TypedDict, total=False):
     run_id: str
+    thread_id: str
     task: str
+    conversation_context: list[dict[str, Any]]
     workspace: str | None
     model_provider: str
     default_model_profile_id: str | None

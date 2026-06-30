@@ -23,12 +23,14 @@ import {
   getThread,
   listAgentGraphs,
   listModelProfiles,
+  resumeRun,
   stopRun,
   updateThread,
 } from "@/lib/api";
 import { formatDateTime, shortId } from "@/lib/format";
 import { useBodyScrollLock } from "@/hooks/useBodyScrollLock";
-import type { Run, RunMode, RunStatus, ThreadMessage } from "@/types";
+import { useRunEvents } from "@/hooks/useRunEvents";
+import type { Run, RunEvent, RunMode, RunStatus, ThreadMessage } from "@/types";
 import {
   CompactList,
   CompactRow,
@@ -49,11 +51,17 @@ export default function ThreadDetailClient({ threadId }: { threadId: string }) {
   const thread = detail?.thread ?? null;
   const latestRun = detail?.runs[0] ?? null;
   const pending = latestRun ? RUN_BUSY_STATUSES.includes(latestRun.status) : false;
+  const liveEvents = useRunEvents(pending && latestRun ? latestRun.id : null);
+  const processingStatus = useMemo(
+    () => buildProcessingStatus(latestRun, liveEvents),
+    [latestRun, liveEvents],
+  );
   const [runsOpen, setRunsOpen] = useState(false);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const didInitialScroll = useRef(false);
   const wasNearBottom = useRef(true);
   const lastMessageId = detail?.messages.at(-1)?.id ?? 0;
+  const lastEventId = liveEvents.at(-1)?.id ?? 0;
 
   const archiveMutation = useMutation({
     mutationFn: archiveThread,
@@ -89,7 +97,15 @@ export default function ThreadDetailClient({ threadId }: { threadId: string }) {
       didInitialScroll.current = true;
       wasNearBottom.current = true;
     });
-  }, [detail, lastMessageId]);
+  }, [detail, lastMessageId, lastEventId]);
+
+  useEffect(() => {
+    if (!lastEventId) {
+      return;
+    }
+    void queryClient.invalidateQueries({ queryKey: ["thread", threadId] });
+    void queryClient.invalidateQueries({ queryKey: ["threads"] });
+  }, [lastEventId, queryClient, threadId]);
 
   if (threadQuery.isLoading && !detail) {
     return <EmptyState title="Loading thread" text={threadId} />;
@@ -126,7 +142,7 @@ export default function ThreadDetailClient({ threadId }: { threadId: string }) {
           wasNearBottom.current = isNearBottom(event.currentTarget);
         }}
       >
-        <ThreadMessages threadId={thread.id} messages={detail.messages} />
+        <ThreadMessages threadId={thread.id} messages={detail.messages} processingStatus={processingStatus} />
       </div>
       <div className="thread-composer-dock">
         <FollowUpComposer
@@ -272,10 +288,18 @@ function ThreadTopBar({
   );
 }
 
-function ThreadMessages({ threadId, messages }: { threadId: string; messages: ThreadMessage[] }) {
+function ThreadMessages({
+  threadId,
+  messages,
+  processingStatus,
+}: {
+  threadId: string;
+  messages: ThreadMessage[];
+  processingStatus: ProcessingStatus | null;
+}) {
   const approvalDecisions = useMemo(() => buildApprovalDecisionMap(messages), [messages]);
 
-  if (!messages.length) {
+  if (!messages.length && !processingStatus) {
     return <EmptyState title="No messages" />;
   }
 
@@ -289,6 +313,7 @@ function ThreadMessages({ threadId, messages }: { threadId: string; messages: Th
           approvalDecision={approvalDecisions.get(metadataString(message.metadata, "approval_id")) ?? null}
         />
       ))}
+      {processingStatus ? <ThreadProcessingEvent status={processingStatus} /> : null}
     </div>
   );
 }
@@ -341,7 +366,6 @@ function ThreadServiceEvent({
   const metadata = Object.keys(message.metadata).length ? JSON.stringify(message.metadata, null, 2) : "";
   return (
     <div className="thread-service-event neutral">
-      <span className="thread-service-line" />
       <div className="thread-service-copy">
         <span className="thread-service-kind">{message.message_type.replaceAll("_", " ")}</span>
         <span className="thread-service-text">{message.content}</span>
@@ -358,7 +382,23 @@ function ThreadServiceEvent({
           </details>
         ) : null}
       </div>
-      <span className="thread-service-line" />
+    </div>
+  );
+}
+
+function ThreadProcessingEvent({ status }: { status: ProcessingStatus }) {
+  return (
+    <div className="thread-service-event live" aria-live="polite">
+      <div className="thread-service-copy">
+        <RefreshCw size={13} className={status.spinning ? "spin" : undefined} aria-hidden />
+        <span className="thread-service-kind">{status.kind}</span>
+        <span className="thread-service-text">{status.text}</span>
+        {status.runId ? (
+          <Link href={`/runs/${status.runId}`} className="mono">
+            {shortId(status.runId)}
+          </Link>
+        ) : null}
+      </div>
     </div>
   );
 }
@@ -420,8 +460,15 @@ function ApprovalInlineActions({
   const toolName = metadataString(message.metadata, "tool_name");
   const action = metadataString(message.metadata, "action");
   const mutation = useMutation({
-    mutationFn: ({ nextDecision }: { nextDecision: "approve" | "reject" }) =>
-      decideApproval(approvalId, nextDecision, `${nextDecision} from Synode thread chat`),
+    mutationFn: async ({ nextDecision }: { nextDecision: "approve" | "reject" }) => {
+      await decideApproval(approvalId, nextDecision, `${nextDecision} from Synode thread chat`);
+      if (nextDecision === "approve") {
+        if (!message.run_id) {
+          throw new Error("Approved approval has no run id to resume.");
+        }
+        await resumeRun(message.run_id);
+      }
+    },
     onSettled: () => {
       void queryClient.invalidateQueries({ queryKey: ["thread", threadId] });
       void queryClient.invalidateQueries({ queryKey: ["threads"] });
@@ -832,6 +879,13 @@ type ApprovalDecision = {
   reason: string;
 };
 
+type ProcessingStatus = {
+  kind: string;
+  text: string;
+  runId: string;
+  spinning: boolean;
+};
+
 type MarkdownBlock =
   | { type: "paragraph"; text: string }
   | { type: "heading"; depth: 2 | 3 | 4; text: string }
@@ -845,6 +899,82 @@ const TECHNICAL_SECTION_NAMES = new Set([
   "patch_results",
   "verification",
 ]);
+
+function buildProcessingStatus(run: Run | null, events: RunEvent[]): ProcessingStatus | null {
+  if (!run || !RUN_BUSY_STATUSES.includes(run.status)) {
+    return null;
+  }
+  if (run.status === "waiting_approval") {
+    return {
+      kind: "approval",
+      text: "Waiting for approval",
+      runId: run.id,
+      spinning: false,
+    };
+  }
+  const latest = [...events].reverse().find((event) => event.run_id === run.id);
+  if (!latest) {
+    return {
+      kind: "runtime",
+      text: run.status === "created" ? "Queued" : "Starting run",
+      runId: run.id,
+      spinning: true,
+    };
+  }
+  return {
+    kind: latest.event_type.replaceAll("_", " "),
+    text: describeRunEvent(latest),
+    runId: run.id,
+    spinning: isSpinningEvent(latest.event_type),
+  };
+}
+
+function describeRunEvent(event: RunEvent): string {
+  const payload = event.payload;
+  if (event.event_type === "node_started") {
+    const node = metadataString(payload, "node") || "node";
+    const role = event.role ? ` (${event.role})` : "";
+    return `Running ${node.replaceAll("_", " ")}${role}`;
+  }
+  if (event.event_type === "tool_called") {
+    const tool = metadataString(payload, "tool_name") || "tool";
+    const status = metadataString(payload, "status");
+    return status ? `${tool} ${status}` : `Calling ${tool}`;
+  }
+  if (event.event_type === "model_invoked") {
+    const role = event.role || metadataString(payload, "role") || "model";
+    return `Model response from ${role}`;
+  }
+  if (event.event_type === "approval_required") {
+    const tool = metadataString(payload, "tool_name");
+    return tool ? `Waiting for approval: ${tool}` : "Waiting for approval";
+  }
+  if (event.event_type === "approval_decided") {
+    return "Approval recorded. Continuing run";
+  }
+  if (event.event_type === "artifact_created") {
+    const kind = metadataString(payload, "kind");
+    return kind ? `Saved ${kind.replaceAll("_", " ")}` : "Saved artifact";
+  }
+  if (event.event_type === "verification_completed") {
+    return "Verification completed";
+  }
+  if (event.event_type === "role_selected") {
+    const role = event.role || metadataString(payload, "role");
+    return role ? `Selected ${role}` : "Selected roles";
+  }
+  if (event.event_type === "run_started") {
+    return "Run started";
+  }
+  if (event.event_type === "intake_completed") {
+    return "Task intake completed";
+  }
+  return event.event_type.replaceAll("_", " ");
+}
+
+function isSpinningEvent(eventType: string): boolean {
+  return !["approval_required", "verification_completed", "artifact_created"].includes(eventType);
+}
 
 function parseRunSummary(content: string): ParsedSummary {
   const lines = content.split("\n");
