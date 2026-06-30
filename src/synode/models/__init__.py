@@ -1,4 +1,17 @@
-from synode.models.provider import FakeModelProvider, ModelProvider, ModelRequest, ModelResponse
+from synode.models.provider import (
+    FakeModelProvider,
+    ModelHealth,
+    ModelProvider,
+    ModelRequest,
+    ModelResponse,
+    OllamaProvider,
+)
 
-__all__ = ["FakeModelProvider", "ModelProvider", "ModelRequest", "ModelResponse"]
-
+__all__ = [
+    "FakeModelProvider",
+    "ModelHealth",
+    "ModelProvider",
+    "ModelRequest",
+    "ModelResponse",
+    "OllamaProvider",
+]

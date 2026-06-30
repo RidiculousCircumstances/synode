@@ -20,6 +20,6 @@ make guardrails
 make smoke
 ```
 
-`make smoke` must run without a real LLM by using the deterministic fake model
-provider.
-
+`make smoke` is a deterministic fake-provider smoke and must not require a real
+LLM. Real-provider validation should use `uv run synode models health` and an
+explicit `--model-provider ollama` run.

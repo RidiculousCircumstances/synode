@@ -8,6 +8,8 @@ Mechanical guardrails are required because the system can call tools.
 - Identify the source of truth for mutable state.
 - Confirm the change matches `architecture.yml`.
 - Do not add hidden compatibility fallbacks.
+- Do not add silent fallbacks of any kind. Strict invariants must fail with
+  typed, observable errors.
 - Make failure observable through errors, audit rows, events, or logs.
 - Keep tool permissions explicit and role-scoped.
 - Keep generated/local files out of versioned source unless they are fixtures.
@@ -24,6 +26,8 @@ Mechanical guardrails are required because the system can call tools.
   graph behavior.
 - Tool failures must be returned as visible tool results; they must not be
   silently replaced by unrelated tools.
+- Model/provider, structured-output, MCP, and policy failures must stop the
+  affected flow unless the user explicitly requested a different path.
 
 ## Debt Ratchets
 
@@ -32,4 +36,3 @@ Mechanical guardrails are required because the system can call tools.
 - Do not add a new dependency unless it supports an MVP invariant or removes a
   real repeated workflow.
 - Test fakes must be deterministic.
-

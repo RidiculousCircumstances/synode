@@ -9,7 +9,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from sqlalchemy.types import JSON
 
-from synode.schemas import ApprovalStatus, RunStatus
+from synode.schemas import ApprovalStatus, RunMode, RunStatus
 
 
 def new_id() -> str:
@@ -29,6 +29,7 @@ class RunRecord(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     status: Mapped[str] = mapped_column(String(32), default=RunStatus.CREATED.value, nullable=False)
+    mode: Mapped[str] = mapped_column(String(32), default=RunMode.GENERAL.value, nullable=False)
     task: Mapped[str] = mapped_column(Text, nullable=False)
     workspace: Mapped[str | None] = mapped_column(Text, nullable=True)
     model_provider: Mapped[str] = mapped_column(String(80), nullable=False)
@@ -110,4 +111,3 @@ class MemoryItemRecord(Base):
     key: Mapped[str] = mapped_column(String(200), nullable=False)
     content: Mapped[dict[str, Any]] = mapped_column(JsonType().with_variant(JSONB, "postgresql"), default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-

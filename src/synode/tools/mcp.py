@@ -75,8 +75,8 @@ async def register_mcp_tools(registry: Any, settings: Settings) -> None:
         return
     try:
         from langchain_mcp_adapters.client import MultiServerMCPClient
-    except ImportError:
-        return
+    except ImportError as exc:
+        raise RuntimeError("langchain-mcp-adapters is required when MCP servers are configured") from exc
     for server_name, server_config in servers.items():
         client = MultiServerMCPClient({server_name: server_config})
         tools = await client.get_tools()

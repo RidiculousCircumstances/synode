@@ -12,23 +12,27 @@ SAFE_UV_SUBCOMMANDS = {"run"}
 SAFE_PYTHON_MODULES = {"pytest"}
 
 
+def is_safe_command(argv: list[str]) -> bool:
+    if not argv:
+        return False
+    command = str(argv[0])
+    if command not in SAFE_COMMANDS:
+        return False
+    if command == "git" and len(argv) > 1 and str(argv[1]) not in SAFE_GIT_SUBCOMMANDS:
+        return False
+    if command == "uv" and len(argv) > 1 and str(argv[1]) not in SAFE_UV_SUBCOMMANDS:
+        return False
+    if command in {"python", "python3"} and len(argv) > 2 and argv[1] == "-m" and argv[2] not in SAFE_PYTHON_MODULES:
+        return False
+    return True
+
+
 class ShellTool:
     name = "native.shell"
 
     def classify(self, arguments: dict[str, Any]) -> ToolRisk:
         argv = list(arguments.get("argv", []))
-        if not argv:
-            return ToolRisk.READ
-        command = str(argv[0])
-        if command not in SAFE_COMMANDS:
-            return ToolRisk.WRITE
-        if command == "git" and len(argv) > 1 and str(argv[1]) not in SAFE_GIT_SUBCOMMANDS:
-            return ToolRisk.WRITE
-        if command == "uv" and len(argv) > 1 and str(argv[1]) not in SAFE_UV_SUBCOMMANDS:
-            return ToolRisk.WRITE
-        if command in {"python", "python3"} and len(argv) > 2 and argv[1] == "-m" and argv[2] not in SAFE_PYTHON_MODULES:
-            return ToolRisk.WRITE
-        return ToolRisk.READ
+        return ToolRisk.READ if is_safe_command([str(part) for part in argv]) else ToolRisk.WRITE
 
     async def run(self, context: ToolContext, arguments: dict[str, Any]) -> ToolResult:
         argv = [str(part) for part in arguments.get("argv", [])]
@@ -55,4 +59,3 @@ class ShellTool:
             "stderr": stderr.decode("utf-8", errors="replace")[-12000:],
         }
         return ToolResult(tool_name=self.name, ok=process.returncode == 0, output=output)
-

@@ -14,15 +14,19 @@ from synode.persistence.models import (
     ToolAuditRecord,
     new_id,
 )
-from synode.schemas import ApprovalStatus, EventType, RunResponse, RunStatus, ToolRisk
+from synode.schemas import ApprovalStatus, EventType, RunMode, RunResponse, RunStatus, ToolRisk
 
 
 class Repository:
     def __init__(self, session: AsyncSession):
         self.session = session
 
-    async def create_run(self, task: str, model_provider: str, workspace: str | None = None) -> RunRecord:
-        run = RunRecord(id=new_id(), task=task, model_provider=model_provider, workspace=workspace)
+    async def create_run(
+        self, task: str, model_provider: str, workspace: str | None = None, mode: RunMode = RunMode.GENERAL
+    ) -> RunRecord:
+        run = RunRecord(
+            id=new_id(), task=task, model_provider=model_provider, workspace=workspace, mode=mode.value
+        )
         self.session.add(run)
         await self.session.flush()
         await self.add_event(run.id, EventType.RUN_CREATED.value, None, {"task": task})
@@ -131,11 +135,21 @@ class Repository:
         await self.session.flush()
         return artifact
 
+    async def get_latest_artifact(self, run_id: str, kind: str) -> ArtifactRecord | None:
+        result = await self.session.execute(
+            select(ArtifactRecord)
+            .where(ArtifactRecord.run_id == run_id, ArtifactRecord.kind == kind)
+            .order_by(ArtifactRecord.created_at.desc())
+            .limit(1)
+        )
+        return result.scalars().first()
+
 
 def to_run_response(run: RunRecord) -> RunResponse:
     return RunResponse(
         id=run.id,
         status=RunStatus(run.status),
+        mode=RunMode(run.mode),
         task=run.task,
         workspace=run.workspace,
         model_provider=run.model_provider,
@@ -143,4 +157,3 @@ def to_run_response(run: RunRecord) -> RunResponse:
         created_at=run.created_at,
         updated_at=run.updated_at,
     )
-

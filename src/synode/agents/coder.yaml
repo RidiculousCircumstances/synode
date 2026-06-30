@@ -7,10 +7,13 @@ allowed_tools:
   - native.fs_read
   - native.fs_search
   - native.fs_write
+  - native.git_status
+  - native.git_diff
+  - native.patch_apply
+  - native.verify
   - native.shell
   - mcp.*
 requires_approval_for:
   - write
   - destructive
 output_contract: Summarize inspected files, changes proposed or applied, verification, and residual risks.
-

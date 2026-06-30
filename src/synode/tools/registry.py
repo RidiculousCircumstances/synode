@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from synode.config import Settings
 from synode.tools.base import BaseTool, ToolRegistry
+from synode.tools.coding import GitDiffTool, GitStatusTool, PatchApplyTool, VerifyTool
 from synode.tools.data import DataProfileTool, PythonSandboxTool
 from synode.tools.database import DatabaseReadonlyTool
 from synode.tools.filesystem import FileReadTool, FileSearchTool, FileWriteTool
@@ -16,6 +17,10 @@ async def build_tool_registry(settings: Settings, include_mcp: bool = True) -> T
         FileReadTool(),
         FileSearchTool(),
         FileWriteTool(),
+        GitStatusTool(),
+        GitDiffTool(),
+        PatchApplyTool(),
+        VerifyTool(),
         ShellTool(),
         DataProfileTool(),
         PythonSandboxTool(),

@@ -12,7 +12,7 @@ from synode.persistence.database import Database
 from synode.persistence.repository import Repository, to_run_response
 from synode.registry import RoleRegistry
 from synode.runtime.graph import GraphDependencies, build_graph
-from synode.schemas import ApprovalStatus, EventType, RunResponse, RunStatus
+from synode.schemas import ApprovalStatus, EventType, RunMode, RunResponse, RunStatus
 from synode.tools import ToolExecutor, ToolRegistry, build_tool_registry
 
 
@@ -33,12 +33,16 @@ class OrchestrationService:
         self.tool_executor = ToolExecutor(database, roles, tools, settings)
 
     async def create_run(
-        self, task: str, workspace: str | None = None, model_provider: str | None = None
+        self,
+        task: str,
+        workspace: str | None = None,
+        model_provider: str | None = None,
+        mode: RunMode = RunMode.GENERAL,
     ) -> RunResponse:
         provider = model_provider or self.settings.model_provider
         async with self.database.session() as session:
             repo = Repository(session)
-            run = await repo.create_run(task=task, workspace=workspace, model_provider=provider)
+            run = await repo.create_run(task=task, workspace=workspace, model_provider=provider, mode=mode)
             return to_run_response(run)
 
     async def get_run(self, run_id: str) -> RunResponse:
@@ -66,9 +70,13 @@ class OrchestrationService:
             ]
 
     async def run_task(
-        self, task: str, workspace: str | None = None, model_provider: str | None = None
+        self,
+        task: str,
+        workspace: str | None = None,
+        model_provider: str | None = None,
+        mode: RunMode = RunMode.GENERAL,
     ) -> RunResponse:
-        run = await self.create_run(task, workspace, model_provider)
+        run = await self.create_run(task, workspace, model_provider, mode)
         await self.execute_run(run.id)
         return await self.get_run(run.id)
 
@@ -83,6 +91,7 @@ class OrchestrationService:
             task = run.task
             workspace = run.workspace
             model_provider = run.model_provider
+            mode = run.mode
 
         try:
             state: dict[str, Any] = {
@@ -90,6 +99,7 @@ class OrchestrationService:
                 "task": task,
                 "workspace": workspace,
                 "model_provider": model_provider,
+                "mode": mode,
                 "worker_outputs": [],
             }
             final_state = await self._invoke_graph(run_id, state)
@@ -97,8 +107,11 @@ class OrchestrationService:
             final_answer = final_state.get("final_answer", "")
             async with self.database.session() as session:
                 repo = Repository(session)
-                if review.get("blockers"):
+                blockers = list(review.get("blockers", []))
+                if any("Approval required" in blocker for blocker in blockers):
                     await repo.set_run_status(run_id, RunStatus.WAITING_APPROVAL, final_answer=final_answer)
+                elif mode == RunMode.CODING.value and not review.get("can_proceed", False):
+                    await repo.set_run_status(run_id, RunStatus.FAILED_VERIFICATION, final_answer=final_answer)
                 else:
                     await repo.set_run_status(run_id, RunStatus.COMPLETED, final_answer=final_answer)
                     await repo.add_event(run_id, EventType.RUN_COMPLETED.value, None, {})
@@ -121,6 +134,9 @@ class OrchestrationService:
 
     async def resume_run(self, run_id: str) -> None:
         await self.execute_run(run_id)
+
+    async def model_health(self) -> list[dict[str, object]]:
+        return [health.model_dump(mode="json") for health in await self.models.health()]
 
     async def _invoke_graph(self, run_id: str, state: dict[str, Any]) -> dict[str, Any]:
         deps = GraphDependencies(
@@ -154,6 +170,6 @@ class OrchestrationService:
 async def create_service(settings: Settings, include_mcp: bool = True) -> OrchestrationService:
     database = Database(settings)
     roles = RoleRegistry.load_builtin()
-    models = ModelProviderRegistry()
+    models = ModelProviderRegistry(settings)
     tools = await build_tool_registry(settings, include_mcp=include_mcp)
     return OrchestrationService(settings, database, roles, models, tools)

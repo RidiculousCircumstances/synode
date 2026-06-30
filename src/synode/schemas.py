@@ -17,6 +17,12 @@ class RunStatus(StrEnum):
     WAITING_APPROVAL = "waiting_approval"
     COMPLETED = "completed"
     FAILED = "failed"
+    FAILED_VERIFICATION = "failed_verification"
+
+
+class RunMode(StrEnum):
+    GENERAL = "general"
+    CODING = "coding"
 
 
 class ApprovalStatus(StrEnum):
@@ -81,11 +87,13 @@ class RunCreateRequest(BaseModel):
     task: str
     workspace: str | None = None
     model_provider: str | None = None
+    mode: RunMode = RunMode.GENERAL
 
 
 class RunResponse(BaseModel):
     id: str
     status: RunStatus
+    mode: RunMode
     task: str
     workspace: str | None = None
     model_provider: str
@@ -96,4 +104,3 @@ class RunResponse(BaseModel):
 
 class ApprovalDecision(BaseModel):
     reason: str | None = None
-

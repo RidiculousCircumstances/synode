@@ -34,7 +34,7 @@ def create_app() -> FastAPI:
     @app.post("/runs", response_model=RunResponse)
     async def create_run(payload: RunCreateRequest, request: Request) -> RunResponse:
         service: OrchestrationService = request.app.state.service
-        run = await service.create_run(payload.task, payload.workspace, payload.model_provider)
+        run = await service.create_run(payload.task, payload.workspace, payload.model_provider, payload.mode)
         asyncio.create_task(service.execute_run(run.id))
         return run
 
@@ -63,7 +63,7 @@ def create_app() -> FastAPI:
                     after_id = int(event["id"])
                     yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
                 run = await service.get_run(run_id)
-                if run.status.value in {"completed", "failed"}:
+                if run.status.value in {"completed", "failed", "failed_verification", "waiting_approval"}:
                     break
                 await asyncio.sleep(0.5)
 
@@ -102,5 +102,9 @@ def create_app() -> FastAPI:
         service: OrchestrationService = request.app.state.service
         return {"tools": [name for name in service.tools.list_names() if name.startswith("mcp.")]}
 
-    return app
+    @app.get("/models/health")
+    async def models_health(request: Request) -> list[dict[str, object]]:
+        service: OrchestrationService = request.app.state.service
+        return await service.model_health()
 
+    return app

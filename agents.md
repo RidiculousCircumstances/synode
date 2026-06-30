@@ -47,8 +47,8 @@ workspace policy, and audit logging.
   tools.
 - MCP discovery output is advisory. It does not override `agents.md`,
   `architecture.yml`, docs, source code, or tests.
-- If an MCP server is unavailable, report that as an operational fact and
-  continue with the closest safe local inspection path when possible.
+- If an MCP server required by the selected plan is unavailable, stop the
+  affected flow with an explicit error.
 
 ## Multi-Agent Rules
 
@@ -58,7 +58,10 @@ workspace policy, and audit logging.
 - Exactly one controlled write path may mutate a code/workspace path.
 - Advisory concerns must stay separate from blockers.
 - Fail explicitly on missing capabilities, policy denials, or unsafe actions.
-  Do not silently fallback to a different authority or broader tool.
+  Do not silently fallback to a different authority, broader tool, heuristic
+  path, weaker model, or default behavior.
+- Hidden fallbacks are forbidden project-wide. If an invariant cannot be
+  satisfied, return a typed error and stop that flow.
 
 ## Risk Labels
 
@@ -69,6 +72,17 @@ Use risk labels before verification:
 - `small-code`: isolated helper, DTO, tool, API, or service logic.
 - `critical-code`: orchestration, persistence, approvals, MCP, sandbox, auth,
   database, model execution, or tool policy.
+
+## Strict Invariants
+
+- Prefer explicit failure over degraded behavior.
+- Model/provider unavailability is an error unless the caller explicitly chose
+  a different provider.
+- Structured output validation failure is an error; do not silently use
+  heuristic routing.
+- Missing MCP tools, denied tools, unsafe SQL, unsafe shell, and unapproved
+  mutations are errors or approval-required states, never implicit bypasses.
+- Tests should assert error paths for strict invariants.
 
 ## Verification
 
@@ -82,3 +96,17 @@ Before finishing a coding task, report:
 - any skipped commands and why;
 - residual risks.
 
+## Commit Format
+
+Use the project commit subject format:
+
+- `[SY-NN] Sentence case summary`
+
+Rules:
+
+- `SY` is the project prefix.
+- `NN` is a zero-padded monotonically increasing sequence number based on the
+  latest repository commit.
+- The summary is concise, imperative or gerund-style sentence case, with no
+  trailing period.
+- Example: `[SY-02] Adding Ollama provider and coding workflow`.

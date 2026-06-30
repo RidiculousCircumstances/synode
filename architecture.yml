@@ -6,7 +6,7 @@ components:
     responsibilities:
       - LangGraph orchestration runtime
       - CLI and FastAPI application entrypoints
-      - Model provider abstraction
+      - Model provider abstraction and Ollama provider
       - Tool policy, native tools, and MCP bridge
       - Persistence, audit log, and approval state
   - name: agents
@@ -34,6 +34,8 @@ rules:
   - MCP tools must pass the same policy and audit path as native tools.
   - Persistence owns mutable run, event, approval, artifact, audit, and memory state.
   - Agent role YAML files must not name concrete model IDs.
+  - Runtime decisions must use structured model output or fail explicitly.
+  - Coding workflow mutations must pass patch proposal, approval, patch apply, verification, and review.
 
 entrypoints:
   - name: cli
@@ -48,12 +50,19 @@ entrypoints:
     path: src/synode/cli.py
     type: cli
     command: synode db upgrade
+  - name: model-health
+    path: src/synode/cli.py
+    type: cli
+    command: synode models health
 
 critical_flows:
   - name: run-task
     description: User task becomes a persisted run, graph execution, audited tool calls, reviewer output, and final answer.
+  - name: coding-task
+    description: Coding task flows through structured planning, inspection, patch proposal, approval, patch apply, focused verification, and review.
+  - name: structured-decision
+    description: Supervisor and reviewer model calls must return schema-valid JSON or stop with an explicit error.
   - name: approval
     description: Risky tool requests pause through approval state before execution can resume.
   - name: mcp-tool-call
     description: MCP discovery and calls are normalized into governed tool invocations.
-

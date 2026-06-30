@@ -13,7 +13,10 @@ class Settings(BaseSettings):
     checkpoint_database_url: str = "postgresql://synode:synode@127.0.0.1:15432/synode?sslmode=disable"
     enable_postgres_checkpointer: bool = True
     searxng_url: str = "http://127.0.0.1:18080"
-    model_provider: str = "fake"
+    model_provider: str = "ollama"
+    ollama_base_url: str = "http://127.0.0.1:11434"
+    ollama_model: str = "qwen2.5-coder:7b"
+    model_timeout_seconds: float = 60.0
     workspace_allowlist: str = "/home/rd/proj,/tmp"
     mcp_config_path: Path = Path(".mcp.json")
     shell_timeout_seconds: float = 20.0

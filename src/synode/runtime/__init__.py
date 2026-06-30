@@ -1,4 +1,2 @@
-from synode.runtime.service import OrchestrationService
-
-__all__ = ["OrchestrationService"]
+"""Synode runtime package."""
 
