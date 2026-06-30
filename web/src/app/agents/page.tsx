@@ -1,19 +1,90 @@
 "use client";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Bot, GitBranch, Plus, RefreshCw, X } from "lucide-react";
-import { type FormEvent, useMemo, useState } from "react";
+import { Bot, Copy, GitBranch, Pencil, Plus, Power, PowerOff, RefreshCw, Star, X } from "lucide-react";
+import { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
 
 import AgentGraph from "@/components/AgentGraph";
 import { CompactList, CompactRow, MetricTile, PageHeader, Panel, StatusBadge } from "@/components/ui/primitives";
 import { useRunEvents } from "@/hooks/useRunEvents";
-import { createAgent, createAgentGraph, getRun, listAgentGraphs, listAgents, listModelProfiles, listRuns } from "@/lib/api";
+import {
+  createAgent,
+  createAgentGraph,
+  getRun,
+  listAgentGraphs,
+  listAgents,
+  listModelProfiles,
+  listRuns,
+  listTools,
+  updateAgent,
+  updateAgentGraph,
+} from "@/lib/api";
+import type { AgentGraph as AgentGraphConfig, AgentSpec } from "@/types";
+
+type RoleFormMode = "create" | "edit";
+type GraphFormMode = "create" | "edit" | "clone";
+type GraphTemplateId = "coding" | "data_analysis" | "research" | "db_investigation" | "blank";
+
+type RoleFormState = {
+  id: string | null;
+  name: string;
+  mission: string;
+  allowedTools: string;
+  approvalTools: string;
+  nonGoals: string;
+  outputContract: string;
+  enabled: boolean;
+};
+
+type GraphFormState = {
+  id: string | null;
+  name: string;
+  templateId: GraphTemplateId;
+  roleIds: string[];
+  workerOrder: string[];
+  defaultProfileId: string;
+  roleProfileIds: Record<string, string>;
+  isDefault: boolean;
+  enabled: boolean;
+};
+
+const EMPTY_ROLE_FORM: RoleFormState = {
+  id: null,
+  name: "",
+  mission: "",
+  allowedTools: "",
+  approvalTools: "",
+  nonGoals: "",
+  outputContract: "",
+  enabled: true,
+};
+
+const EMPTY_GRAPH_FORM: GraphFormState = {
+  id: null,
+  name: "",
+  templateId: "coding",
+  roleIds: [],
+  workerOrder: [],
+  defaultProfileId: "",
+  roleProfileIds: {},
+  isDefault: false,
+  enabled: true,
+};
+
+const GRAPH_TEMPLATES: Record<GraphTemplateId, { label: string; workers: string[] }> = {
+  coding: { label: "Coding", workers: ["coder"] },
+  data_analysis: { label: "Data analysis", workers: ["data_analyst"] },
+  research: { label: "Research", workers: ["web_researcher"] },
+  db_investigation: { label: "DB investigation", workers: ["db_agent", "data_analyst"] },
+  blank: { label: "Blank", workers: [] },
+};
 
 export default function AgentsPage() {
   const queryClient = useQueryClient();
   const agentsQuery = useQuery({ queryKey: ["agents"], queryFn: listAgents });
   const graphsQuery = useQuery({ queryKey: ["agent-graphs"], queryFn: listAgentGraphs });
   const profilesQuery = useQuery({ queryKey: ["model-profiles"], queryFn: listModelProfiles });
+  const toolsQuery = useQuery({ queryKey: ["tools"], queryFn: listTools });
   const runsQuery = useQuery({ queryKey: ["runs"], queryFn: listRuns, refetchInterval: 5000 });
   const latestRunId = runsQuery.data?.[0]?.id ?? null;
   const runQuery = useQuery({
@@ -26,103 +97,168 @@ export default function AgentsPage() {
   const agents = agentsQuery.data ?? [];
   const graphs = graphsQuery.data ?? [];
   const profiles = profilesQuery.data ?? [];
-  const [roleName, setRoleName] = useState("");
-  const [roleMission, setRoleMission] = useState("");
-  const [roleTools, setRoleTools] = useState("");
-  const [graphName, setGraphName] = useState("");
-  const [graphRoleIds, setGraphRoleIds] = useState<string[]>([]);
-  const [graphProfileId, setGraphProfileId] = useState("");
+  const roleNameById = useMemo(() => new Map(agents.map((agent) => [agent.id, agent.name])), [agents]);
+  const profileNameById = useMemo(() => new Map(profiles.map((profile) => [profile.id, profile.name])), [profiles]);
+  const createParamHandled = useRef(false);
+  const [roleForm, setRoleForm] = useState<RoleFormState>(EMPTY_ROLE_FORM);
+  const [roleDialogMode, setRoleDialogMode] = useState<RoleFormMode>("create");
   const [roleDialogOpen, setRoleDialogOpen] = useState(false);
+  const [graphForm, setGraphForm] = useState<GraphFormState>(EMPTY_GRAPH_FORM);
+  const [graphDialogMode, setGraphDialogMode] = useState<GraphFormMode>("create");
   const [graphDialogOpen, setGraphDialogOpen] = useState(false);
-  const selectableRoles = useMemo(
-    () => agents.filter((agent) => agent.enabled),
-    [agents],
-  );
-  const resetRoleForm = () => {
-    setRoleName("");
-    setRoleMission("");
-    setRoleTools("");
+
+  const graphValidation = validateGraphForm(graphForm, agents);
+  const graphEdges = buildGraphEdges(graphForm, agents);
+  const graphRoleModelBindings = compactBindings(graphForm.roleProfileIds);
+
+  const closeRoleDialog = () => {
+    setRoleDialogOpen(false);
+    setRoleDialogMode("create");
+    setRoleForm(EMPTY_ROLE_FORM);
   };
-  const resetGraphForm = () => {
-    setGraphName("");
-    setGraphRoleIds([]);
-    setGraphProfileId("");
+  const closeGraphDialog = () => {
+    setGraphDialogOpen(false);
+    setGraphDialogMode("create");
+    setGraphForm(EMPTY_GRAPH_FORM);
   };
+
+  const openCreateRoleDialog = () => {
+    setRoleDialogMode("create");
+    setRoleForm(EMPTY_ROLE_FORM);
+    setRoleDialogOpen(true);
+  };
+  const openEditRoleDialog = (role: AgentSpec) => {
+    setRoleDialogMode("edit");
+    setRoleForm({
+      id: role.id,
+      name: role.name,
+      mission: role.mission,
+      allowedTools: role.allowed_tools.join(", "),
+      approvalTools: role.requires_approval_for.join(", "),
+      nonGoals: role.non_goals.join("\n"),
+      outputContract: role.output_contract,
+      enabled: role.enabled,
+    });
+    setRoleDialogOpen(true);
+  };
+
+  const openCreateGraphDialog = () => {
+    setGraphDialogMode("create");
+    setGraphForm(applyTemplate({ ...EMPTY_GRAPH_FORM, name: "Coding graph" }, "coding", agents));
+    setGraphDialogOpen(true);
+  };
+  const openEditGraphDialog = (graph: AgentGraphConfig) => {
+    setGraphDialogMode("edit");
+    setGraphForm(graphToForm(graph, agents, "edit"));
+    setGraphDialogOpen(true);
+  };
+  const openCloneGraphDialog = (graph: AgentGraphConfig) => {
+    setGraphDialogMode("clone");
+    setGraphForm(graphToForm(graph, agents, "clone"));
+    setGraphDialogOpen(true);
+  };
+
+  useEffect(() => {
+    if (createParamHandled.current || typeof window === "undefined") {
+      return;
+    }
+    const createParam = new URLSearchParams(window.location.search).get("create");
+    if (createParam === "role") {
+      createParamHandled.current = true;
+      openCreateRoleDialog();
+      return;
+    }
+    if (createParam === "agent-graph" && agents.length) {
+      createParamHandled.current = true;
+      openCreateGraphDialog();
+    }
+  }, [agents.length]);
+
   const roleMutation = useMutation({
-    mutationFn: createAgent,
+    mutationFn: async () => {
+      const payload = {
+        mission: roleForm.mission.trim(),
+        non_goals: splitLines(roleForm.nonGoals),
+        allowed_tools: splitComma(roleForm.allowedTools),
+        requires_approval_for: splitComma(roleForm.approvalTools),
+        output_contract: roleForm.outputContract,
+        enabled: roleForm.enabled,
+      };
+      if (roleDialogMode === "edit" && roleForm.id) {
+        return updateAgent(roleForm.id, payload);
+      }
+      return createAgent({ name: roleForm.name.trim(), ...payload });
+    },
     onSuccess: () => {
-      resetRoleForm();
-      setRoleDialogOpen(false);
+      closeRoleDialog();
       void queryClient.invalidateQueries({ queryKey: ["agents"] });
     },
   });
   const graphMutation = useMutation({
-    mutationFn: createAgentGraph,
+    mutationFn: async () => {
+      const payload = {
+        name: graphForm.name.trim(),
+        role_ids: graphForm.roleIds,
+        edges: graphEdges,
+        default_model_profile_id: graphForm.defaultProfileId || null,
+        role_model_profile_ids: graphRoleModelBindings,
+        is_default: graphForm.isDefault,
+        enabled: graphForm.enabled,
+      };
+      if (graphDialogMode === "edit" && graphForm.id) {
+        return updateAgentGraph(graphForm.id, payload);
+      }
+      return createAgentGraph(payload);
+    },
     onSuccess: () => {
-      resetGraphForm();
-      setGraphDialogOpen(false);
+      closeGraphDialog();
+      void queryClient.invalidateQueries({ queryKey: ["agent-graphs"] });
+    },
+  });
+  const graphQuickMutation = useMutation({
+    mutationFn: ({ graphId, payload }: { graphId: string; payload: { is_default?: boolean; enabled?: boolean } }) =>
+      updateAgentGraph(graphId, payload),
+    onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["agent-graphs"] });
     },
   });
 
   const submitRole = (event: FormEvent) => {
     event.preventDefault();
-    if (!roleName.trim() || !roleMission.trim()) {
+    if (!roleForm.mission.trim() || (roleDialogMode === "create" && !roleForm.name.trim())) {
       return;
     }
-    roleMutation.mutate({
-      name: roleName.trim(),
-      mission: roleMission.trim(),
-      allowed_tools: roleTools.split(",").map((tool) => tool.trim()).filter(Boolean),
-      non_goals: [],
-      requires_approval_for: [],
-      output_contract: "",
-      enabled: true,
-    });
+    roleMutation.mutate();
   };
 
   const submitGraph = (event: FormEvent) => {
     event.preventDefault();
-    const roleIds = graphRoleIds.filter(Boolean);
-    if (!graphName.trim() || roleIds.length < 3) {
+    if (!graphValidation.ok) {
       return;
     }
-    graphMutation.mutate({
-      name: graphName.trim(),
-      role_ids: roleIds,
-      edges: roleIds.slice(0, -1).map((roleId, index) => ({
-        from_role: roleId,
-        to_role: roleIds[index + 1],
-      })),
-      default_model_profile_id: graphProfileId || null,
-      role_model_profile_ids: {},
-      is_default: false,
-      enabled: true,
-    });
+    graphMutation.mutate();
   };
 
   return (
     <div className="page-stack">
       <PageHeader
-        eyebrow="nodes"
-        title="Agents"
-        description="Role inventory and latest run graph."
+        eyebrow="workflow config"
+        title="Workflows"
+        description="Graph presets, role inventory, and execution diagnostics."
         icon={Bot}
         summary={
           <div className="summary-grid compact">
+            <MetricTile label="Graphs" value={graphs.length} icon={GitBranch} />
             <MetricTile label="Roles" value={agents.length} />
-            <MetricTile label="Latest run" value={latestRunId ? latestRunId.slice(0, 8) : "n/a"} icon={GitBranch} />
           </div>
         }
       />
       <div className="agents-layout">
-        <Panel title="Latest run graph" className="full-height-panel">
-          <AgentGraph run={runQuery.data ?? null} events={events} agents={agents} />
-        </Panel>
         <Panel
           title="Role catalog"
+          className="role-catalog-panel"
           action={
-            <button type="button" className="primary-button" onClick={() => setRoleDialogOpen(true)}>
+            <button type="button" className="primary-button" onClick={openCreateRoleDialog}>
               <Plus size={15} aria-hidden />
               New role
             </button>
@@ -130,19 +266,31 @@ export default function AgentsPage() {
         >
           <CompactList>
             {agents.map((agent) => (
-              <CompactRow key={agent.name} className="agent-catalog-row">
-                <StatusBadge value={agent.name} />
-                <strong>{agent.mission}</strong>
-                <em>{agent.allowed_tools.length} tools</em>
+              <CompactRow key={agent.id} className="agent-catalog-row with-actions">
+                <div className="profile-copy">
+                  <strong>{agent.name}</strong>
+                  <em>{agent.mission}</em>
+                </div>
+                <StatusBadge value={isSystemRole(agent.name) ? "system" : "worker"} />
+                <span>{agent.allowed_tools.length} tools</span>
+                <span>{agent.requires_approval_for.length} approvals</span>
+                <StatusBadge value={agent.enabled ? "enabled" : "disabled"} />
+                <div className="row-actions">
+                  <button type="button" className="secondary-button compact-control" onClick={() => openEditRoleDialog(agent)}>
+                    <Pencil size={14} aria-hidden />
+                    Edit
+                  </button>
+                </div>
               </CompactRow>
             ))}
           </CompactList>
           {agentsQuery.error ? <div className="error-line">{agentsQuery.error.message}</div> : null}
         </Panel>
         <Panel
-          title="Agent graphs"
+          title="Agent graph presets"
+          className="graph-presets-panel"
           action={
-            <button type="button" className="primary-button" onClick={() => setGraphDialogOpen(true)}>
+            <button type="button" className="primary-button" onClick={openCreateGraphDialog}>
               <Plus size={15} aria-hidden />
               New graph
             </button>
@@ -150,40 +298,63 @@ export default function AgentsPage() {
         >
           <CompactList>
             {graphs.map((graph) => (
-              <CompactRow key={graph.id} className="agent-catalog-row">
+              <CompactRow key={graph.id} className="graph-config-row">
+                <div className="profile-copy">
+                  <strong>{graph.name}</strong>
+                  <em>{graph.role_ids.map((roleId) => roleNameById.get(roleId) ?? roleId.slice(0, 8)).join(" -> ")}</em>
+                </div>
                 <StatusBadge value={graph.is_default ? "default" : graph.enabled ? "enabled" : "disabled"} />
-                <strong>{graph.name}</strong>
                 <span>{graph.role_ids.length} roles</span>
-                <em>{graph.edges.length} edges</em>
+                <span>
+                  {graph.default_model_profile_id
+                    ? profileNameById.get(graph.default_model_profile_id) ?? "profile"
+                    : "runtime default"}
+                </span>
+                <div className="row-actions">
+                  <button type="button" className="secondary-button compact-control" onClick={() => openEditGraphDialog(graph)}>
+                    <Pencil size={14} aria-hidden />
+                    Edit
+                  </button>
+                  <button type="button" className="secondary-button compact-control" onClick={() => openCloneGraphDialog(graph)}>
+                    <Copy size={14} aria-hidden />
+                    Clone
+                  </button>
+                  <button
+                    type="button"
+                    className="secondary-button compact-control"
+                    onClick={() => graphQuickMutation.mutate({ graphId: graph.id, payload: { is_default: true } })}
+                    disabled={graphQuickMutation.isPending || graph.is_default}
+                  >
+                    <Star size={14} aria-hidden />
+                    Default
+                  </button>
+                  <button
+                    type="button"
+                    className="secondary-button compact-control"
+                    onClick={() => graphQuickMutation.mutate({ graphId: graph.id, payload: { enabled: !graph.enabled } })}
+                    disabled={graphQuickMutation.isPending}
+                  >
+                    {graph.enabled ? <PowerOff size={14} aria-hidden /> : <Power size={14} aria-hidden />}
+                    {graph.enabled ? "Disable" : "Enable"}
+                  </button>
+                </div>
               </CompactRow>
             ))}
           </CompactList>
           {graphsQuery.error ? <div className="error-line">{graphsQuery.error.message}</div> : null}
+          {graphQuickMutation.error ? <div className="error-line">{graphQuickMutation.error.message}</div> : null}
+        </Panel>
+        <Panel title="Latest execution graph" className="latest-execution-panel full-height-panel">
+          <AgentGraph run={runQuery.data ?? null} events={events} agents={agents} />
         </Panel>
       </div>
       {roleDialogOpen ? (
-        <div className="modal-layer" role="dialog" aria-modal="true" aria-labelledby="new-role-title">
-          <button
-            type="button"
-            className="modal-backdrop"
-            aria-label="Close dialog"
-            onClick={() => {
-              resetRoleForm();
-              setRoleDialogOpen(false);
-            }}
-          />
+        <div className="modal-layer" role="dialog" aria-modal="true" aria-labelledby="role-title">
+          <button type="button" className="modal-backdrop" aria-label="Close dialog" onClick={closeRoleDialog} />
           <section className="modal-panel">
             <header className="modal-header">
-              <h2 id="new-role-title">New role</h2>
-              <button
-                type="button"
-                className="icon-button"
-                aria-label="Close dialog"
-                onClick={() => {
-                  resetRoleForm();
-                  setRoleDialogOpen(false);
-                }}
-              >
+              <h2 id="role-title">{roleDialogMode === "edit" ? "Edit role" : "New role"}</h2>
+              <button type="button" className="icon-button" aria-label="Close dialog" onClick={closeRoleDialog}>
                 <X size={16} aria-hidden />
               </button>
             </header>
@@ -191,45 +362,73 @@ export default function AgentsPage() {
               <div className="form-grid">
                 <label className="field">
                   <span>Name</span>
-                  <input value={roleName} onChange={(event) => setRoleName(event.target.value)} />
+                  <input
+                    value={roleForm.name}
+                    onChange={(event) => setRoleForm({ ...roleForm, name: event.target.value })}
+                    disabled={roleDialogMode === "edit"}
+                  />
                 </label>
                 <label className="field">
-                  <span>Allowed tools</span>
-                  <input
-                    value={roleTools}
-                    onChange={(event) => setRoleTools(event.target.value)}
-                    placeholder="native.fs_read, mcp.*"
-                  />
+                  <span>Enabled</span>
+                  <select
+                    value={roleForm.enabled ? "true" : "false"}
+                    onChange={(event) => setRoleForm({ ...roleForm, enabled: event.target.value === "true" })}
+                  >
+                    <option value="true">enabled</option>
+                    <option value="false">disabled</option>
+                  </select>
                 </label>
               </div>
               <label className="field">
                 <span>Mission</span>
-                <input value={roleMission} onChange={(event) => setRoleMission(event.target.value)} />
+                <input value={roleForm.mission} onChange={(event) => setRoleForm({ ...roleForm, mission: event.target.value })} />
+              </label>
+              <div className="form-grid">
+                <label className="field">
+                  <span>Allowed tools</span>
+                  <input
+                    value={roleForm.allowedTools}
+                    onChange={(event) => setRoleForm({ ...roleForm, allowedTools: event.target.value })}
+                    placeholder={(toolsQuery.data ?? []).slice(0, 2).join(", ") || "native.fs_read, mcp.*"}
+                  />
+                </label>
+                <label className="field">
+                  <span>Approval tools</span>
+                  <input
+                    value={roleForm.approvalTools}
+                    onChange={(event) => setRoleForm({ ...roleForm, approvalTools: event.target.value })}
+                    placeholder="native.apply_patch"
+                  />
+                </label>
+              </div>
+              <label className="field">
+                <span>Non goals</span>
+                <textarea value={roleForm.nonGoals} rows={4} onChange={(event) => setRoleForm({ ...roleForm, nonGoals: event.target.value })} />
+              </label>
+              <label className="field">
+                <span>Output contract</span>
+                <textarea
+                  value={roleForm.outputContract}
+                  rows={4}
+                  onChange={(event) => setRoleForm({ ...roleForm, outputContract: event.target.value })}
+                />
               </label>
               {roleMutation.error ? <div className="error-line">{roleMutation.error.message}</div> : null}
               <footer className="modal-actions">
-                <button
-                  type="button"
-                  className="secondary-button"
-                  onClick={() => {
-                    resetRoleForm();
-                    setRoleDialogOpen(false);
-                  }}
-                  disabled={roleMutation.isPending}
-                >
+                <button type="button" className="secondary-button" onClick={closeRoleDialog} disabled={roleMutation.isPending}>
                   Cancel
                 </button>
                 <button
                   className="primary-button"
                   type="submit"
-                  disabled={roleMutation.isPending || !roleName.trim() || !roleMission.trim()}
+                  disabled={roleMutation.isPending || !roleForm.mission.trim() || (roleDialogMode === "create" && !roleForm.name.trim())}
                 >
                   {roleMutation.isPending ? (
                     <RefreshCw size={15} aria-hidden className="spin" />
                   ) : (
                     <Plus size={15} aria-hidden />
                   )}
-                  Create role
+                  {roleDialogMode === "edit" ? "Save role" : "Create role"}
                 </button>
               </footer>
             </form>
@@ -237,28 +436,12 @@ export default function AgentsPage() {
         </div>
       ) : null}
       {graphDialogOpen ? (
-        <div className="modal-layer" role="dialog" aria-modal="true" aria-labelledby="new-graph-title">
-          <button
-            type="button"
-            className="modal-backdrop"
-            aria-label="Close dialog"
-            onClick={() => {
-              resetGraphForm();
-              setGraphDialogOpen(false);
-            }}
-          />
-          <section className="modal-panel">
+        <div className="modal-layer" role="dialog" aria-modal="true" aria-labelledby="graph-title">
+          <button type="button" className="modal-backdrop" aria-label="Close dialog" onClick={closeGraphDialog} />
+          <section className="modal-panel graph-wizard-modal">
             <header className="modal-header">
-              <h2 id="new-graph-title">New graph</h2>
-              <button
-                type="button"
-                className="icon-button"
-                aria-label="Close dialog"
-                onClick={() => {
-                  resetGraphForm();
-                  setGraphDialogOpen(false);
-                }}
-              >
+              <h2 id="graph-title">{graphDialogMode === "edit" ? "Edit graph" : graphDialogMode === "clone" ? "Clone graph" : "New graph"}</h2>
+              <button type="button" className="icon-button" aria-label="Close dialog" onClick={closeGraphDialog}>
                 <X size={16} aria-hidden />
               </button>
             </header>
@@ -266,11 +449,31 @@ export default function AgentsPage() {
               <div className="form-grid">
                 <label className="field">
                   <span>Name</span>
-                  <input value={graphName} onChange={(event) => setGraphName(event.target.value)} />
+                  <input value={graphForm.name} onChange={(event) => setGraphForm({ ...graphForm, name: event.target.value })} />
                 </label>
                 <label className="field">
+                  <span>Template</span>
+                  <select
+                    value={graphForm.templateId}
+                    onChange={(event) =>
+                      setGraphForm(applyTemplate(graphForm, event.target.value as GraphTemplateId, agents))
+                    }
+                  >
+                    {Object.entries(GRAPH_TEMPLATES).map(([id, template]) => (
+                      <option key={id} value={id}>
+                        {template.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+              <div className="form-grid">
+                <label className="field">
                   <span>Default profile</span>
-                  <select value={graphProfileId} onChange={(event) => setGraphProfileId(event.target.value)}>
+                  <select
+                    value={graphForm.defaultProfileId}
+                    onChange={(event) => setGraphForm({ ...graphForm, defaultProfileId: event.target.value })}
+                  >
                     <option value="">none/default</option>
                     {profiles.map((profile) => (
                       <option key={profile.id} value={profile.id}>
@@ -279,47 +482,89 @@ export default function AgentsPage() {
                     ))}
                   </select>
                 </label>
+                <label className="field">
+                  <span>Default graph</span>
+                  <select
+                    value={graphForm.isDefault ? "true" : "false"}
+                    onChange={(event) => setGraphForm({ ...graphForm, isDefault: event.target.value === "true" })}
+                  >
+                    <option value="false">no</option>
+                    <option value="true">yes</option>
+                  </select>
+                </label>
               </div>
               <label className="field">
-                <span>Roles</span>
-                <select
-                  multiple
-                  value={graphRoleIds}
-                  onChange={(event) =>
-                    setGraphRoleIds(Array.from(event.currentTarget.selectedOptions).map((option) => option.value))
-                  }
-                >
-                  {selectableRoles.map((agent) => (
-                    <option key={agent.id} value={agent.id}>
-                      {agent.name}
-                    </option>
-                  ))}
+                <span>Workers</span>
+                <select multiple value={graphForm.workerOrder} onChange={(event) => setGraphForm(updateWorkers(graphForm, event.currentTarget, agents))}>
+                  {agents
+                    .filter((agent) => agent.enabled && !isSystemRole(agent.name))
+                    .map((agent) => (
+                      <option key={agent.id} value={agent.id}>
+                        {agent.name}
+                      </option>
+                    ))}
                 </select>
               </label>
+              <div className="graph-binding-grid">
+                {graphForm.roleIds.map((roleId) => (
+                  <label className="field" key={roleId}>
+                    <span>{roleNameById.get(roleId) ?? roleId.slice(0, 8)}</span>
+                    <select
+                      value={graphForm.roleProfileIds[roleId] ?? ""}
+                      onChange={(event) =>
+                        setGraphForm({
+                          ...graphForm,
+                          roleProfileIds: {
+                            ...graphForm.roleProfileIds,
+                            [roleId]: event.target.value,
+                          },
+                        })
+                      }
+                    >
+                      <option value="">graph default</option>
+                      {profiles.map((profile) => (
+                        <option key={profile.id} value={profile.id}>
+                          {profile.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                ))}
+              </div>
+              <div className="form-grid">
+                <label className="field">
+                  <span>Enabled</span>
+                  <select
+                    value={graphForm.enabled ? "true" : "false"}
+                    onChange={(event) => setGraphForm({ ...graphForm, enabled: event.target.value === "true" })}
+                  >
+                    <option value="true">enabled</option>
+                    <option value="false">disabled</option>
+                  </select>
+                </label>
+                <div className="graph-preview">
+                  {graphEdges.map((edge) => (
+                    <span key={`${edge.from_role}-${edge.to_role}`}>
+                      {`${roleNameById.get(edge.from_role) ?? edge.from_role.slice(0, 8)} -> ${
+                        roleNameById.get(edge.to_role) ?? edge.to_role.slice(0, 8)
+                      }`}
+                    </span>
+                  ))}
+                </div>
+              </div>
+              {!graphValidation.ok ? <div className="error-line">{graphValidation.error}</div> : null}
               {graphMutation.error ? <div className="error-line">{graphMutation.error.message}</div> : null}
               <footer className="modal-actions">
-                <button
-                  type="button"
-                  className="secondary-button"
-                  onClick={() => {
-                    resetGraphForm();
-                    setGraphDialogOpen(false);
-                  }}
-                  disabled={graphMutation.isPending}
-                >
+                <button type="button" className="secondary-button" onClick={closeGraphDialog} disabled={graphMutation.isPending}>
                   Cancel
                 </button>
-                <button
-                  className="primary-button"
-                  type="submit"
-                  disabled={graphMutation.isPending || !graphName.trim() || graphRoleIds.filter(Boolean).length < 3}
-                >
+                <button className="primary-button" type="submit" disabled={graphMutation.isPending || !graphValidation.ok}>
                   {graphMutation.isPending ? (
                     <RefreshCw size={15} aria-hidden className="spin" />
                   ) : (
                     <Plus size={15} aria-hidden />
                   )}
-                  Create graph
+                  {graphDialogMode === "edit" ? "Save graph" : "Create graph"}
                 </button>
               </footer>
             </form>
@@ -328,4 +573,106 @@ export default function AgentsPage() {
       ) : null}
     </div>
   );
+}
+
+function applyTemplate(form: GraphFormState, templateId: GraphTemplateId, agents: AgentSpec[]): GraphFormState {
+  const byName = new Map(agents.map((agent) => [agent.name, agent]));
+  const supervisor = byName.get("supervisor");
+  const reviewer = byName.get("reviewer");
+  const workers = GRAPH_TEMPLATES[templateId].workers
+    .map((name) => byName.get(name))
+    .filter((agent): agent is AgentSpec => Boolean(agent?.enabled));
+  const workerOrder = templateId === "blank" ? [] : workers.map((agent) => agent.id);
+  const roleIds = [supervisor?.id, ...workerOrder, reviewer?.id].filter((value): value is string => Boolean(value));
+  return {
+    ...form,
+    templateId,
+    roleIds,
+    workerOrder,
+    roleProfileIds: retainBindings(form.roleProfileIds, roleIds),
+  };
+}
+
+function graphToForm(graph: AgentGraphConfig, agents: AgentSpec[], mode: "edit" | "clone"): GraphFormState {
+  const roleById = new Map(agents.map((agent) => [agent.id, agent]));
+  const workerOrder = graph.role_ids.filter((roleId) => {
+    const role = roleById.get(roleId);
+    return role && !isSystemRole(role.name);
+  });
+  return {
+    id: mode === "edit" ? graph.id : null,
+    name: mode === "clone" ? `Copy of ${graph.name}` : graph.name,
+    templateId: "blank",
+    roleIds: graph.role_ids,
+    workerOrder,
+    defaultProfileId: graph.default_model_profile_id ?? "",
+    roleProfileIds: graph.role_model_profile_ids,
+    isDefault: mode === "edit" ? graph.is_default : false,
+    enabled: graph.enabled,
+  };
+}
+
+function updateWorkers(form: GraphFormState, select: HTMLSelectElement, agents: AgentSpec[]): GraphFormState {
+  const byName = new Map(agents.map((agent) => [agent.name, agent]));
+  const supervisor = byName.get("supervisor");
+  const reviewer = byName.get("reviewer");
+  const workerOrder = Array.from(select.selectedOptions).map((option) => option.value);
+  const roleIds = [supervisor?.id, ...workerOrder, reviewer?.id].filter((value): value is string => Boolean(value));
+  return {
+    ...form,
+    templateId: "blank",
+    roleIds,
+    workerOrder,
+    roleProfileIds: retainBindings(form.roleProfileIds, roleIds),
+  };
+}
+
+function buildGraphEdges(form: GraphFormState, agents: AgentSpec[]) {
+  const byName = new Map(agents.map((agent) => [agent.name, agent]));
+  const supervisor = byName.get("supervisor");
+  const reviewer = byName.get("reviewer");
+  if (!supervisor || !reviewer || !form.workerOrder.length) {
+    return [];
+  }
+  const roleIds = [supervisor.id, ...form.workerOrder, reviewer.id];
+  const edges = [];
+  for (let index = 0; index < roleIds.length - 1; index += 1) {
+    edges.push({ from_role: roleIds[index], to_role: roleIds[index + 1] });
+  }
+  return edges;
+}
+
+function validateGraphForm(form: GraphFormState, agents: AgentSpec[]): { ok: true } | { ok: false; error: string } {
+  if (!form.name.trim()) {
+    return { ok: false, error: "Graph name is required" };
+  }
+  const names = new Set(agents.filter((agent) => form.roleIds.includes(agent.id)).map((agent) => agent.name));
+  if (!names.has("supervisor") || !names.has("reviewer")) {
+    return { ok: false, error: "Graph requires supervisor and reviewer roles" };
+  }
+  if (!form.workerOrder.length) {
+    return { ok: false, error: "Select at least one worker role" };
+  }
+  return { ok: true };
+}
+
+function compactBindings(bindings: Record<string, string>) {
+  return Object.fromEntries(Object.entries(bindings).filter(([, profileId]) => Boolean(profileId)));
+}
+
+function retainBindings(bindings: Record<string, string>, roleIds: string[]) {
+  const allowed = new Set(roleIds);
+  return Object.fromEntries(Object.entries(bindings).filter(([roleId]) => allowed.has(roleId)));
+}
+
+function splitComma(value: string) {
+  return value.split(",").map((item) => item.trim()).filter(Boolean);
+}
+
+function splitLines(value: string) {
+  return value.split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
+}
+
+function isSystemRole(roleName: string) {
+  return roleName === "supervisor" || roleName === "reviewer";
 }

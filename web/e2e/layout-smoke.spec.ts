@@ -72,6 +72,15 @@ test("thread chat renders technical run summary compactly", async ({ page }) => 
   await expect(page.locator(".thread-approval-event")).toHaveCount(1);
   await expect(page.locator(".thread-service-event .thread-message-body")).toHaveCount(0);
   await expect(page.locator(".thread-approval-event .thread-message-body")).toHaveCount(0);
+  await expect(page.locator(".thread-service-copy details summary", { hasText: "details" })).toBeVisible();
+  await expect.poll(async () => {
+    const detailsBox = await page.locator(".thread-service-copy details summary").boundingBox();
+    const serviceBox = await page.locator(".thread-service-copy").boundingBox();
+    if (!detailsBox || !serviceBox) {
+      return 999;
+    }
+    return detailsBox.x - serviceBox.x;
+  }).toBeLessThan(24);
   await expect(page.getByRole("button", { name: "Approve" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Reject" })).toBeVisible();
   await expect(page.locator(".thread-composer-input")).toBeVisible();
@@ -222,9 +231,76 @@ test("entity creation opens modal dialogs from list actions", async ({ page }) =
   expectLayoutStable(beforeGraph, await layoutBox(page));
 });
 
+test("configuration screens edit profiles roles and graph templates", async ({ page }) => {
+  await page.goto("/settings", { waitUntil: "networkidle" });
+  const profileRow = page.locator(".model-profile-row").first();
+  await expect(profileRow).toBeVisible();
+
+  const testRequestPromise = page.waitForRequest(
+    (request) => request.method() === "POST" && request.url().endsWith("/model-profiles/profile-ollama/test"),
+  );
+  await profileRow.getByRole("button", { name: "Test" }).click();
+  await testRequestPromise;
+  await expect(profileRow.locator(".profile-test-result")).toContainText("structured output: ok");
+
+  const profilePatchPromise = page.waitForRequest(
+    (request) => request.method() === "PATCH" && request.url().endsWith("/model-profiles/profile-ollama"),
+  );
+  await profileRow.getByRole("button", { name: "Edit" }).click();
+  await expect(page.getByRole("dialog", { name: "Edit model profile" })).toBeVisible();
+  await page.getByRole("textbox", { name: "Model" }).fill("qwen2.5-coder:7b-instruct");
+  await page.getByRole("button", { name: "Save profile" }).click();
+  await profilePatchPromise;
+
+  await page.goto("/agents", { waitUntil: "networkidle" });
+  const rolePatchPromise = page.waitForRequest(
+    (request) => request.method() === "PATCH" && request.url().endsWith("/agents/role-coder"),
+  );
+  await page.locator(".agent-catalog-row", { hasText: "coder" }).getByRole("button", { name: "Edit" }).click();
+  await expect(page.getByRole("dialog", { name: "Edit role" })).toBeVisible();
+  await page.getByRole("textbox", { name: "Mission" }).fill("Inspect codebases and prepare scoped patches");
+  await page.getByRole("button", { name: "Save role" }).click();
+  await rolePatchPromise;
+
+  const graphCreatePromise = page.waitForRequest(
+    (request) => request.method() === "POST" && request.url().endsWith("/agent-graphs"),
+  );
+  await page.getByRole("button", { name: "New graph" }).click();
+  await expect(page.getByRole("dialog", { name: "New graph" })).toBeVisible();
+  await page.getByRole("button", { name: "Create graph" }).click();
+  const graphCreateRequest = await graphCreatePromise;
+  const graphPayload = graphCreateRequest.postDataJSON() as {
+    role_ids: string[];
+    edges: Array<{ from_role: string; to_role: string }>;
+  };
+  expect(graphPayload.role_ids).toEqual(["role-supervisor", "role-coder", "role-reviewer"]);
+  expect(graphPayload.edges).toEqual([
+    { from_role: "role-supervisor", to_role: "role-coder" },
+    { from_role: "role-coder", to_role: "role-reviewer" },
+  ]);
+});
+
 test("browser API auto-resolution uses the current host", async ({ page }) => {
   await page.goto("/settings", { waitUntil: "domcontentloaded" });
   await expect(page.locator(".header-title code")).toHaveText("http://127.0.0.1:8787");
+});
+
+test("theme switcher applies Synode themes", async ({ page }) => {
+  await page.goto("/threads", { waitUntil: "networkidle" });
+  const menuButton = page.getByRole("button", { name: "Open navigation" });
+  if (await menuButton.isVisible()) {
+    await expect(menuButton).toBeVisible();
+    await menuButton.click();
+    await expect(page.locator(".mobile-nav")).toBeVisible();
+  }
+  const themeSelect = page.locator('select[aria-label="Theme"]:visible');
+
+  await expect(themeSelect).toBeVisible();
+  await themeSelect.selectOption("moss-lantern");
+  await expect(page.locator("html")).toHaveClass(/moss-lantern/);
+
+  await themeSelect.selectOption("gruvbox-material-light");
+  await expect(page.locator("html")).toHaveClass(/gruvbox-material-light/);
 });
 
 type LayoutBox = {
@@ -262,6 +338,7 @@ function expectLayoutStable(before: LayoutBox, after: LayoutBox) {
 async function installApiRoutes(page: Page) {
   await page.route("http://127.0.0.1:8787/**", async (route) => {
     const url = new URL(route.request().url());
+    const method = route.request().method();
     if (url.pathname === "/runs") {
       await fulfillJson(route, [runFixture()]);
       return;
@@ -283,19 +360,58 @@ async function installApiRoutes(page: Page) {
       return;
     }
     if (url.pathname === "/agents") {
+      if (method === "POST") {
+        await fulfillJson(route, { ...agentFixture("role-created", "new_role", "Created from smoke test", []), ...routeJsonBody(route) });
+        return;
+      }
       await fulfillJson(route, agentsFixture());
       return;
     }
+    if (url.pathname.startsWith("/agents/") && method === "PATCH") {
+      const roleId = url.pathname.split("/").at(-1) ?? "role-coder";
+      const role = agentsFixture().find((agent) => agent.id === roleId) ?? agentFixture(roleId, "patched_role", "Patched role", []);
+      await fulfillJson(route, { ...role, ...routeJsonBody(route), updated_at: now });
+      return;
+    }
     if (url.pathname === "/agent-graphs") {
+      if (method === "POST") {
+        await fulfillJson(route, { ...agentGraphsFixture()[0], id: "graph-created", ...routeJsonBody(route), created_at: now, updated_at: now });
+        return;
+      }
       await fulfillJson(route, agentGraphsFixture());
       return;
     }
+    if (url.pathname.startsWith("/agent-graphs/") && method === "PATCH") {
+      const graphId = url.pathname.split("/").at(-1) ?? "graph-default";
+      const graph = agentGraphsFixture().find((item) => item.id === graphId) ?? agentGraphsFixture()[0];
+      await fulfillJson(route, { ...graph, ...routeJsonBody(route), updated_at: now });
+      return;
+    }
     if (url.pathname === "/model-profiles") {
+      if (method === "POST") {
+        await fulfillJson(route, { ...modelProfilesFixture()[0], id: "profile-created", ...routeJsonBody(route), created_at: now, updated_at: now });
+        return;
+      }
       await fulfillJson(route, modelProfilesFixture());
+      return;
+    }
+    if (url.pathname.startsWith("/model-profiles/") && url.pathname.endsWith("/test") && method === "POST") {
+      const profileId = url.pathname.split("/").at(-2) ?? "profile-ollama";
+      await fulfillJson(route, modelProfileTestFixture(profileId));
+      return;
+    }
+    if (url.pathname.startsWith("/model-profiles/") && method === "PATCH") {
+      const profileId = url.pathname.split("/").at(-1) ?? "profile-ollama";
+      const profile = modelProfilesFixture().find((item) => item.id === profileId) ?? modelProfilesFixture()[0];
+      await fulfillJson(route, { ...profile, ...routeJsonBody(route), updated_at: now });
       return;
     }
     if (url.pathname === "/secrets") {
       await fulfillJson(route, []);
+      return;
+    }
+    if (url.pathname === "/tools") {
+      await fulfillJson(route, { tools: ["native.fs_read", "native.git_diff", "native.apply_patch"] });
       return;
     }
     if (url.pathname === "/models/health") {
@@ -378,6 +494,18 @@ async function fulfillJson(route: Route, value: unknown) {
   });
 }
 
+function routeJsonBody(route: Route): Record<string, unknown> {
+  const raw = route.request().postData();
+  if (!raw) {
+    return {};
+  }
+  const parsed: unknown = JSON.parse(raw);
+  if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") {
+    return {};
+  }
+  return parsed as Record<string, unknown>;
+}
+
 function runFixture() {
   return {
     id: runId,
@@ -425,6 +553,24 @@ function modelProfilesFixture() {
       updated_at: now,
     },
   ];
+}
+
+function modelProfileTestFixture(profileId: string) {
+  return {
+    profile_id: profileId,
+    ok: true,
+    provider_type: "ollama",
+    model: "qwen2.5-coder:7b",
+    capabilities: {
+      streaming: true,
+      structured_output: true,
+    },
+    checks: [
+      { name: "health", ok: true, supported: true, latency_ms: 12, error: null },
+      { name: "structured_output", ok: true, supported: true, latency_ms: 18, error: null },
+      { name: "streaming", ok: true, supported: true, latency_ms: 24, error: null },
+    ],
+  };
 }
 
 function agentGraphsFixture() {

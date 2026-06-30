@@ -1,7 +1,8 @@
 "use client";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Play, RefreshCw } from "lucide-react";
+import { Play, Plus, RefreshCw } from "lucide-react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { type FormEvent, useEffect, useState } from "react";
 
@@ -74,7 +75,13 @@ export default function RunComposer() {
           </select>
         </label>
         <label className="field">
-          <span>Model profile</span>
+          <div className="field-heading">
+            <span>Model profile</span>
+            <Link className="field-action-link" href="/settings?create=model-profile">
+              <Plus size={13} aria-hidden />
+              New
+            </Link>
+          </div>
           <select value={profileId} onChange={(event) => setProfileId(event.target.value)}>
             <option value="">default</option>
             {profiles.map((profile) => (
@@ -86,7 +93,13 @@ export default function RunComposer() {
         </label>
       </div>
       <label className="field">
-        <span>Agent graph</span>
+        <div className="field-heading">
+          <span>Agent graph</span>
+          <Link className="field-action-link" href="/workflows?create=agent-graph">
+            <Plus size={13} aria-hidden />
+            New
+          </Link>
+        </div>
         <select value={graphId} onChange={(event) => setGraphId(event.target.value)}>
           <option value="">default</option>
           {graphs.map((graph) => (

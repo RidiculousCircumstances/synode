@@ -23,6 +23,7 @@ from synode.schemas import (
     ArtifactResponse,
     ModelProfileCreateRequest,
     ModelProfileResponse,
+    ModelProfileTestResponse,
     ModelProfileUpdateRequest,
     RunCreateRequest,
     RunEventResponse,
@@ -434,6 +435,14 @@ def create_app() -> FastAPI:
         service: OrchestrationService = request.app.state.service
         try:
             return await service.update_model_profile(profile_id, payload)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/model-profiles/{profile_id}/test", response_model=ModelProfileTestResponse)
+    async def test_model_profile(profile_id: str, request: Request) -> ModelProfileTestResponse:
+        service: OrchestrationService = request.app.state.service
+        try:
+            return await service.test_model_profile(profile_id)
         except LookupError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 

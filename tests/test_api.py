@@ -168,6 +168,61 @@ async def test_api_streams_sse_events(service: OrchestrationService, tmp_path: p
     assert "data: " in text
 
 
+async def test_api_tests_model_profile_capabilities(service: OrchestrationService) -> None:
+    app = create_app()
+    app.state.service = service
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://synode.test") as client:
+        profile = (
+            await client.post(
+                "/model-profiles",
+                json={"name": "fake profile test", "provider_type": "fake", "model": "fake"},
+            )
+        ).json()
+        result = (await client.post(f"/model-profiles/{profile['id']}/test")).json()
+
+    assert result["ok"] is True
+    assert result["capabilities"]["structured_output"] is True
+    assert result["capabilities"]["streaming"] is False
+    assert {check["name"] for check in result["checks"]} == {"health", "structured_output", "streaming"}
+    assert next(check for check in result["checks"] if check["name"] == "streaming")["supported"] is False
+
+
+async def test_api_tests_disabled_model_profile_without_provider_calls(service: OrchestrationService) -> None:
+    app = create_app()
+    app.state.service = service
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://synode.test") as client:
+        profile = (
+            await client.post(
+                "/model-profiles",
+                json={"name": "disabled fake profile", "provider_type": "fake", "model": "fake", "enabled": False},
+            )
+        ).json()
+        result = (await client.post(f"/model-profiles/{profile['id']}/test")).json()
+
+    assert result["ok"] is False
+    assert result["checks"] == [
+        {
+            "name": "health",
+            "ok": False,
+            "supported": True,
+            "latency_ms": None,
+            "error": "profile is disabled",
+        }
+    ]
+
+
+async def test_api_test_model_profile_missing_returns_404(service: OrchestrationService) -> None:
+    app = create_app()
+    app.state.service = service
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://synode.test") as client:
+        response = await client.post("/model-profiles/missing/test")
+
+    assert response.status_code == 404
+
+
 async def test_api_allows_private_lan_ui_origin() -> None:
     app = create_app()
     transport = httpx.ASGITransport(app=app)

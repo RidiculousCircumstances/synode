@@ -21,6 +21,7 @@ import { asPercent, formatBytes } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { useBodyScrollLock } from "@/hooks/useBodyScrollLock";
 import { StatusBadge } from "@/components/ui/primitives";
+import { ThemeSwitcher } from "@/components/ThemeSwitcher";
 
 type NavItem = {
   href: string;
@@ -32,7 +33,7 @@ type NavItem = {
 const NAV_ITEMS: NavItem[] = [
   { href: "/threads", label: "Threads", description: "work queue", icon: MessageSquare },
   { href: "/runs", label: "Runs", description: "runtime", icon: GitBranch },
-  { href: "/agents", label: "Agents", description: "nodes", icon: Bot },
+  { href: "/workflows", label: "Workflows", description: "graphs", icon: Bot },
   { href: "/observability", label: "Observability", description: "metrics", icon: Activity },
   { href: "/settings", label: "Settings", description: "providers", icon: Settings },
 ];
@@ -135,7 +136,9 @@ function Sidebar({
           const active =
             item.href === "/threads"
               ? pathname === "/" || pathname.startsWith("/threads") || pathname.startsWith("/chat")
-              : pathname.startsWith(item.href);
+              : item.href === "/workflows"
+                ? pathname.startsWith("/workflows") || pathname.startsWith("/agents")
+                : pathname.startsWith(item.href);
           const Icon = item.icon;
           return (
             <Link
@@ -155,6 +158,9 @@ function Sidebar({
           );
         })}
       </nav>
+      <div className="sidebar-footer">
+        <ThemeSwitcher />
+      </div>
     </aside>
   );
 }

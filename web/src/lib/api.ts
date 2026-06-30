@@ -5,6 +5,7 @@ import type {
   Artifact,
   ModelHealth,
   ModelProfile,
+  ModelProfileTestResult,
   Run,
   RunEvent,
   RunMetrics,
@@ -272,6 +273,23 @@ export function createAgent(payload: {
   });
 }
 
+export function updateAgent(
+  roleId: string,
+  payload: {
+    mission?: string;
+    non_goals?: string[];
+    allowed_tools?: string[];
+    requires_approval_for?: string[];
+    output_contract?: string;
+    enabled?: boolean;
+  },
+): Promise<AgentSpec> {
+  return request<AgentSpec>(`/agents/${roleId}`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
+}
+
 export function listAgentGraphs(): Promise<AgentGraph[]> {
   return request<AgentGraph[]>("/agent-graphs");
 }
@@ -287,6 +305,24 @@ export function createAgentGraph(payload: {
 }): Promise<AgentGraph> {
   return request<AgentGraph>("/agent-graphs", {
     method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function updateAgentGraph(
+  graphId: string,
+  payload: {
+    name?: string;
+    role_ids?: string[];
+    edges?: Array<{ from_role: string; to_role: string }>;
+    default_model_profile_id?: string | null;
+    role_model_profile_ids?: Record<string, string>;
+    is_default?: boolean;
+    enabled?: boolean;
+  },
+): Promise<AgentGraph> {
+  return request<AgentGraph>(`/agent-graphs/${graphId}`, {
+    method: "PATCH",
     body: JSON.stringify(payload),
   });
 }
@@ -321,8 +357,37 @@ export function createModelProfile(payload: {
   });
 }
 
+export function updateModelProfile(
+  profileId: string,
+  payload: {
+    name?: string;
+    provider_type?: string;
+    base_url?: string | null;
+    model?: string;
+    options?: Record<string, unknown>;
+    secret_id?: string | null;
+    enabled?: boolean;
+  },
+): Promise<ModelProfile> {
+  return request<ModelProfile>(`/model-profiles/${profileId}`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function testModelProfile(profileId: string): Promise<ModelProfileTestResult> {
+  return request<ModelProfileTestResult>(`/model-profiles/${profileId}/test`, {
+    method: "POST",
+    body: "{}",
+  });
+}
+
 export function getModelHealth(): Promise<ModelHealth[]> {
   return request<ModelHealth[]>("/models/health");
+}
+
+export function listTools(): Promise<string[]> {
+  return request<{ tools: string[] }>("/tools").then((response) => response.tools);
 }
 
 export async function eventStreamUrl(runId: string, afterId: number): Promise<string> {

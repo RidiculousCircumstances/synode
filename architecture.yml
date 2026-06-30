@@ -14,7 +14,7 @@ components:
   - name: web
     path: web
     responsibilities:
-      - Next.js operator UI for threads, streamed agent output, runs, approvals, graph, timeline, artifacts, diff/tests, and metrics
+      - Next.js operator UI for threads, streamed agent output, runs, approvals, workflow presets, graph diagnostics, timeline, artifacts, diff/tests, settings, and metrics
       - Runtime API base URL loading through env.js
   - name: agents
     path: src/synode/agents

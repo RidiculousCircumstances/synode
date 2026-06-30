@@ -128,6 +128,14 @@
   routing profiles, prompts, stance packs, templates, smoke workflow, and tests.
 - Verification passed for Fabricator work: `uv run synode fabricator validate`,
   `uv run synode fabricator smoke`, and `uv run pytest tests/test_fabricator.py`.
+- Operator UI now treats model profiles as Settings-managed provider presets
+  with contextual creation links from composers, and treats agent graphs as
+  Workflows-managed execution presets. `/workflows` is the primary navigation
+  route; `/agents` remains available.
+- Verification passed for workflow/profile UX work: `npm --prefix web run
+  lint`, `npm --prefix web run build`, `npm --prefix web run test:e2e`,
+  Docker UI rebuild, HTTP `/workflows` 200, API `/health`, and UI
+  `/api/health`.
 
 ### Now:
 - MVP backend and operator UI include DB-backed runtime configuration screens
@@ -143,6 +151,8 @@
 - Fabricator is available through `synode fabricator ...` and remains advisory:
   it creates planning/review artifacts but does not commit, push, or bypass
   Synode runtime tool policy.
+- Workflow creation is surfaced from the run/thread composers as a navigation
+  action, not embedded in the task composer itself.
 
 ### Next:
 - Tune real-model prompts against broader local workloads.

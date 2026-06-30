@@ -237,6 +237,26 @@ export interface ModelProfile {
   updated_at: string;
 }
 
+export interface ModelProfileTestCheck {
+  name: "health" | "structured_output" | "streaming";
+  ok: boolean;
+  supported: boolean;
+  latency_ms: number | null;
+  error: string | null;
+}
+
+export interface ModelProfileTestResult {
+  profile_id: string;
+  ok: boolean;
+  provider_type: ModelProviderType;
+  model: string;
+  capabilities: {
+    streaming: boolean;
+    structured_output: boolean;
+  };
+  checks: ModelProfileTestCheck[];
+}
+
 export interface AgentGraphEdge {
   from_role: string;
   to_role: string;

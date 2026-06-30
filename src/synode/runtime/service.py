@@ -13,7 +13,7 @@ from langgraph.checkpoint.memory import MemorySaver
 
 from synode.config import Settings
 from synode.logging import log_event
-from synode.models.provider import ModelProviderRegistry
+from synode.models.provider import ModelProviderRegistry, ModelRequest
 from synode.observability import Observability
 from synode.persistence.database import Database
 from synode.persistence.repository import (
@@ -42,7 +42,12 @@ from synode.schemas import (
     GpuMetrics,
     ModelProfileCreateRequest,
     ModelProfileResponse,
+    ModelProfileStructuredProbe,
+    ModelProfileTestCapabilities,
+    ModelProfileTestCheck,
+    ModelProfileTestResponse,
     ModelProfileUpdateRequest,
+    ModelProviderType,
     ProcessMetrics,
     RoleName,
     RunEventResponse,
@@ -978,6 +983,137 @@ class OrchestrationService:
                 payload.model_dump(exclude_unset=True),
             )
             return to_model_profile_response(profile)
+
+    async def test_model_profile(self, profile_id: str) -> ModelProfileTestResponse:
+        async with self.database.session() as session:
+            repo = Repository(session)
+            profile = await repo.get_model_profile(profile_id)
+            if profile is None:
+                raise LookupError(f"model profile not found: {profile_id}")
+            if not profile.enabled:
+                return ModelProfileTestResponse(
+                    profile_id=profile.id,
+                    ok=False,
+                    provider_type=ModelProviderType(profile.provider_type),
+                    model=profile.model,
+                    capabilities=ModelProfileTestCapabilities(streaming=False, structured_output=False),
+                    checks=[
+                        ModelProfileTestCheck(
+                            name="health",
+                            ok=False,
+                            supported=True,
+                            error="profile is disabled",
+                        )
+                    ],
+                )
+
+            provider = await self._provider_for_profile(repo, profile)
+            checks: list[ModelProfileTestCheck] = []
+
+            started = time.perf_counter()
+            health = await provider.health()
+            checks.append(
+                ModelProfileTestCheck(
+                    name="health",
+                    ok=health.ok,
+                    supported=True,
+                    latency_ms=(time.perf_counter() - started) * 1000,
+                    error=health.error,
+                )
+            )
+
+            started = time.perf_counter()
+            try:
+                await provider.invoke(
+                    ModelRequest(
+                        role="model_profile_probe",
+                        prompt="Return a small JSON probe response.",
+                        response_schema=ModelProfileStructuredProbe,
+                        temperature=0.0,
+                        timeout_seconds=15,
+                    )
+                )
+                checks.append(
+                    ModelProfileTestCheck(
+                        name="structured_output",
+                        ok=True,
+                        supported=True,
+                        latency_ms=(time.perf_counter() - started) * 1000,
+                    )
+                )
+            except Exception as exc:
+                checks.append(
+                    ModelProfileTestCheck(
+                        name="structured_output",
+                        ok=False,
+                        supported=True,
+                        latency_ms=(time.perf_counter() - started) * 1000,
+                        error=str(exc),
+                    )
+                )
+
+            supports_streaming = bool(getattr(provider, "supports_streaming", False))
+            invoke_stream: Any = getattr(provider, "invoke_stream", None)
+            if supports_streaming and not callable(invoke_stream):
+                checks.append(
+                    ModelProfileTestCheck(
+                        name="streaming",
+                        ok=False,
+                        supported=True,
+                        error=f"provider {provider.name} advertises streaming without invoke_stream",
+                    )
+                )
+            elif not supports_streaming:
+                checks.append(ModelProfileTestCheck(name="streaming", ok=True, supported=False))
+            else:
+                started = time.perf_counter()
+
+                async def ignore_delta(_delta: str) -> None:
+                    return None
+
+                try:
+                    await invoke_stream(
+                        ModelRequest(
+                            role="model_profile_probe",
+                            prompt="Reply with the word ok.",
+                            temperature=0.0,
+                            timeout_seconds=15,
+                        ),
+                        ignore_delta,
+                    )
+                    checks.append(
+                        ModelProfileTestCheck(
+                            name="streaming",
+                            ok=True,
+                            supported=True,
+                            latency_ms=(time.perf_counter() - started) * 1000,
+                        )
+                    )
+                except Exception as exc:
+                    checks.append(
+                        ModelProfileTestCheck(
+                            name="streaming",
+                            ok=False,
+                            supported=True,
+                            latency_ms=(time.perf_counter() - started) * 1000,
+                            error=str(exc),
+                        )
+                    )
+
+            structured_ok = any(check.name == "structured_output" and check.ok for check in checks)
+            streaming_ok = any(check.name == "streaming" and check.ok and check.supported for check in checks)
+            failed_supported_checks = [check for check in checks if check.supported and not check.ok]
+            return ModelProfileTestResponse(
+                profile_id=profile.id,
+                ok=not failed_supported_checks,
+                provider_type=ModelProviderType(profile.provider_type),
+                model=profile.model,
+                capabilities=ModelProfileTestCapabilities(
+                    streaming=streaming_ok,
+                    structured_output=structured_ok,
+                ),
+                checks=checks,
+            )
 
     async def list_agent_roles(self, limit: int = 100, offset: int = 0) -> list[AgentRoleResponse]:
         async with self.database.session() as session:

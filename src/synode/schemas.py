@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -189,6 +189,33 @@ class ModelProfileResponse(BaseModel):
     enabled: bool
     created_at: datetime
     updated_at: datetime
+
+
+class ModelProfileStructuredProbe(BaseModel):
+    ok: bool
+    message: str
+
+
+class ModelProfileTestCapabilities(BaseModel):
+    streaming: bool
+    structured_output: bool
+
+
+class ModelProfileTestCheck(BaseModel):
+    name: Literal["health", "structured_output", "streaming"]
+    ok: bool
+    supported: bool
+    latency_ms: float | None = None
+    error: str | None = None
+
+
+class ModelProfileTestResponse(BaseModel):
+    profile_id: str
+    ok: bool
+    provider_type: ModelProviderType
+    model: str
+    capabilities: ModelProfileTestCapabilities
+    checks: list[ModelProfileTestCheck] = Field(default_factory=list)
 
 
 class AgentRoleCreateRequest(BaseModel):

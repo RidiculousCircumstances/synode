@@ -25,7 +25,7 @@ from synode.runtime.decisions import (
     WorkerPlanStep,
 )
 from synode.runtime.routing import select_worker_roles
-from synode.schemas import ModelProviderType, RoleName, ToolCall
+from synode.schemas import ModelProfileStructuredProbe, ModelProviderType, RoleName, ToolCall
 
 ModelStreamCallback = Callable[[str], Awaitable[None]]
 
@@ -157,6 +157,9 @@ class FakeModelProvider:
             commands = request.context.get("commands") or [["python", "-m", "pytest"]]
             verification_plan = VerificationPlan(commands=commands, reason="Deterministic fake verification plan.")
             return verification_plan.model_dump(mode="json")
+        if schema is ModelProfileStructuredProbe:
+            probe = ModelProfileStructuredProbe(ok=True, message="fake structured output probe")
+            return probe.model_dump(mode="json")
         raise StructuredOutputValidationError(f"fake provider has no structured fixture for {schema}")
 
     @staticmethod

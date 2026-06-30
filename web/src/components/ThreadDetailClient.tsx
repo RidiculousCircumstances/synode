@@ -8,6 +8,7 @@ import {
   History,
   Pencil,
   Play,
+  Plus,
   RefreshCw,
   Send,
   SlidersHorizontal,
@@ -784,7 +785,13 @@ function FollowUpComposer({
                 </select>
               </label>
               <label className="field">
-                <span>Model profile</span>
+                <div className="field-heading">
+                  <span>Model profile</span>
+                  <Link className="field-action-link" href="/settings?create=model-profile">
+                    <Plus size={13} aria-hidden />
+                    New
+                  </Link>
+                </div>
                 <select value={profileId} onChange={(event) => setProfileId(event.target.value)} disabled={disabled}>
                   <option value="">thread/default</option>
                   {profiles.map((profile) => (
@@ -796,7 +803,13 @@ function FollowUpComposer({
               </label>
             </div>
             <label className="field">
-              <span>Agent graph</span>
+              <div className="field-heading">
+                <span>Agent graph</span>
+                <Link className="field-action-link" href="/workflows?create=agent-graph">
+                  <Plus size={13} aria-hidden />
+                  New
+                </Link>
+              </div>
               <select value={graphId} onChange={(event) => setGraphId(event.target.value)} disabled={disabled}>
                 <option value="">thread/default</option>
                 {graphs.map((graph) => (
