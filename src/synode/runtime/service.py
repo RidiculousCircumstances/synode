@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import shutil
 import time
 from contextlib import asynccontextmanager, suppress
+from datetime import UTC, datetime, timedelta
 from typing import Any, AsyncIterator
 
 from langgraph.checkpoint.memory import MemorySaver
 
 from synode.config import Settings
+from synode.logging import log_event
 from synode.models.provider import ModelProviderRegistry
 from synode.observability import Observability
 from synode.persistence.database import Database
@@ -47,6 +50,8 @@ from synode.schemas import (
     RunMode,
     RunResponse,
     RunStatus,
+    RuntimeStatusResponse,
+    SandboxStatusResponse,
     SecretCreateRequest,
     SecretResponse,
     SecretUpdateRequest,
@@ -60,14 +65,20 @@ from synode.schemas import (
     TokenUsage,
     ToolAuditResponse,
     ToolRisk,
+    WorkerHeartbeatResponse,
 )
 from synode.security import SecretCipher
 from synode.tools import ToolExecutor, ToolRegistry, build_tool_registry
+from synode.tools.sandbox import SandboxRunner
+
+logger = logging.getLogger(__name__)
 
 ACTIVE_RUN_STATUSES = {
     RunStatus.CREATED.value,
+    RunStatus.QUEUED.value,
     RunStatus.RUNNING.value,
     RunStatus.WAITING_APPROVAL.value,
+    RunStatus.CANCELLING.value,
 }
 
 TERMINAL_RUN_STATUSES = {
@@ -116,10 +127,17 @@ class OrchestrationService:
                 raise LookupError(f"run not found: {run_id}")
             if run.status in TERMINAL_RUN_STATUSES:
                 raise ValueError(f"run is terminal: {run_id}")
-        task = self._run_tasks.get(run_id)
-        if task is not None and not task.done():
-            raise ValueError(f"run already has an active executor task: {run_id}")
-        self._run_tasks[run_id] = asyncio.create_task(self._execute_run_background(run_id))
+            if run.status in {RunStatus.RUNNING.value, RunStatus.CANCELLING.value}:
+                raise ValueError(f"run is already active: {run_id}")
+            await repo.enqueue_run(run_id)
+            log_event(
+                logger,
+                EventType.RUN_QUEUED.value,
+                run_id=run.id,
+                thread_id=run.thread_id,
+                trace_id=run.observability_trace_id,
+                provider=run.model_provider,
+            )
 
     async def _execute_run_background(self, run_id: str) -> None:
         try:
@@ -473,6 +491,20 @@ class OrchestrationService:
                 raise LookupError(f"run not found: {run_id}")
             if run.status in TERMINAL_RUN_STATUSES:
                 return
+            if run.status == RunStatus.CANCELLING.value:
+                await repo.set_run_status(
+                    run_id,
+                    RunStatus.CANCELLED,
+                    final_answer=run.error or "Run stopped by user.",
+                    error=run.error or "Run stopped by user.",
+                )
+                await repo.add_event(
+                    run_id,
+                    EventType.RUN_CANCELLED.value,
+                    None,
+                    {"reason": run.error or "Run stopped by user."},
+                )
+                return
             await repo.set_run_status(run_id, RunStatus.RUNNING)
             await repo.add_event(run_id, EventType.RUN_STARTED.value, None, {})
             task = run.task
@@ -488,6 +520,15 @@ class OrchestrationService:
             mode = run.mode
             trace_id = run.observability_trace_id
             thread_id = run.thread_id
+            log_event(
+                logger,
+                EventType.RUN_STARTED.value,
+                run_id=run_id,
+                thread_id=thread_id,
+                trace_id=trace_id,
+                provider=model_provider,
+                mode=mode,
+            )
             conversation_context = await self._conversation_context(repo, thread_id, run_id)
             await repo.add_thread_message(
                 thread_id,
@@ -531,6 +572,14 @@ class OrchestrationService:
                 blockers = list(review.get("blockers", []))
                 if any("Approval required" in blocker for blocker in blockers):
                     await repo.set_run_status(run_id, RunStatus.WAITING_APPROVAL, final_answer=final_answer)
+                    log_event(
+                        logger,
+                        RunStatus.WAITING_APPROVAL.value,
+                        run_id=run_id,
+                        thread_id=thread_id,
+                        trace_id=trace_id,
+                        provider=model_provider,
+                    )
                     await repo.add_thread_message(
                         thread_id,
                         author_type=ThreadMessageAuthorType.SYSTEM,
@@ -542,6 +591,14 @@ class OrchestrationService:
                     )
                 elif mode == RunMode.CODING.value and not review.get("can_proceed", False):
                     await repo.set_run_status(run_id, RunStatus.FAILED_VERIFICATION, final_answer=final_answer)
+                    log_event(
+                        logger,
+                        RunStatus.FAILED_VERIFICATION.value,
+                        run_id=run_id,
+                        thread_id=thread_id,
+                        trace_id=trace_id,
+                        provider=model_provider,
+                    )
                     await repo.add_thread_message(
                         thread_id,
                         author_type=ThreadMessageAuthorType.AGENT,
@@ -554,6 +611,14 @@ class OrchestrationService:
                 else:
                     await repo.set_run_status(run_id, RunStatus.COMPLETED, final_answer=final_answer)
                     await repo.add_event(run_id, EventType.RUN_COMPLETED.value, None, {})
+                    log_event(
+                        logger,
+                        EventType.RUN_COMPLETED.value,
+                        run_id=run_id,
+                        thread_id=thread_id,
+                        trace_id=trace_id,
+                        provider=model_provider,
+                    )
                     await repo.add_thread_message(
                         thread_id,
                         author_type=ThreadMessageAuthorType.AGENT,
@@ -564,7 +629,7 @@ class OrchestrationService:
                         metadata={"status": RunStatus.COMPLETED.value},
                     )
         except asyncio.CancelledError:
-            await self._mark_run_cancelled(run_id, self._stop_reasons.pop(run_id, "Run stopped by user."))
+            await self._mark_run_cancelled(run_id, await self._cancellation_reason(run_id))
             raise
         except Exception as exc:
             async with self.database.session() as session:
@@ -574,6 +639,14 @@ class OrchestrationService:
                     return
                 await repo.set_run_status(run_id, RunStatus.FAILED, error=str(exc))
                 await repo.add_event(run_id, EventType.RUN_FAILED.value, None, {"error": str(exc)})
+                log_event(
+                    logger,
+                    EventType.RUN_FAILED.value,
+                    run_id=run_id,
+                    thread_id=run.thread_id if run is not None else None,
+                    error_class=exc.__class__.__name__,
+                    error=str(exc),
+                )
                 if run is not None:
                     await repo.add_thread_message(
                         run.thread_id,
@@ -662,6 +735,7 @@ class OrchestrationService:
         await self.execute_run(run_id)
 
     async def stop_run(self, run_id: str, reason: str | None = None) -> RunResponse:
+        stop_reason = reason or "Run stopped by user."
         async with self.database.session() as session:
             repo = Repository(session)
             run = await repo.get_run(run_id)
@@ -669,14 +743,19 @@ class OrchestrationService:
                 raise LookupError(f"run not found: {run_id}")
             if run.status in TERMINAL_RUN_STATUSES:
                 return to_run_response(run)
+            if run.status == RunStatus.CANCELLING.value:
+                return to_run_response(run)
+            if run.status == RunStatus.RUNNING.value and run_id not in self._run_tasks:
+                await repo.request_run_cancellation(run_id, stop_reason)
+                return to_run_response(run)
         task = self._run_tasks.get(run_id)
         if task is not None and not task.done():
-            self._stop_reasons[run_id] = reason or "Run stopped by user."
+            self._stop_reasons[run_id] = stop_reason
             task.cancel()
             with suppress(asyncio.CancelledError):
                 await task
         else:
-            await self._mark_run_cancelled(run_id, reason or "Run stopped by user.")
+            await self._mark_run_cancelled(run_id, stop_reason)
         return await self.get_run(run_id)
 
     async def _mark_run_cancelled(self, run_id: str, reason: str) -> None:
@@ -690,6 +769,14 @@ class OrchestrationService:
             await repo.reject_pending_approvals(run_id, reason)
             await repo.set_run_status(run_id, RunStatus.CANCELLED, final_answer=reason, error=reason)
             await repo.add_event(run_id, EventType.RUN_CANCELLED.value, None, {"reason": reason})
+            log_event(
+                logger,
+                EventType.RUN_CANCELLED.value,
+                run_id=run_id,
+                thread_id=run.thread_id,
+                error_class="CancelledError",
+                error=reason,
+            )
             await repo.add_thread_message(
                 run.thread_id,
                 author_type=ThreadMessageAuthorType.SYSTEM,
@@ -698,6 +785,116 @@ class OrchestrationService:
                 content=f"Run cancelled: {reason}",
                 run_id=run_id,
                 metadata={"status": RunStatus.CANCELLED.value},
+            )
+
+    async def _cancellation_reason(self, run_id: str) -> str:
+        reason = self._stop_reasons.pop(run_id, None)
+        if reason:
+            return reason
+        async with self.database.session() as session:
+            repo = Repository(session)
+            run = await repo.get_run(run_id)
+            if run is not None and run.error:
+                return run.error
+        return "Run stopped by user."
+
+    async def claim_next_queued_run(self, worker_id: str) -> RunResponse | None:
+        async with self.database.session() as session:
+            repo = Repository(session)
+            run = await repo.claim_next_queued_run(worker_id)
+            return to_run_response(run) if run is not None else None
+
+    async def heartbeat_run(self, run_id: str, worker_id: str) -> None:
+        async with self.database.session() as session:
+            repo = Repository(session)
+            await repo.heartbeat_run(run_id, worker_id)
+
+    async def record_worker_heartbeat(
+        self,
+        *,
+        worker_id: str,
+        hostname: str,
+        pid: int,
+        status: str,
+        current_run_id: str | None,
+        started_at: datetime,
+    ) -> WorkerHeartbeatResponse:
+        async with self.database.session() as session:
+            repo = Repository(session)
+            record = await repo.upsert_worker_heartbeat(
+                worker_id=worker_id,
+                hostname=hostname,
+                pid=pid,
+                status=status,
+                current_run_id=current_run_id,
+                started_at=started_at,
+            )
+            return WorkerHeartbeatResponse(
+                worker_id=record.worker_id,
+                hostname=record.hostname,
+                pid=record.pid,
+                status=record.status,
+                current_run_id=record.current_run_id,
+                started_at=record.started_at,
+                heartbeat_at=record.heartbeat_at,
+            )
+
+    async def recover_stale_runs(self) -> dict[str, int]:
+        stale_before = datetime.now(UTC) - timedelta(seconds=self.settings.worker_stale_after_seconds)
+        async with self.database.session() as session:
+            repo = Repository(session)
+            return await repo.recover_stale_runs(stale_before)
+
+    async def runtime_status(self) -> RuntimeStatusResponse:
+        stale_before = datetime.now(UTC) - timedelta(seconds=self.settings.worker_stale_after_seconds)
+        async with self.database.session() as session:
+            repo = Repository(session)
+            heartbeats = await repo.list_worker_heartbeats()
+            queue_depth = await repo.count_runs(RunStatus.QUEUED)
+            running_count = await repo.count_runs(RunStatus.RUNNING)
+            cancelling_count = await repo.count_runs(RunStatus.CANCELLING)
+            stale_running_count = await repo.count_stale_running_runs(stale_before)
+        return RuntimeStatusResponse(
+            queue_depth=queue_depth,
+            running_count=running_count,
+            cancelling_count=cancelling_count,
+            stale_running_count=stale_running_count,
+            workers=[
+                WorkerHeartbeatResponse(
+                    worker_id=heartbeat.worker_id,
+                    hostname=heartbeat.hostname,
+                    pid=heartbeat.pid,
+                    status=heartbeat.status,
+                    current_run_id=heartbeat.current_run_id,
+                    started_at=heartbeat.started_at,
+                    heartbeat_at=heartbeat.heartbeat_at,
+                )
+                for heartbeat in heartbeats
+            ],
+            sandbox=self.sandbox_status(),
+        )
+
+    def sandbox_status(self) -> SandboxStatusResponse:
+        status = SandboxRunner(self.settings).status()
+        return SandboxStatusResponse(
+            backend=status.backend,
+            available=status.available,
+            detail=status.detail,
+            cpu_seconds=status.cpu_seconds,
+            memory_mb=status.memory_mb,
+            disk_mb=status.disk_mb,
+            output_max_bytes=status.output_max_bytes,
+        )
+
+    async def cleanup_retention(self) -> dict[str, int]:
+        async with self.database.session() as session:
+            repo = Repository(session)
+            return await repo.cleanup_retention(
+                run_event_days=self.settings.run_event_retention_days,
+                model_delta_days=self.settings.model_delta_retention_days,
+                tool_audit_days=self.settings.tool_audit_retention_days,
+                artifact_days=self.settings.artifact_retention_days,
+                archived_thread_days=self.settings.archived_thread_retention_days,
             )
 
     async def model_health(self, limit: int = 50, offset: int = 0) -> list[dict[str, object]]:
@@ -1147,6 +1344,7 @@ class OrchestrationService:
 
 
 async def create_service(settings: Settings, include_mcp: bool = True) -> OrchestrationService:
+    settings.validate_startup()
     database = Database(settings)
     roles = RoleRegistry.load_builtin()
     models = ModelProviderRegistry(settings)

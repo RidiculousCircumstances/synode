@@ -129,6 +129,28 @@ async def test_api_stops_run_without_request_body(service: OrchestrationService,
     )
 
 
+async def test_api_queues_runs_and_exposes_runtime_status(
+    service: OrchestrationService, tmp_path: pathlib.Path
+) -> None:
+    app = create_app()
+    app.state.service = service
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://synode.test") as client:
+        created = (
+            await client.post(
+                "/runs",
+                json={"task": "Queue this run", "workspace": str(tmp_path), "model_provider": "fake"},
+            )
+        ).json()
+        runtime = (await client.get("/runtime/status")).json()
+        sandbox = (await client.get("/runtime/sandbox")).json()
+
+    assert created["status"] == RunStatus.QUEUED.value
+    assert runtime["queue_depth"] == 1
+    assert runtime["sandbox"]["available"] is True
+    assert sandbox["backend"] == "process"
+
+
 async def test_api_streams_sse_events(service: OrchestrationService, tmp_path: pathlib.Path) -> None:
     (tmp_path / "data.csv").write_text("date,revenue\n2026-06-01,10\n", encoding="utf-8")
     run = await service.run_task("Analyze sample data", workspace=str(tmp_path), model_provider="fake")

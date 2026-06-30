@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+import json
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from synode.persistence.models import (
@@ -18,6 +19,7 @@ from synode.persistence.models import (
     ThreadMessageRecord,
     ThreadRecord,
     ToolAuditRecord,
+    WorkerHeartbeatRecord,
     new_id,
 )
 from synode.schemas import (
@@ -39,6 +41,10 @@ from synode.schemas import (
     ThreadStatus,
     ToolRisk,
 )
+
+MAX_EVENT_PAYLOAD_BYTES = 65536
+MAX_TOOL_AUDIT_PAYLOAD_BYTES = 65536
+MAX_ARTIFACT_PAYLOAD_BYTES = 262144
 
 
 class Repository:
@@ -242,6 +248,28 @@ class Repository:
         result = await self.session.execute(query.limit(limit).offset(offset))
         return list(result.scalars().all())
 
+    async def count_runs(self, status: RunStatus | None = None) -> int:
+        query = select(func.count()).select_from(RunRecord)
+        if status is not None:
+            query = query.where(RunRecord.status == status.value)
+        return int(await self.session.scalar(query) or 0)
+
+    async def count_stale_running_runs(self, stale_before: datetime) -> int:
+        return int(
+            await self.session.scalar(
+                select(func.count())
+                .select_from(RunRecord)
+                .where(
+                    RunRecord.status.in_({RunStatus.RUNNING.value, RunStatus.CANCELLING.value}),
+                    or_(
+                        RunRecord.heartbeat_at < stale_before,
+                        RunRecord.heartbeat_at.is_(None) & (RunRecord.updated_at < stale_before),
+                    ),
+                )
+            )
+            or 0
+        )
+
     async def list_events(self, run_id: str, after_id: int = 0, limit: int = 200) -> list[RunEventRecord]:
         result = await self.session.execute(
             select(RunEventRecord)
@@ -273,8 +301,32 @@ class Repository:
         run = await self.get_run(run_id)
         if run is None:
             raise LookupError(f"run not found: {run_id}")
+        now = datetime.now(UTC)
         run.status = status.value
-        run.updated_at = datetime.now(UTC)
+        run.updated_at = now
+        if status == RunStatus.QUEUED:
+            run.queued_at = now
+            run.completed_at = None
+        elif status == RunStatus.RUNNING:
+            run.started_at = run.started_at or now
+            run.heartbeat_at = now
+            run.completed_at = None
+        elif status in {
+            RunStatus.WAITING_APPROVAL,
+            RunStatus.COMPLETED,
+            RunStatus.FAILED,
+            RunStatus.FAILED_VERIFICATION,
+            RunStatus.CANCELLED,
+        }:
+            run.worker_id = None
+            run.heartbeat_at = None
+            if status in {
+                RunStatus.COMPLETED,
+                RunStatus.FAILED,
+                RunStatus.FAILED_VERIFICATION,
+                RunStatus.CANCELLED,
+            }:
+                run.completed_at = now
         await self.touch_thread(run.thread_id)
         if final_answer is not None:
             run.final_answer = final_answer
@@ -282,10 +334,150 @@ class Repository:
             run.error = error
         await self.session.flush()
 
+    async def enqueue_run(self, run_id: str) -> RunRecord:
+        run = await self.get_run(run_id)
+        if run is None:
+            raise LookupError(f"run not found: {run_id}")
+        if run.status in {
+            RunStatus.RUNNING.value,
+            RunStatus.CANCELLING.value,
+            RunStatus.COMPLETED.value,
+            RunStatus.FAILED.value,
+            RunStatus.FAILED_VERIFICATION.value,
+            RunStatus.CANCELLED.value,
+        }:
+            raise ValueError(f"run cannot be queued from status {run.status}: {run_id}")
+        if run.status == RunStatus.WAITING_APPROVAL.value:
+            pending = await self.count_approvals(run_id, status=ApprovalStatus.PENDING)
+            if pending:
+                raise ValueError(f"run has pending approvals: {run_id}")
+        if run.status != RunStatus.QUEUED.value:
+            await self.set_run_status(run_id, RunStatus.QUEUED)
+            await self.add_event(run_id, EventType.RUN_QUEUED.value, None, {})
+        return run
+
+    async def claim_next_queued_run(self, worker_id: str) -> RunRecord | None:
+        query = (
+            select(RunRecord)
+            .where(RunRecord.status == RunStatus.QUEUED.value)
+            .order_by(RunRecord.queued_at.asc().nulls_last(), RunRecord.created_at.asc(), RunRecord.id.asc())
+            .limit(1)
+        )
+        if self.session.bind is not None and self.session.bind.dialect.name == "postgresql":
+            query = query.with_for_update(skip_locked=True)
+        result = await self.session.execute(query)
+        run = result.scalars().first()
+        if run is None:
+            return None
+        now = datetime.now(UTC)
+        run.status = RunStatus.RUNNING.value
+        run.worker_id = worker_id
+        run.started_at = now
+        run.heartbeat_at = now
+        run.completed_at = None
+        run.updated_at = now
+        await self.touch_thread(run.thread_id)
+        await self.session.flush()
+        return run
+
+    async def heartbeat_run(self, run_id: str, worker_id: str) -> None:
+        run = await self.get_run(run_id)
+        if run is None:
+            raise LookupError(f"run not found: {run_id}")
+        if run.status not in {RunStatus.RUNNING.value, RunStatus.CANCELLING.value}:
+            return
+        run.worker_id = worker_id
+        run.heartbeat_at = datetime.now(UTC)
+        await self.session.flush()
+
+    async def request_run_cancellation(self, run_id: str, reason: str) -> RunRecord:
+        run = await self.get_run(run_id)
+        if run is None:
+            raise LookupError(f"run not found: {run_id}")
+        if run.status == RunStatus.CANCELLING.value:
+            return run
+        run.status = RunStatus.CANCELLING.value
+        run.error = reason
+        run.updated_at = datetime.now(UTC)
+        await self.touch_thread(run.thread_id)
+        await self.add_event(run_id, EventType.RUN_CANCELLING.value, None, {"reason": reason})
+        await self.add_thread_message(
+            run.thread_id,
+            author_type=ThreadMessageAuthorType.SYSTEM,
+            author_name="runtime",
+            message_type=ThreadMessageType.RUN_SUMMARY,
+            content=f"Run cancelling: {reason}",
+            run_id=run_id,
+            metadata={"status": RunStatus.CANCELLING.value},
+        )
+        await self.session.flush()
+        return run
+
+    async def recover_stale_runs(self, stale_before: datetime) -> dict[str, int]:
+        running = await self.session.execute(
+            select(RunRecord).where(
+                RunRecord.status == RunStatus.RUNNING.value,
+                or_(
+                    RunRecord.heartbeat_at < stale_before,
+                    RunRecord.heartbeat_at.is_(None) & (RunRecord.updated_at < stale_before),
+                ),
+            )
+        )
+        cancelling = await self.session.execute(
+            select(RunRecord).where(
+                RunRecord.status == RunStatus.CANCELLING.value,
+                or_(
+                    RunRecord.heartbeat_at < stale_before,
+                    RunRecord.heartbeat_at.is_(None) & (RunRecord.updated_at < stale_before),
+                ),
+            )
+        )
+        recovered = 0
+        cancelled = 0
+        for run in running.scalars().all():
+            now = datetime.now(UTC)
+            run.status = RunStatus.QUEUED.value
+            run.worker_id = None
+            run.queued_at = now
+            run.heartbeat_at = None
+            run.updated_at = now
+            run.error = "Recovered stale running run after worker heartbeat expired."
+            await self.touch_thread(run.thread_id)
+            await self.add_event(
+                run.id,
+                EventType.RUN_QUEUED.value,
+                None,
+                {"reason": "stale_worker_recovery"},
+            )
+            recovered += 1
+        for run in cancelling.scalars().all():
+            run.worker_id = None
+            run.heartbeat_at = None
+            await self.set_run_status(
+                run.id,
+                RunStatus.CANCELLED,
+                final_answer=run.error or "Run stopped by user.",
+                error=run.error or "Run stopped by user.",
+            )
+            await self.add_event(
+                run.id,
+                EventType.RUN_CANCELLED.value,
+                None,
+                {"reason": run.error or "Run stopped by user.", "stale": True},
+            )
+            cancelled += 1
+        await self.session.flush()
+        return {"requeued": recovered, "cancelled": cancelled}
+
     async def add_event(
         self, run_id: str, event_type: str, role: str | None, payload: dict[str, Any]
     ) -> RunEventRecord:
-        event = RunEventRecord(run_id=run_id, event_type=event_type, role=role, payload=payload)
+        event = RunEventRecord(
+            run_id=run_id,
+            event_type=event_type,
+            role=role,
+            payload=_truncate_json_payload(payload, MAX_EVENT_PAYLOAD_BYTES),
+        )
         self.session.add(event)
         await self.session.flush()
         return event
@@ -404,8 +596,8 @@ class Repository:
             tool_name=tool_name,
             risk=risk.value,
             status=status,
-            input=input_payload,
-            output=output_payload,
+            input=_truncate_json_payload(input_payload, MAX_TOOL_AUDIT_PAYLOAD_BYTES),
+            output=_truncate_json_payload(output_payload, MAX_TOOL_AUDIT_PAYLOAD_BYTES),
             approval_id=approval_id,
         )
         self.session.add(record)
@@ -421,7 +613,13 @@ class Repository:
     async def add_artifact(
         self, run_id: str, kind: str, content: dict[str, Any], path: str | None = None
     ) -> ArtifactRecord:
-        artifact = ArtifactRecord(id=new_id(), run_id=run_id, kind=kind, path=path, content=content)
+        artifact = ArtifactRecord(
+            id=new_id(),
+            run_id=run_id,
+            kind=kind,
+            path=path,
+            content=_truncate_json_payload(content, MAX_ARTIFACT_PAYLOAD_BYTES),
+        )
         self.session.add(artifact)
         await self.add_event(
             run_id,
@@ -460,6 +658,99 @@ class Repository:
             .offset(offset)
         )
         return list(result.scalars().all())
+
+    async def upsert_worker_heartbeat(
+        self,
+        worker_id: str,
+        hostname: str,
+        pid: int,
+        status: str,
+        current_run_id: str | None,
+        started_at: datetime,
+    ) -> WorkerHeartbeatRecord:
+        now = datetime.now(UTC)
+        record = await self.session.get(WorkerHeartbeatRecord, worker_id)
+        if record is None:
+            record = WorkerHeartbeatRecord(
+                worker_id=worker_id,
+                hostname=hostname,
+                pid=pid,
+                status=status,
+                current_run_id=current_run_id,
+                started_at=started_at,
+                heartbeat_at=now,
+            )
+            self.session.add(record)
+        else:
+            record.hostname = hostname
+            record.pid = pid
+            record.status = status
+            record.current_run_id = current_run_id
+            record.heartbeat_at = now
+        await self.session.flush()
+        return record
+
+    async def list_worker_heartbeats(self, limit: int = 50) -> list[WorkerHeartbeatRecord]:
+        result = await self.session.execute(
+            select(WorkerHeartbeatRecord)
+            .order_by(WorkerHeartbeatRecord.heartbeat_at.desc(), WorkerHeartbeatRecord.worker_id)
+            .limit(limit)
+        )
+        return list(result.scalars().all())
+
+    async def cleanup_retention(
+        self,
+        *,
+        now: datetime | None = None,
+        run_event_days: int,
+        model_delta_days: int,
+        tool_audit_days: int,
+        artifact_days: int,
+        archived_thread_days: int,
+    ) -> dict[str, int]:
+        current = now or datetime.now(UTC)
+        model_delta_result = await self.session.execute(
+            delete(RunEventRecord).where(
+                RunEventRecord.event_type == EventType.MODEL_TOKEN_DELTA.value,
+                RunEventRecord.created_at < current - timedelta(days=model_delta_days),
+            )
+        )
+        event_result = await self.session.execute(
+            delete(RunEventRecord).where(
+                RunEventRecord.event_type != EventType.MODEL_TOKEN_DELTA.value,
+                RunEventRecord.created_at < current - timedelta(days=run_event_days),
+            )
+        )
+        audit_result = await self.session.execute(
+            delete(ToolAuditRecord).where(
+                ToolAuditRecord.created_at < current - timedelta(days=tool_audit_days)
+            )
+        )
+        artifact_result = await self.session.execute(
+            delete(ArtifactRecord).where(ArtifactRecord.created_at < current - timedelta(days=artifact_days))
+        )
+
+        archived_cutoff = current - timedelta(days=archived_thread_days)
+        archived_thread_ids = select(ThreadRecord.id).where(
+            ThreadRecord.status == ThreadStatus.ARCHIVED.value,
+            ThreadRecord.updated_at < archived_cutoff,
+        )
+        runs_result = await self.session.execute(delete(RunRecord).where(RunRecord.thread_id.in_(archived_thread_ids)))
+        threads_result = await self.session.execute(
+            delete(ThreadRecord).where(
+                ThreadRecord.status == ThreadStatus.ARCHIVED.value,
+                ThreadRecord.updated_at < archived_cutoff,
+            )
+        )
+        await self.session.flush()
+        return {
+            "run_events_deleted": _rowcount(event_result),
+            "model_deltas_deleted": _rowcount(model_delta_result),
+            "tool_audit_deleted": _rowcount(audit_result),
+            "artifacts_deleted": _rowcount(artifact_result),
+            "archived_threads_deleted": _rowcount(threads_result),
+            "runs_deleted": _rowcount(runs_result),
+        }
 
     async def count_tool_audit(self, run_id: str, statuses: set[str] | None = None) -> int:
         query = select(func.count()).select_from(ToolAuditRecord).where(ToolAuditRecord.run_id == run_id)
@@ -788,6 +1079,12 @@ def to_run_response(run: RunRecord) -> RunResponse:
         agent_graph_snapshot=run.agent_graph_snapshot or {},
         observability_trace_id=run.observability_trace_id,
         final_answer=run.final_answer,
+        error=run.error,
+        worker_id=run.worker_id,
+        queued_at=run.queued_at,
+        started_at=run.started_at,
+        completed_at=run.completed_at,
+        heartbeat_at=run.heartbeat_at,
         created_at=run.created_at,
         updated_at=run.updated_at,
     )
@@ -912,3 +1209,24 @@ def _has_cycle(role_ids: list[str], edges: list[dict[str, str]]) -> bool:
         return False
 
     return any(visit(role_id) for role_id in role_ids)
+
+
+def _truncate_json_payload(payload: dict[str, Any], max_bytes: int) -> dict[str, Any]:
+    try:
+        encoded = json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
+    except TypeError:
+        payload = json.loads(json.dumps(payload, ensure_ascii=False, default=str))
+        encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return payload
+    preview = encoded[: max(0, max_bytes - 256)].decode("utf-8", errors="replace")
+    return {
+        "_truncated": True,
+        "original_size_bytes": len(encoded),
+        "max_size_bytes": max_bytes,
+        "preview": preview,
+    }
+
+
+def _rowcount(result: Any) -> int:
+    return int(getattr(result, "rowcount", 0) or 0)

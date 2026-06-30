@@ -3,7 +3,9 @@ from __future__ import annotations
 import pathlib
 
 from synode.persistence.repository import Repository
+from synode.registry import RoleRegistry
 from synode.schemas import ApprovalStatus, ToolCall
+from synode.tools import build_tool_registry
 from synode.tools.base import ToolExecutor
 
 
@@ -43,3 +45,34 @@ async def test_write_tool_requires_approval_and_resumes(
     assert second.ok
     assert (tmp_path / "result.txt").read_text(encoding="utf-8") == "ok"
 
+
+async def test_approved_write_fails_closed_without_sandbox_backend(
+    settings, database, tmp_path: pathlib.Path
+) -> None:
+    sandboxless_settings = settings.model_copy(update={"sandbox_backend": "none"})
+    tools = await build_tool_registry(sandboxless_settings, include_mcp=False)
+    executor = ToolExecutor(
+        database,
+        RoleRegistry.load_builtin(),
+        tools,
+        sandboxless_settings,
+    )
+    async with database.session() as session:
+        repo = Repository(session)
+        run = await repo.create_run("write a file", model_provider="fake", workspace=str(tmp_path))
+        run_id = run.id
+
+    call = ToolCall(name="native.fs_write", arguments={"path": "blocked.txt", "content": "nope"})
+    first = await executor.execute(run_id, "coder", str(tmp_path), call)
+    assert first.approval_id
+
+    async with database.session() as session:
+        repo = Repository(session)
+        await repo.decide_approval(first.approval_id, ApprovalStatus.APPROVED, "test")
+
+    second = await executor.execute(run_id, "coder", str(tmp_path), call)
+
+    assert not second.ok
+    assert second.error is not None
+    assert "sandbox unavailable" in second.error
+    assert not (tmp_path / "blocked.txt").exists()

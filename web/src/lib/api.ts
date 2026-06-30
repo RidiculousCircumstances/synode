@@ -9,6 +9,8 @@ import type {
   RunEvent,
   RunMetrics,
   RunMode,
+  RuntimeStatus,
+  SandboxStatus,
   Secret,
   Thread,
   ThreadDetail,
@@ -241,6 +243,14 @@ export function getRunMetrics(runId: string): Promise<RunMetrics> {
 
 export function getSystemMetrics(): Promise<SystemMetrics> {
   return request<SystemMetrics>("/metrics/system");
+}
+
+export function getRuntimeStatus(): Promise<RuntimeStatus> {
+  return request<RuntimeStatus>("/runtime/status");
+}
+
+export function getSandboxStatus(): Promise<SandboxStatus> {
+  return request<SandboxStatus>("/runtime/sandbox");
 }
 
 export function listAgents(): Promise<AgentSpec[]> {

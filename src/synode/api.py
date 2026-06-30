@@ -31,6 +31,8 @@ from synode.schemas import (
     RunResponse,
     RunStatus,
     RunStopRequest,
+    RuntimeStatusResponse,
+    SandboxStatusResponse,
     SecretCreateRequest,
     SecretResponse,
     SecretUpdateRequest,
@@ -107,7 +109,7 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
-        return detail
+        return await service.get_thread(detail.thread.id)
 
     @app.get("/threads", response_model=list[ThreadResponse])
     async def list_threads(
@@ -207,7 +209,7 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
-        return run
+        return await service.get_run(run.id)
 
     @app.post("/runs", response_model=RunResponse)
     async def create_run(payload: RunCreateRequest, request: Request) -> RunResponse:
@@ -232,7 +234,7 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
-        return run
+        return await service.get_run(run.id)
 
     @app.get("/runs", response_model=list[RunResponse])
     async def list_runs(
@@ -506,5 +508,15 @@ def create_app() -> FastAPI:
     async def metrics_system(request: Request) -> SystemMetricsResponse:
         service: OrchestrationService = request.app.state.service
         return await service.system_metrics()
+
+    @app.get("/runtime/status", response_model=RuntimeStatusResponse)
+    async def runtime_status(request: Request) -> RuntimeStatusResponse:
+        service: OrchestrationService = request.app.state.service
+        return await service.runtime_status()
+
+    @app.get("/runtime/sandbox", response_model=SandboxStatusResponse)
+    async def runtime_sandbox(request: Request) -> SandboxStatusResponse:
+        service: OrchestrationService = request.app.state.service
+        return service.sandbox_status()
 
     return app

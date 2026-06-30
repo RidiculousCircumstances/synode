@@ -44,7 +44,10 @@ class ThreadRecord(Base):
 
 class RunRecord(Base):
     __tablename__ = "runs"
-    __table_args__ = (Index("ix_runs_thread_created", "thread_id", "created_at"),)
+    __table_args__ = (
+        Index("ix_runs_thread_created", "thread_id", "created_at"),
+        Index("ix_runs_status_created", "status", "created_at"),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     thread_id: Mapped[str] = mapped_column(ForeignKey("threads.id", ondelete="RESTRICT"), nullable=False)
@@ -64,6 +67,11 @@ class RunRecord(Base):
     observability_trace_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     final_answer: Mapped[str | None] = mapped_column(Text, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    worker_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    queued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
@@ -160,6 +168,19 @@ class MemoryItemRecord(Base):
     key: Mapped[str] = mapped_column(String(200), nullable=False)
     content: Mapped[dict[str, Any]] = mapped_column(JsonType().with_variant(JSONB, "postgresql"), default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class WorkerHeartbeatRecord(Base):
+    __tablename__ = "worker_heartbeats"
+    __table_args__ = (Index("ix_worker_heartbeats_heartbeat", "heartbeat_at"),)
+
+    worker_id: Mapped[str] = mapped_column(String(120), primary_key=True)
+    hostname: Mapped[str] = mapped_column(String(255), nullable=False)
+    pid: Mapped[int] = mapped_column(nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    current_run_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    heartbeat_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 class SecretRecord(Base):

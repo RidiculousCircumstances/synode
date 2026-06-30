@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import hashlib
 from typing import Any
 
@@ -39,6 +38,7 @@ class PatchApplyTool:
         return ToolRisk.WRITE
 
     async def run(self, context: ToolContext, arguments: dict[str, Any]) -> ToolResult:
+        context.sandbox.ensure_available()
         patches = list(arguments.get("patches", []))
         if not patches:
             return ToolResult(tool_name=self.name, ok=False, risk=ToolRisk.WRITE, error="patches are required")
@@ -106,28 +106,19 @@ class VerifyTool:
 
 async def _run_command(context: ToolContext, argv: list[str], tool_name: str) -> ToolResult:
     cwd = context.workspace_policy.resolve_workspace(context.workspace)
-    process = await asyncio.create_subprocess_exec(
-        *argv,
-        cwd=str(cwd),
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
+    result = await context.sandbox.run_command(
+        argv,
+        cwd=cwd,
+        timeout=context.settings.shell_timeout_seconds,
     )
-    try:
-        stdout, stderr = await asyncio.wait_for(
-            process.communicate(), timeout=context.settings.shell_timeout_seconds
-        )
-    except TimeoutError:
-        process.kill()
-        await process.wait()
-        return ToolResult(tool_name=tool_name, ok=False, error="command timed out")
     return ToolResult(
         tool_name=tool_name,
-        ok=process.returncode == 0,
+        ok=result.ok,
+        error=result.error,
         output={
             "argv": argv,
-            "returncode": process.returncode,
-            "stdout": stdout.decode("utf-8", errors="replace")[-12000:],
-            "stderr": stderr.decode("utf-8", errors="replace")[-12000:],
+            "returncode": result.returncode,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
         },
     )
-

@@ -12,6 +12,7 @@ from synode.persistence.models import ApprovalRecord
 from synode.persistence.repository import Repository
 from synode.registry import RoleRegistry
 from synode.schemas import ApprovalStatus, ToolCall, ToolResult, ToolRisk
+from synode.tools.sandbox import SandboxRunner, SandboxUnavailable
 from synode.tools.workspace import WorkspacePolicy
 
 
@@ -32,6 +33,7 @@ class ToolContext:
     workspace: str | None
     settings: Settings
     workspace_policy: WorkspacePolicy
+    sandbox: SandboxRunner
 
 
 class ToolRegistry:
@@ -68,6 +70,7 @@ class ToolExecutor:
         self.settings = settings
         self.observability = observability or Observability(settings)
         self.workspace_policy = WorkspacePolicy(settings.workspace_allowlist_paths)
+        self.sandbox = SandboxRunner(settings)
 
     async def execute(
         self,
@@ -87,6 +90,7 @@ class ToolExecutor:
             workspace=workspace,
             settings=self.settings,
             workspace_policy=self.workspace_policy,
+            sandbox=self.sandbox,
         )
         with self.observability.observation(
             f"tool.{call.name}",
@@ -154,6 +158,35 @@ class ToolExecutor:
                         output=result.model_dump(mode="json"),
                         level="WARNING",
                         status_message="approval required",
+                    )
+                    return result
+
+            if risk in {ToolRisk.WRITE, ToolRisk.DESTRUCTIVE}:
+                try:
+                    self.sandbox.ensure_available()
+                except SandboxUnavailable as exc:
+                    result = ToolResult(
+                        tool_name=call.name,
+                        ok=False,
+                        risk=risk,
+                        error=f"sandbox unavailable: {exc}",
+                    )
+                    async with self.database.session() as session:
+                        repo = Repository(session)
+                        await repo.add_tool_audit(
+                            run_id,
+                            role_name,
+                            call.name,
+                            risk,
+                            "sandbox_unavailable",
+                            call.arguments,
+                            result.model_dump(mode="json"),
+                            approval_id=approved_approval_id,
+                        )
+                    self.observability.update_current_span(
+                        output=result.model_dump(mode="json"),
+                        level="ERROR",
+                        status_message=result.error,
                     )
                     return result
 

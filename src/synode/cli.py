@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import json
+import signal
 from pathlib import Path
 
 import typer
@@ -13,6 +16,7 @@ from synode.config import Settings
 from synode.persistence.database import Database
 from synode.persistence.urls import to_sync_database_url
 from synode.runtime.service import create_service
+from synode.runtime.worker import RunWorker
 from synode.schemas import RunMode
 
 app = typer.Typer(no_args_is_help=True)
@@ -21,11 +25,17 @@ agents_app = typer.Typer(help="Agent registry commands")
 tools_app = typer.Typer(help="Tool registry commands")
 mcp_app = typer.Typer(help="MCP commands")
 models_app = typer.Typer(help="Model provider commands")
+worker_app = typer.Typer(help="Worker commands")
+runtime_app = typer.Typer(help="Runtime diagnostics")
+maintenance_app = typer.Typer(help="Maintenance commands")
 app.add_typer(db_app, name="db")
 app.add_typer(agents_app, name="agents")
 app.add_typer(tools_app, name="tools")
 app.add_typer(mcp_app, name="mcp")
 app.add_typer(models_app, name="models")
+app.add_typer(worker_app, name="worker")
+app.add_typer(runtime_app, name="runtime")
+app.add_typer(maintenance_app, name="maintenance")
 console = Console()
 
 
@@ -174,6 +184,80 @@ def models_health() -> None:
                 console.print(health)
         finally:
             await service.database.close()
+
+    asyncio.run(_run())
+
+
+@worker_app.command("run")
+def worker_run(worker_id: str | None = typer.Option(None, "--worker-id")) -> None:
+    async def _run() -> None:
+        service = await create_service(Settings(), include_mcp=True)
+        worker = RunWorker(service, worker_id=worker_id)
+        loop = asyncio.get_running_loop()
+        for signame in ("SIGINT", "SIGTERM"):
+            with contextlib.suppress(NotImplementedError):
+                loop.add_signal_handler(getattr(signal, signame), worker.stop)
+        try:
+            await worker.serve_forever()
+        finally:
+            await service.close()
+
+    asyncio.run(_run())
+
+
+@worker_app.command("once")
+def worker_once(worker_id: str | None = typer.Option(None, "--worker-id")) -> None:
+    async def _run() -> None:
+        service = await create_service(Settings(), include_mcp=True)
+        try:
+            worker = RunWorker(service, worker_id=worker_id)
+            did_work = await worker.run_once()
+            console.print(json.dumps({"did_work": did_work, "worker_id": worker.worker_id}))
+        finally:
+            await service.close()
+
+    asyncio.run(_run())
+
+
+@runtime_app.command("status")
+def runtime_status(check: bool = typer.Option(False, "--check")) -> None:
+    async def _run() -> None:
+        service = await create_service(Settings(), include_mcp=False)
+        try:
+            status = await service.runtime_status()
+            if check and not status.workers:
+                raise typer.Exit(1)
+            console.print_json(data=status.model_dump(mode="json"))
+        finally:
+            await service.close()
+
+    asyncio.run(_run())
+
+
+@runtime_app.command("sandbox")
+def runtime_sandbox() -> None:
+    async def _run() -> None:
+        service = await create_service(Settings(), include_mcp=False)
+        try:
+            status = service.sandbox_status()
+            if not status.available:
+                raise typer.Exit(1)
+            console.print_json(data=status.model_dump(mode="json"))
+        finally:
+            await service.close()
+
+    asyncio.run(_run())
+
+
+@maintenance_app.command("cleanup")
+def maintenance_cleanup() -> None:
+    async def _run() -> None:
+        service = await create_service(Settings(), include_mcp=False)
+        try:
+            result = await service.cleanup_retention()
+            console.print_json(data=result)
+        finally:
+            await service.close()
 
     asyncio.run(_run())
 

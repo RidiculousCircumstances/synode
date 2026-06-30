@@ -38,7 +38,7 @@ import {
   StatusBadge,
 } from "@/components/ui/primitives";
 
-const RUN_BUSY_STATUSES: RunStatus[] = ["created", "running", "waiting_approval"];
+const RUN_BUSY_STATUSES: RunStatus[] = ["created", "queued", "running", "waiting_approval", "cancelling"];
 
 export default function ThreadDetailClient({ threadId }: { threadId: string }) {
   const queryClient = useQueryClient();
@@ -977,11 +977,19 @@ function buildProcessingStatus(run: Run | null, events: RunEvent[]): ProcessingS
       spinning: false,
     };
   }
+  if (run.status === "cancelling") {
+    return {
+      kind: "runtime",
+      text: "Cancelling run",
+      runId: run.id,
+      spinning: true,
+    };
+  }
   const latest = [...events].reverse().find((event) => event.run_id === run.id);
   if (!latest) {
     return {
       kind: "runtime",
-      text: run.status === "created" ? "Queued" : "Starting run",
+      text: run.status === "created" || run.status === "queued" ? "Queued" : "Starting run",
       runId: run.id,
       spinning: true,
     };
@@ -1042,6 +1050,12 @@ function describeRunEvent(event: RunEvent): string {
   }
   if (event.event_type === "run_started") {
     return "Run started";
+  }
+  if (event.event_type === "run_queued") {
+    return "Queued";
+  }
+  if (event.event_type === "run_cancelling") {
+    return "Cancelling run";
   }
   if (event.event_type === "intake_completed") {
     return "Task intake completed";

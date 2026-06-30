@@ -32,6 +32,7 @@ import {
   decideApproval,
   getRun,
   getRunMetrics,
+  getRuntimeStatus,
   getSystemMetrics,
   listAgents,
   listArtifacts,
@@ -50,7 +51,7 @@ import {
   shortId,
 } from "@/lib/format";
 import { useRunEvents } from "@/hooks/useRunEvents";
-import type { Approval, Artifact, Run, RunEvent, RunMetrics, SystemMetrics, ToolAudit } from "@/types";
+import type { Approval, Artifact, Run, RunEvent, RunMetrics, RuntimeStatus, SystemMetrics, ToolAudit } from "@/types";
 
 type RunTab = "overview" | "agents" | "timeline" | "artifacts" | "diff-tests" | "approvals" | "metrics";
 
@@ -74,7 +75,7 @@ const RUN_TABS: Array<{
   { id: "approvals", label: "Approvals", description: "gates", icon: ShieldCheck },
   { id: "metrics", label: "Metrics", description: "usage", icon: Activity },
 ];
-const RUN_ACTIVE_STATUSES = new Set(["created", "running", "waiting_approval"]);
+const RUN_ACTIVE_STATUSES = new Set(["created", "queued", "running", "waiting_approval", "cancelling"]);
 
 export default function RunDetailClient({ runId }: { runId: string }) {
   const router = useRouter();
@@ -114,6 +115,11 @@ export default function RunDetailClient({ runId }: { runId: string }) {
     queryFn: getSystemMetrics,
     refetchInterval: 4000,
   });
+  const runtimeStatusQuery = useQuery({
+    queryKey: ["runtime-status"],
+    queryFn: getRuntimeStatus,
+    refetchInterval: 4000,
+  });
   const events = useRunEvents(runId);
 
   const setTab = (tab: RunTab) => {
@@ -128,6 +134,7 @@ export default function RunDetailClient({ runId }: { runId: string }) {
   const approvals = approvalsQuery.data ?? [];
   const metrics = metricsQuery.data ?? null;
   const system = systemMetricsQuery.data ?? null;
+  const runtime = runtimeStatusQuery.data ?? null;
   const stopMutation = useMutation({
     mutationFn: () => stopRun(runId),
     onSuccess: () => {
@@ -180,7 +187,7 @@ export default function RunDetailClient({ runId }: { runId: string }) {
       {stopMutation.error ? <div className="error-line">{stopMutation.error.message}</div> : null}
       <PageTabs active={activeTab} items={tabItems} onChange={setTab} ariaLabel="Run detail tabs" />
       {activeTab === "overview" ? (
-        <OverviewTab run={run} events={events} artifacts={artifacts} approvals={approvals} metrics={metrics} />
+        <OverviewTab run={run} events={events} artifacts={artifacts} approvals={approvals} metrics={metrics} runtime={runtime} />
       ) : null}
       {activeTab === "agents" ? (
         <Panel title="Agent graph" className="full-height-panel">
@@ -191,7 +198,7 @@ export default function RunDetailClient({ runId }: { runId: string }) {
       {activeTab === "artifacts" ? <ArtifactsTab artifacts={artifacts} /> : null}
       {activeTab === "diff-tests" ? <DiffTestsTab audit={audit} /> : null}
       {activeTab === "approvals" ? <ApprovalsTab approvals={approvals} runId={runId} /> : null}
-      {activeTab === "metrics" ? <MetricsTab metrics={metrics} system={system} /> : null}
+      {activeTab === "metrics" ? <MetricsTab metrics={metrics} system={system} runtime={runtime} /> : null}
     </div>
   );
 }
@@ -237,12 +244,14 @@ function OverviewTab({
   artifacts,
   approvals,
   metrics,
+  runtime,
 }: {
   run: Run;
   events: RunEvent[];
   artifacts: Artifact[];
   approvals: Approval[];
   metrics: RunMetrics | null;
+  runtime: RuntimeStatus | null;
 }) {
   const selectedRoles = Array.from(
     new Set(events.map((event) => event.role).filter((role): role is string => role !== null)),
@@ -260,6 +269,20 @@ function OverviewTab({
           <MetricTile label="Pending approvals" value={metrics?.pending_approval_count ?? approvals.filter((item) => item.status === "pending").length} />
           <MetricTile label="Artifacts" value={artifacts.length} />
         </div>
+      </Panel>
+      <Panel title="Diagnostics">
+        <div className="metric-list">
+          <MetricTile label="Queue" value={runtime?.queue_depth ?? 0} />
+          <MetricTile label="Worker" value={run.worker_id ? shortId(run.worker_id) : "unclaimed"} />
+          <MetricTile label="Heartbeat" value={run.heartbeat_at ? formatDateTime(run.heartbeat_at) : "n/a"} />
+          <MetricTile
+            label="Sandbox"
+            value={<StatusBadge value={runtime?.sandbox.available ? "ready" : "error"}>{runtime?.sandbox.backend ?? "unknown"}</StatusBadge>}
+            tone={runtime?.sandbox.available === false ? "danger" : "normal"}
+          />
+        </div>
+        {run.error ? <div className="error-line">{run.error}</div> : null}
+        {runtime?.stale_running_count ? <div className="error-line">Stale running runs: {runtime.stale_running_count}</div> : null}
       </Panel>
       <Panel title="Roles">
         <div className="chip-list">
@@ -513,9 +536,11 @@ function ApprovalsTab({ approvals, runId }: { approvals: Approval[]; runId: stri
 function MetricsTab({
   metrics,
   system,
+  runtime,
 }: {
   metrics: RunMetrics | null;
   system: SystemMetrics | null;
+  runtime: RuntimeStatus | null;
 }) {
   return (
     <div className="metrics-workbench">
@@ -554,6 +579,25 @@ function MetricsTab({
           <ResourceBar label="RAM" value={system?.process.memory_percent ?? 0} />
           <ResourceBar label="GPU" value={system?.gpu[0]?.utilization_percent ?? 0} />
         </div>
+      </Panel>
+      <Panel title="Worker queue">
+        <div className="summary-grid">
+          <MetricTile label="Queued" value={runtime?.queue_depth ?? 0} />
+          <MetricTile label="Running" value={runtime?.running_count ?? 0} />
+          <MetricTile label="Cancelling" value={runtime?.cancelling_count ?? 0} />
+          <MetricTile label="Stale" value={runtime?.stale_running_count ?? 0} tone={(runtime?.stale_running_count ?? 0) > 0 ? "danger" : "normal"} />
+        </div>
+        <CompactList>
+          {(runtime?.workers ?? []).map((worker) => (
+            <CompactRow key={worker.worker_id} className="provider-row">
+              <strong>{shortId(worker.worker_id)}</strong>
+              <StatusBadge value={worker.status} />
+              <span>{worker.current_run_id ? shortId(worker.current_run_id) : "idle"}</span>
+              <em>{formatDateTime(worker.heartbeat_at)}</em>
+            </CompactRow>
+          ))}
+          {runtime && !runtime.workers.length ? <EmptyState title="No worker heartbeat" /> : null}
+        </CompactList>
       </Panel>
     </div>
   );

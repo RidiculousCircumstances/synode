@@ -1,7 +1,9 @@
 export type RunStatus =
   | "created"
+  | "queued"
   | "running"
   | "waiting_approval"
+  | "cancelling"
   | "completed"
   | "failed"
   | "failed_verification"
@@ -38,6 +40,12 @@ export interface Run {
   agent_graph_snapshot: Record<string, unknown>;
   observability_trace_id: string | null;
   final_answer: string | null;
+  error: string | null;
+  worker_id: string | null;
+  queued_at: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  heartbeat_at: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -152,6 +160,35 @@ export interface SystemMetrics {
     memory_total_mb: number | null;
     error: string | null;
   }>;
+}
+
+export interface SandboxStatus {
+  backend: string;
+  available: boolean;
+  detail: string | null;
+  cpu_seconds: number;
+  memory_mb: number;
+  disk_mb: number;
+  output_max_bytes: number;
+}
+
+export interface WorkerHeartbeat {
+  worker_id: string;
+  hostname: string;
+  pid: number;
+  status: string;
+  current_run_id: string | null;
+  started_at: string;
+  heartbeat_at: string;
+}
+
+export interface RuntimeStatus {
+  queue_depth: number;
+  running_count: number;
+  cancelling_count: number;
+  stale_running_count: number;
+  workers: WorkerHeartbeat[];
+  sandbox: SandboxStatus;
 }
 
 export interface AgentSpec {

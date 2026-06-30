@@ -8,6 +8,7 @@ import type { RunEvent } from "@/types";
 
 const EVENT_TYPES = [
   "run_created",
+  "run_queued",
   "run_started",
   "intake_completed",
   "node_started",
@@ -22,6 +23,7 @@ const EVENT_TYPES = [
   "approval_decided",
   "artifact_created",
   "verification_completed",
+  "run_cancelling",
   "run_completed",
   "run_failed",
   "run_cancelled",

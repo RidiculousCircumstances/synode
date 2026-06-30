@@ -13,8 +13,10 @@ def now_utc() -> datetime:
 
 class RunStatus(StrEnum):
     CREATED = "created"
+    QUEUED = "queued"
     RUNNING = "running"
     WAITING_APPROVAL = "waiting_approval"
+    CANCELLING = "cancelling"
     COMPLETED = "completed"
     FAILED = "failed"
     FAILED_VERIFICATION = "failed_verification"
@@ -66,6 +68,7 @@ class ToolRisk(StrEnum):
 
 class EventType(StrEnum):
     RUN_CREATED = "run_created"
+    RUN_QUEUED = "run_queued"
     RUN_STARTED = "run_started"
     INTAKE_COMPLETED = "intake_completed"
     NODE_STARTED = "node_started"
@@ -80,9 +83,11 @@ class EventType(StrEnum):
     APPROVAL_DECIDED = "approval_decided"
     ARTIFACT_CREATED = "artifact_created"
     VERIFICATION_COMPLETED = "verification_completed"
+    RUN_CANCELLING = "run_cancelling"
     RUN_COMPLETED = "run_completed"
     RUN_FAILED = "run_failed"
     RUN_CANCELLED = "run_cancelled"
+    WORKER_HEARTBEAT = "worker_heartbeat"
 
 
 class RoleName(StrEnum):
@@ -341,6 +346,12 @@ class RunResponse(BaseModel):
     agent_graph_snapshot: dict[str, Any] = Field(default_factory=dict)
     observability_trace_id: str | None = None
     final_answer: str | None = None
+    error: str | None = None
+    worker_id: str | None = None
+    queued_at: datetime | None = None
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    heartbeat_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -467,6 +478,44 @@ class GpuMetrics(BaseModel):
 class SystemMetricsResponse(BaseModel):
     process: ProcessMetrics
     gpu: list[GpuMetrics] = Field(default_factory=list)
+
+
+class SandboxStatusResponse(BaseModel):
+    backend: str
+    available: bool
+    detail: str | None = None
+    cpu_seconds: int
+    memory_mb: int
+    disk_mb: int
+    output_max_bytes: int
+
+
+class WorkerHeartbeatResponse(BaseModel):
+    worker_id: str
+    hostname: str
+    pid: int
+    status: str
+    current_run_id: str | None = None
+    started_at: datetime
+    heartbeat_at: datetime
+
+
+class RuntimeStatusResponse(BaseModel):
+    queue_depth: int
+    running_count: int
+    cancelling_count: int
+    stale_running_count: int
+    workers: list[WorkerHeartbeatResponse] = Field(default_factory=list)
+    sandbox: SandboxStatusResponse
+
+
+class RetentionCleanupResponse(BaseModel):
+    run_events_deleted: int = 0
+    model_deltas_deleted: int = 0
+    tool_audit_deleted: int = 0
+    artifacts_deleted: int = 0
+    archived_threads_deleted: int = 0
+    runs_deleted: int = 0
 
 
 def _non_blank(value: str, field_name: str) -> str:

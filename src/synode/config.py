@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -21,6 +22,24 @@ class Settings(BaseSettings):
     workspace_allowlist: str = "/home/rd/proj,/tmp"
     mcp_config_path: Path = Path(".mcp.json")
     shell_timeout_seconds: float = 20.0
+    sandbox_backend: Literal["process", "none"] = "process"
+    sandbox_cpu_seconds: int = 30
+    sandbox_memory_mb: int = 512
+    sandbox_disk_mb: int = 1024
+    sandbox_output_max_bytes: int = 12000
+    worker_id: str | None = None
+    worker_poll_interval_seconds: float = 1.0
+    worker_heartbeat_interval_seconds: float = 5.0
+    worker_stale_after_seconds: float = 120.0
+    worker_concurrency: int = 1
+    run_event_retention_days: int = 30
+    model_delta_retention_days: int = 7
+    tool_audit_retention_days: int = 30
+    artifact_retention_days: int = 30
+    archived_thread_retention_days: int = 90
+    max_event_payload_bytes: int = 65536
+    max_tool_audit_payload_bytes: int = 65536
+    max_artifact_payload_bytes: int = 262144
     db_statement_timeout_ms: int = 5000
     db_row_limit: int = 200
     api_cors_origins: str = "http://127.0.0.1:3000,http://localhost:3000"
@@ -44,6 +63,28 @@ class Settings(BaseSettings):
     @property
     def api_cors_origin_list(self) -> list[str]:
         return [origin.strip() for origin in self.api_cors_origins.split(",") if origin.strip()]
+
+    def validate_startup(self) -> None:
+        if not self.database_url.strip():
+            raise RuntimeError("SYNODE_DATABASE_URL is required")
+        if not self.workspace_allowlist_paths:
+            raise RuntimeError("SYNODE_WORKSPACE_ALLOWLIST must include at least one path")
+        if self.shell_timeout_seconds <= 0:
+            raise RuntimeError("SYNODE_SHELL_TIMEOUT_SECONDS must be greater than zero")
+        if self.worker_concurrency < 1:
+            raise RuntimeError("SYNODE_WORKER_CONCURRENCY must be at least 1")
+        positive_limits = {
+            "SYNODE_SANDBOX_CPU_SECONDS": self.sandbox_cpu_seconds,
+            "SYNODE_SANDBOX_MEMORY_MB": self.sandbox_memory_mb,
+            "SYNODE_SANDBOX_DISK_MB": self.sandbox_disk_mb,
+            "SYNODE_SANDBOX_OUTPUT_MAX_BYTES": self.sandbox_output_max_bytes,
+            "SYNODE_MAX_EVENT_PAYLOAD_BYTES": self.max_event_payload_bytes,
+            "SYNODE_MAX_TOOL_AUDIT_PAYLOAD_BYTES": self.max_tool_audit_payload_bytes,
+            "SYNODE_MAX_ARTIFACT_PAYLOAD_BYTES": self.max_artifact_payload_bytes,
+        }
+        invalid = [name for name, value in positive_limits.items() if value <= 0]
+        if invalid:
+            raise RuntimeError(f"runtime limit settings must be positive: {', '.join(invalid)}")
 
 
 @lru_cache(maxsize=1)

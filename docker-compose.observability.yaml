@@ -9,6 +9,16 @@ services:
       SYNODE_LANGFUSE_PUBLIC_KEY: ${SYNODE_LANGFUSE_PUBLIC_KEY:?set SYNODE_LANGFUSE_PUBLIC_KEY in .env.observability}
       SYNODE_LANGFUSE_SECRET_KEY: ${SYNODE_LANGFUSE_SECRET_KEY:?set SYNODE_LANGFUSE_SECRET_KEY in .env.observability}
 
+  worker:
+    depends_on:
+      langfuse-web:
+        condition: service_started
+    environment:
+      SYNODE_LANGFUSE_ENABLED: "true"
+      SYNODE_LANGFUSE_BASE_URL: http://127.0.0.1:${LANGFUSE_PORT:-3001}
+      SYNODE_LANGFUSE_PUBLIC_KEY: ${SYNODE_LANGFUSE_PUBLIC_KEY:?set SYNODE_LANGFUSE_PUBLIC_KEY in .env.observability}
+      SYNODE_LANGFUSE_SECRET_KEY: ${SYNODE_LANGFUSE_SECRET_KEY:?set SYNODE_LANGFUSE_SECRET_KEY in .env.observability}
+
   langfuse-worker:
     image: docker.io/langfuse/langfuse-worker:3
     profiles: ["observability"]

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 from typing import Any
 
 from synode.schemas import ToolResult, ToolRisk
@@ -40,22 +39,11 @@ class ShellTool:
             return ToolResult(tool_name=self.name, ok=False, error="argv is required")
         cwd = context.workspace_policy.resolve_workspace(context.workspace)
         timeout = float(arguments.get("timeout", context.settings.shell_timeout_seconds))
-        process = await asyncio.create_subprocess_exec(
-            *argv,
-            cwd=str(cwd),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        try:
-            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
-        except TimeoutError:
-            process.kill()
-            await process.wait()
-            return ToolResult(tool_name=self.name, ok=False, error=f"command timed out after {timeout}s")
+        result = await context.sandbox.run_command(argv, cwd=cwd, timeout=timeout)
         output = {
             "argv": argv,
-            "returncode": process.returncode,
-            "stdout": stdout.decode("utf-8", errors="replace")[-12000:],
-            "stderr": stderr.decode("utf-8", errors="replace")[-12000:],
+            "returncode": result.returncode,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
         }
-        return ToolResult(tool_name=self.name, ok=process.returncode == 0, output=output)
+        return ToolResult(tool_name=self.name, ok=result.ok, output=output, error=result.error)

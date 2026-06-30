@@ -96,10 +96,29 @@ class PythonSandboxTool:
         return ToolRisk.WRITE
 
     async def run(self, context: ToolContext, arguments: dict[str, Any]) -> ToolResult:
+        code = str(arguments.get("code", ""))
+        if not code.strip():
+            return ToolResult(
+                tool_name=self.name,
+                ok=False,
+                risk=ToolRisk.WRITE,
+                error="code is required",
+            )
+        cwd = context.workspace_policy.resolve_workspace(context.workspace)
+        result = await context.sandbox.run_python(
+            code,
+            cwd=cwd,
+            timeout=float(arguments.get("timeout", context.settings.shell_timeout_seconds)),
+        )
         return ToolResult(
             tool_name=self.name,
-            ok=False,
+            ok=result.ok,
             risk=ToolRisk.WRITE,
-            error="python sandbox execution requires an approved sandbox backend; MVP blocks direct code execution",
+            output={
+                "argv": result.argv,
+                "returncode": result.returncode,
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+            },
+            error=result.error,
         )
-

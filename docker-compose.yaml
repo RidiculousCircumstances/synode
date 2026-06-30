@@ -26,10 +26,10 @@ services:
     image: synode:local
     command: ["serve"]
     depends_on:
-      postgres:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       searxng:
-        condition: service_started
+        condition: service_healthy
     network_mode: host
     environment:
       SYNODE_DATABASE_URL: postgresql+asyncpg://synode:synode@127.0.0.1:${SYNODE_POSTGRES_PORT:-15432}/synode
@@ -43,9 +43,66 @@ services:
       SYNODE_PORT: ${SYNODE_API_PORT:-8787}
       SYNODE_WORKSPACE_ALLOWLIST: /workspace,/app/samples,/tmp
       SYNODE_MCP_CONFIG_PATH: /app/.mcp.json
+      SYNODE_SANDBOX_BACKEND: ${SYNODE_SANDBOX_BACKEND:-process}
+      SYNODE_SKIP_DB_UPGRADE: "1"
     volumes:
       - ./var/workspaces:/workspace
     restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: synode:local
+    command: ["worker"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      searxng:
+        condition: service_healthy
+    network_mode: host
+    environment:
+      SYNODE_DATABASE_URL: postgresql+asyncpg://synode:synode@127.0.0.1:${SYNODE_POSTGRES_PORT:-15432}/synode
+      SYNODE_CHECKPOINT_DATABASE_URL: postgresql://synode:synode@127.0.0.1:${SYNODE_POSTGRES_PORT:-15432}/synode?sslmode=disable
+      SYNODE_ENABLE_POSTGRES_CHECKPOINTER: "true"
+      SYNODE_SEARXNG_URL: http://127.0.0.1:${SYNODE_SEARXNG_PORT:-18080}
+      SYNODE_MODEL_PROVIDER: ollama
+      SYNODE_OLLAMA_BASE_URL: ${SYNODE_OLLAMA_BASE_URL:-http://127.0.0.1:11434}
+      SYNODE_OLLAMA_MODEL: ${SYNODE_OLLAMA_MODEL:-qwen2.5-coder:7b}
+      SYNODE_MODEL_TIMEOUT_SECONDS: ${SYNODE_MODEL_TIMEOUT_SECONDS:-60}
+      SYNODE_WORKSPACE_ALLOWLIST: /workspace,/app/samples,/tmp
+      SYNODE_MCP_CONFIG_PATH: /app/.mcp.json
+      SYNODE_SANDBOX_BACKEND: ${SYNODE_SANDBOX_BACKEND:-process}
+      SYNODE_SKIP_DB_UPGRADE: "1"
+    volumes:
+      - ./var/workspaces:/workspace
+    healthcheck:
+      test: ["CMD-SHELL", "synode runtime status --check >/dev/null"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: synode:local
+    command: ["db-upgrade"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    network_mode: host
+    environment:
+      SYNODE_DATABASE_URL: postgresql+asyncpg://synode:synode@127.0.0.1:${SYNODE_POSTGRES_PORT:-15432}/synode
+      SYNODE_CHECKPOINT_DATABASE_URL: postgresql://synode:synode@127.0.0.1:${SYNODE_POSTGRES_PORT:-15432}/synode?sslmode=disable
+      SYNODE_WORKSPACE_ALLOWLIST: /workspace,/app/samples,/tmp
+      SYNODE_MCP_CONFIG_PATH: /app/.mcp.json
+      SYNODE_SANDBOX_BACKEND: ${SYNODE_SANDBOX_BACKEND:-process}
+    volumes:
+      - ./var/workspaces:/workspace
+    restart: "no"
 
   postgres:
     image: postgres:17-alpine
@@ -72,6 +129,11 @@ services:
       SEARXNG_BASE_URL: http://127.0.0.1:18080/
     volumes:
       - ./deploy/searxng:/etc/searxng:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/ >/dev/null"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
     restart: unless-stopped
 
 volumes:

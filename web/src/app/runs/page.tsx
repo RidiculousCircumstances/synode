@@ -12,8 +12,10 @@ import type { RunStatus } from "@/types";
 const STATUS_OPTIONS: Array<"all" | RunStatus> = [
   "all",
   "created",
+  "queued",
   "running",
   "waiting_approval",
+  "cancelling",
   "completed",
   "failed",
   "failed_verification",
@@ -49,6 +51,7 @@ export default function RunsPage() {
         summary={
           <div className="summary-grid compact">
             <MetricTile label="Total" value={runs.length} />
+            <MetricTile label="Queued" value={runs.filter((run) => run.status === "queued").length} />
             <MetricTile label="Running" value={runs.filter((run) => run.status === "running").length} />
             <MetricTile label="Blocked" value={runs.filter((run) => run.status === "waiting_approval").length} />
           </div>
