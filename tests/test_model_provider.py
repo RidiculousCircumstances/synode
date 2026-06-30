@@ -56,6 +56,38 @@ async def test_ollama_provider_sends_request_context(monkeypatch: pytest.MonkeyP
     assert "Earlier request" in messages[0]["content"]
 
 
+async def test_ollama_provider_streams_token_deltas(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured_payload: dict[str, object] = {}
+    body = (
+        b'{"message":{"content":"hello "},"done":false}\n'
+        b'{"message":{"content":"world"},"done":false}\n'
+        b'{"done":true,"prompt_eval_count":3,"eval_count":2}\n'
+    )
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        captured_payload.update(json.loads(request.content))
+        return httpx.Response(200, content=body)
+
+    _patch_async_client(monkeypatch, httpx.MockTransport(handle))
+    provider = OllamaProvider("http://ollama.test", "qwen2.5-coder:7b")
+    deltas: list[str] = []
+
+    async def on_delta(delta: str) -> None:
+        deltas.append(delta)
+
+    response = await provider.invoke_stream(
+        ModelRequest(role="coder", prompt="Stream a concise answer"),
+        on_delta,
+    )
+
+    assert captured_payload["stream"] is True
+    assert deltas == ["hello ", "world"]
+    assert response.content == "hello world"
+    assert response.input_tokens == 3
+    assert response.output_tokens == 2
+    assert response.total_tokens == 5
+
+
 async def test_ollama_provider_rejects_invalid_structured_response(monkeypatch: pytest.MonkeyPatch) -> None:
     transport = httpx.MockTransport(lambda request: httpx.Response(200, json={"message": {"content": "not json"}}))
     _patch_async_client(monkeypatch, transport)

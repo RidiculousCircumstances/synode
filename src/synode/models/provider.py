@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Awaitable, Callable
 from typing import Any, Protocol
 
 import httpx
@@ -25,6 +26,8 @@ from synode.runtime.decisions import (
 )
 from synode.runtime.routing import select_worker_roles
 from synode.schemas import ModelProviderType, RoleName, ToolCall
+
+ModelStreamCallback = Callable[[str], Awaitable[None]]
 
 
 class ModelRequest(BaseModel):
@@ -61,6 +64,7 @@ class ModelHealth(BaseModel):
 
 class ModelProvider(Protocol):
     name: str
+    supports_streaming: bool
 
     async def invoke(self, request: ModelRequest) -> ModelResponse:
         raise NotImplementedError
@@ -71,6 +75,7 @@ class ModelProvider(Protocol):
 
 class FakeModelProvider:
     name = "fake"
+    supports_streaming = False
 
     async def invoke(self, request: ModelRequest) -> ModelResponse:
         if request.response_schema is not None:
@@ -175,6 +180,7 @@ class FakeModelProvider:
 
 class OllamaProvider:
     name = "ollama"
+    supports_streaming = True
 
     def __init__(self, base_url: str, model: str, timeout_seconds: float = 60.0):
         self.base_url = base_url.rstrip("/")
@@ -230,6 +236,57 @@ class OllamaProvider:
             latency_ms=(time.perf_counter() - started) * 1000,
         )
 
+    async def invoke_stream(
+        self,
+        request: ModelRequest,
+        on_delta: ModelStreamCallback,
+    ) -> ModelResponse:
+        if request.response_schema is not None:
+            raise ModelResponseError("ollama streaming is only supported for unstructured model calls")
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "messages": _request_messages(request),
+            "stream": True,
+            "options": {"temperature": request.temperature, **request.model_options},
+        }
+        timeout = request.timeout_seconds or self.timeout_seconds
+        started = time.perf_counter()
+        parts: list[str] = []
+        final_body: dict[str, Any] = {}
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                async with client.stream("POST", f"{self.base_url}/api/chat", json=payload) as response:
+                    response.raise_for_status()
+                    async for line in response.aiter_lines():
+                        if not line.strip():
+                            continue
+                        try:
+                            body = json.loads(line)
+                        except json.JSONDecodeError as exc:
+                            raise ModelResponseError(f"ollama stream returned invalid JSON: {line[:500]}") from exc
+                        delta = body.get("message", {}).get("content")
+                        if delta is not None and not isinstance(delta, str):
+                            raise ModelResponseError("ollama stream delta content is not a string")
+                        if delta:
+                            parts.append(delta)
+                            await on_delta(delta)
+                        if body.get("done"):
+                            final_body = body
+        except httpx.HTTPError as exc:
+            raise ModelProviderUnavailableError(f"ollama stream request failed: {exc}") from exc
+        input_tokens = _optional_int(final_body.get("prompt_eval_count"))
+        output_tokens = _optional_int(final_body.get("eval_count"))
+        total_tokens = input_tokens + output_tokens if input_tokens is not None and output_tokens is not None else None
+        return ModelResponse(
+            content="".join(parts),
+            provider=self.name,
+            model=self.model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            total_tokens=total_tokens,
+            latency_ms=(time.perf_counter() - started) * 1000,
+        )
+
     async def health(self) -> ModelHealth:
         try:
             async with httpx.AsyncClient(timeout=5) as client:
@@ -260,6 +317,7 @@ class OllamaProvider:
 
 class OpenAICompatibleProvider:
     name = "openai_compatible"
+    supports_streaming = True
 
     def __init__(
         self,
@@ -334,6 +392,73 @@ class OpenAICompatibleProvider:
             latency_ms=(time.perf_counter() - started) * 1000,
         )
 
+    async def invoke_stream(
+        self,
+        request: ModelRequest,
+        on_delta: ModelStreamCallback,
+    ) -> ModelResponse:
+        if request.response_schema is not None:
+            raise ModelResponseError("openai-compatible streaming is only supported for unstructured model calls")
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "messages": _request_messages(request),
+            "temperature": request.temperature,
+            **request.model_options,
+            "stream": True,
+        }
+        headers = {"authorization": f"Bearer {self.api_key}"} if self.api_key else {}
+        timeout = request.timeout_seconds or self.timeout_seconds
+        started = time.perf_counter()
+        parts: list[str] = []
+        usage: dict[str, Any] = {}
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                async with client.stream(
+                    "POST",
+                    f"{self.base_url}/v1/chat/completions",
+                    json=payload,
+                    headers=headers,
+                ) as response:
+                    response.raise_for_status()
+                    async for line in response.aiter_lines():
+                        line = line.strip()
+                        if not line or not line.startswith("data:"):
+                            continue
+                        data = line.removeprefix("data:").strip()
+                        if data == "[DONE]":
+                            break
+                        try:
+                            body = json.loads(data)
+                        except json.JSONDecodeError as exc:
+                            raise ModelResponseError(
+                                f"openai-compatible stream returned invalid JSON: {data[:500]}"
+                            ) from exc
+                        if isinstance(body.get("usage"), dict):
+                            usage = body["usage"]
+                        choices = body.get("choices", [])
+                        if not choices:
+                            continue
+                        delta = choices[0].get("delta", {}).get("content")
+                        if delta is not None and not isinstance(delta, str):
+                            raise ModelResponseError("openai-compatible stream delta content is not a string")
+                        if delta:
+                            parts.append(delta)
+                            await on_delta(delta)
+        except httpx.HTTPError as exc:
+            raise ModelProviderUnavailableError(f"openai-compatible stream request failed: {exc}") from exc
+        input_tokens = _optional_int(usage.get("prompt_tokens"))
+        output_tokens = _optional_int(usage.get("completion_tokens"))
+        total_tokens = _optional_int(usage.get("total_tokens"))
+        return ModelResponse(
+            content="".join(parts),
+            provider=self.name,
+            model=self.model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            total_tokens=total_tokens,
+            latency_ms=(time.perf_counter() - started) * 1000,
+        )
+
     async def health(self) -> ModelHealth:
         headers = {"authorization": f"Bearer {self.api_key}"} if self.api_key else {}
         try:
@@ -368,6 +493,8 @@ class OpenAICompatibleProvider:
 
 
 class UnconfiguredModelProvider:
+    supports_streaming = False
+
     def __init__(self, name: str):
         self.name = name
 

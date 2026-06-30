@@ -28,6 +28,8 @@
   agent graphs are DB-backed after builtin YAML seed, and runs store immutable
   graph/profile snapshots.
 - Realtime UI transport is SSE first. WebSocket is deferred.
+- Public agent output streams over SSE by default for providers that explicitly
+  support streaming. Structured JSON model calls remain non-streaming.
 - Langfuse self-hosting is optional and enabled through an explicit Compose
   overlay plus `.env.observability`.
 - Threads are the user-facing work unit. Runs are immutable execution attempts
@@ -118,6 +120,8 @@
   `127.0.0.1:11434`.
 - Threads can be continued after stopping a run or rejecting an approval,
   because both paths now produce terminal `cancelled` runs.
+- Thread chat now receives prior conversation context, auto-resumes approved
+  runs from UI approval actions, and renders compact live status in the chat.
 
 ### Next:
 - Tune real-model prompts against broader local workloads.

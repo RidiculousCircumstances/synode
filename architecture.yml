@@ -6,15 +6,15 @@ components:
     responsibilities:
       - LangGraph orchestration runtime
       - CLI and FastAPI application entrypoints
-      - Model provider abstraction, DB-backed model profiles, Ollama provider, and OpenAI-compatible provider
+      - Model provider abstraction, DB-backed model profiles, Ollama provider, OpenAI-compatible provider, and optional model streaming
       - Tool policy, native tools, and MCP bridge
       - Persistence, conversational threads, agent graphs, encrypted secrets, audit log, and approval state
-      - Structured run read models, SSE event stream, run cancellation, and metrics endpoints
+      - Structured run read models, SSE event stream with model deltas, run cancellation, and metrics endpoints
       - Optional Langfuse trace emission
   - name: web
     path: web
     responsibilities:
-      - Next.js operator UI for threads, runs, approvals, graph, timeline, artifacts, diff/tests, and metrics
+      - Next.js operator UI for threads, streamed agent output, runs, approvals, graph, timeline, artifacts, diff/tests, and metrics
       - Runtime API base URL loading through env.js
   - name: agents
     path: src/synode/agents
@@ -62,6 +62,7 @@ rules:
   - DB-backed model profiles, role profile bindings, and agent graph snapshots own runtime model routing.
   - DB secrets must be encrypted with `SYNODE_SECRETS_KEY`; missing keys are explicit errors.
   - Runtime decisions must use structured model output or fail explicitly.
+  - Structured model calls do not stream; unstructured model calls stream by default only when the selected provider explicitly supports streaming.
   - Coding workflow mutations must pass patch proposal, approval, patch apply, verification, and review.
   - Rejected approvals and explicit stops must move runs to terminal cancelled state and unblock the thread.
   - API lists that can grow must accept pagination and apply limit/offset in persistence queries.
@@ -113,6 +114,6 @@ critical_flows:
   - name: mcp-tool-call
     description: MCP discovery and calls are normalized into governed tool invocations.
   - name: operator-ui
-    description: Browser UI creates and continues threads while monitoring structured run events, graph state, approvals, artifacts, diffs, tests, and metrics.
+    description: Browser UI creates and continues threads while monitoring structured run events, streamed agent output, graph state, approvals, artifacts, diffs, tests, and metrics.
   - name: observability
     description: Enabled Langfuse config emits run, node, model, and tool observations linked by run trace id.

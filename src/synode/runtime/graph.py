@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -518,7 +519,10 @@ async def _invoke_model(
         metadata={"run_id": state["run_id"], "response_schema": _schema_name(request.response_schema)},
     ):
         try:
-            response = await provider.provider.invoke(request)
+            if _streaming_supported(provider.provider, request):
+                response = await _invoke_streaming_model(deps, state, provider, request)
+            else:
+                response = await provider.provider.invoke(request)
         except Exception as exc:
             await _record_event(
                 deps,
@@ -560,6 +564,99 @@ async def _invoke_model(
             usage_details={key: value for key, value in usage.items() if isinstance(value, int)},
         )
         return response
+
+
+async def _invoke_streaming_model(
+    deps: GraphDependencies,
+    state: SynodeState,
+    provider: ResolvedModelProvider,
+    request: ModelRequest,
+) -> Any:
+    stream_id = f"{state['run_id']}:{request.role}:{time.time_ns()}"
+    await _record_event(
+        deps,
+        state,
+        EventType.MODEL_STREAM_STARTED.value,
+        request.role,
+        {
+            "stream_id": stream_id,
+            "role": request.role,
+            "profile_id": provider.profile_id,
+            "profile_name": provider.profile_name,
+            "provider_type": provider.provider_type,
+        },
+    )
+    pending = ""
+    index = 0
+    last_flush = time.monotonic()
+
+    async def flush(force: bool = False) -> None:
+        nonlocal pending, index, last_flush
+        if not pending:
+            return
+        if not force and len(pending) < 120 and time.monotonic() - last_flush < 0.35:
+            return
+        index += 1
+        await _record_event(
+            deps,
+            state,
+            EventType.MODEL_TOKEN_DELTA.value,
+            request.role,
+            {
+                "stream_id": stream_id,
+                "role": request.role,
+                "index": index,
+                "delta": pending,
+            },
+        )
+        pending = ""
+        last_flush = time.monotonic()
+
+    async def on_delta(delta: str) -> None:
+        nonlocal pending
+        pending += delta
+        await flush()
+
+    try:
+        invoke_stream = getattr(provider.provider, "invoke_stream", None)
+        if not callable(invoke_stream):
+            raise RuntimeError(f"provider {provider.provider.name} advertises streaming without invoke_stream")
+        response = await invoke_stream(request, on_delta)
+    except Exception:
+        await flush(force=True)
+        await _record_event(
+            deps,
+            state,
+            EventType.MODEL_STREAM_COMPLETED.value,
+            request.role,
+            {"stream_id": stream_id, "role": request.role, "ok": False},
+        )
+        raise
+    await flush(force=True)
+    await _record_event(
+        deps,
+        state,
+        EventType.MODEL_STREAM_COMPLETED.value,
+        request.role,
+        {
+            "stream_id": stream_id,
+            "role": request.role,
+            "ok": True,
+            "content_length": len(response.content),
+        },
+    )
+    return response
+
+
+def _streaming_supported(provider: Any, request: ModelRequest) -> bool:
+    if request.response_schema is not None:
+        return False
+    if not bool(getattr(provider, "supports_streaming", False)):
+        return False
+    invoke_stream = getattr(provider, "invoke_stream", None)
+    if not callable(invoke_stream):
+        raise RuntimeError(f"provider {provider.name} advertises streaming without invoke_stream")
+    return True
 
 
 def _response_usage(response: Any) -> dict[str, int | None]:

@@ -1230,6 +1230,11 @@ a {
   color: var(--muted-foreground);
 }
 
+.thread-streaming-message .thread-message-body {
+  border-color: color-mix(in srgb, var(--primary) 22%, var(--border));
+  background: color-mix(in srgb, var(--primary-soft) 28%, var(--card));
+}
+
 .thread-service-event {
   display: block;
   width: min(42rem, 94%);

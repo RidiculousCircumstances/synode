@@ -2,6 +2,8 @@ import { expect, test, type Page, type Route } from "@playwright/test";
 
 const runId = "run-layout-smoke-0001";
 const threadId = "thread-layout-smoke-0001";
+const streamRunId = "run-stream-smoke-0001";
+const streamThreadId = "thread-stream-smoke-0001";
 const now = new Date("2026-06-30T00:00:00.000Z").toISOString();
 
 test.beforeEach(async ({ page }) => {
@@ -114,6 +116,13 @@ test("thread approval approve resumes the run", async ({ page }) => {
 
   await approveRequest;
   await resumeRequest;
+});
+
+test("thread chat renders streamed agent output", async ({ page }) => {
+  await page.goto(`/threads/${streamThreadId}`, { waitUntil: "domcontentloaded" });
+  await expect(page.locator(".thread-streaming-message")).toBeVisible();
+  await expect(page.locator(".thread-streaming-message")).toContainText("Inspecting the repository and preparing a concise answer.");
+  await expect(page.locator(".thread-service-event.live")).toContainText("Receiving output");
 });
 
 test("overlays do not shift the page layout", async ({ page }) => {
@@ -245,6 +254,10 @@ async function installApiRoutes(page: Page) {
       await fulfillJson(route, threadDetailFixture());
       return;
     }
+    if (url.pathname === `/threads/${streamThreadId}`) {
+      await fulfillJson(route, streamThreadDetailFixture());
+      return;
+    }
     if (url.pathname === `/threads/${threadId}/messages`) {
       await fulfillJson(route, threadDetailFixture().messages);
       return;
@@ -277,6 +290,10 @@ async function installApiRoutes(page: Page) {
       await fulfillJson(route, runFixture());
       return;
     }
+    if (url.pathname === `/runs/${streamRunId}`) {
+      await fulfillJson(route, streamRunFixture());
+      return;
+    }
     if (url.pathname === `/runs/${runId}/resume`) {
       await fulfillJson(route, { status: "scheduled" });
       return;
@@ -285,7 +302,19 @@ async function installApiRoutes(page: Page) {
       await fulfillJson(route, eventsFixture());
       return;
     }
+    if (url.pathname === `/runs/${streamRunId}/events`) {
+      await fulfillJson(route, streamEventsFixture());
+      return;
+    }
     if (url.pathname === `/runs/${runId}/events/stream`) {
+      await route.fulfill({
+        status: 200,
+        contentType: "text/event-stream",
+        body: "",
+      });
+      return;
+    }
+    if (url.pathname === `/runs/${streamRunId}/events/stream`) {
       await route.fulfill({
         status: 200,
         contentType: "text/event-stream",
@@ -349,6 +378,17 @@ function runFixture() {
   };
 }
 
+function streamRunFixture() {
+  return {
+    ...runFixture(),
+    id: streamRunId,
+    thread_id: streamThreadId,
+    status: "running",
+    task: "Explain the current coding plan while streaming public agent output",
+    final_answer: null,
+  };
+}
+
 function modelProfilesFixture() {
   return [
     {
@@ -395,6 +435,19 @@ function threadFixture() {
     latest_run_id: runId,
     latest_run_status: "completed",
     last_message: "Implemented a focused layout fixture with full-size artifacts and diff panels.",
+    created_at: now,
+    updated_at: now,
+  };
+}
+
+function streamThreadFixture() {
+  return {
+    id: streamThreadId,
+    title: "Stream agent output",
+    status: "active",
+    latest_run_id: streamRunId,
+    latest_run_status: "running",
+    last_message: "Explain the current coding plan while streaming public agent output",
     created_at: now,
     updated_at: now,
   };
@@ -469,6 +522,37 @@ function threadDetailFixture() {
   };
 }
 
+function streamThreadDetailFixture() {
+  return {
+    thread: streamThreadFixture(),
+    runs: [streamRunFixture()],
+    messages: [
+      {
+        id: 1,
+        thread_id: streamThreadId,
+        run_id: streamRunId,
+        author_type: "user",
+        author_name: "user",
+        message_type: "text",
+        content: "Explain the current coding plan while streaming public agent output",
+        metadata: {},
+        created_at: now,
+      },
+      {
+        id: 2,
+        thread_id: streamThreadId,
+        run_id: streamRunId,
+        author_type: "system",
+        author_name: "runtime",
+        message_type: "run_summary",
+        content: "Run started.",
+        metadata: { status: "running" },
+        created_at: now,
+      },
+    ],
+  };
+}
+
 function eventsFixture() {
   return [
     { id: 1, run_id: runId, event_type: "run_started", role: null, payload: {}, created_at: now },
@@ -477,6 +561,37 @@ function eventsFixture() {
     { id: 4, run_id: runId, event_type: "tool_called", role: "coder", payload: { tool: "native.git_diff" }, created_at: now },
     { id: 5, run_id: runId, event_type: "node_completed", role: "coder", payload: { ok: true }, created_at: now },
     { id: 6, run_id: runId, event_type: "run_completed", role: "reviewer", payload: { ok: true }, created_at: now },
+  ];
+}
+
+function streamEventsFixture() {
+  return [
+    { id: 1, run_id: streamRunId, event_type: "run_started", role: null, payload: {}, created_at: now },
+    { id: 2, run_id: streamRunId, event_type: "node_started", role: "coder", payload: { node: "graph_worker" }, created_at: now },
+    {
+      id: 3,
+      run_id: streamRunId,
+      event_type: "model_stream_started",
+      role: "coder",
+      payload: { stream_id: "stream-1", role: "coder" },
+      created_at: now,
+    },
+    {
+      id: 4,
+      run_id: streamRunId,
+      event_type: "model_token_delta",
+      role: "coder",
+      payload: { stream_id: "stream-1", role: "coder", index: 1, delta: "Inspecting the repository " },
+      created_at: now,
+    },
+    {
+      id: 5,
+      run_id: streamRunId,
+      event_type: "model_token_delta",
+      role: "coder",
+      payload: { stream_id: "stream-1", role: "coder", index: 2, delta: "and preparing a concise answer." },
+      created_at: now,
+    },
   ];
 }
 

@@ -6,9 +6,29 @@ from subprocess import run
 import pytest
 from sqlalchemy import select
 
+from synode.models.provider import FakeModelProvider, ModelRequest, ModelResponse
 from synode.persistence.models import ApprovalRecord
 from synode.persistence.repository import Repository
 from synode.schemas import ApprovalStatus, EventType, RunMode, RunStatus
+
+
+class StreamingFakeProvider(FakeModelProvider):
+    name = "streaming_fake"
+    supports_streaming = True
+
+    async def invoke_stream(self, request: ModelRequest, on_delta) -> ModelResponse:
+        parts = ["streamed ", "agent ", "output"]
+        for part in parts:
+            await on_delta(part)
+        return ModelResponse(
+            content="".join(parts),
+            provider=self.name,
+            model="streaming-fake",
+            input_tokens=1,
+            output_tokens=3,
+            total_tokens=4,
+            latency_ms=1.0,
+        )
 
 
 async def test_run_task_completes_with_fake_data_agent(service, tmp_path: pathlib.Path) -> None:
@@ -162,6 +182,34 @@ async def test_follow_up_run_receives_thread_conversation_context(
     assert any(item["message_type"] == "final" for item in context)
     assert not any(item["message_type"] == "run_summary" for item in context)
     assert not any(item["author_type"] == "user" and item["content"] == "Use that context for a follow-up" for item in context)
+
+
+async def test_streaming_provider_emits_model_stream_events(service, tmp_path: pathlib.Path) -> None:
+    service.models.register(StreamingFakeProvider())
+    (tmp_path / "data.csv").write_text("date,revenue\n2026-06-01,10\n", encoding="utf-8")
+
+    result = await service.run_task(
+        "Analyze sample data and summarize findings",
+        workspace=str(tmp_path),
+        model_provider="streaming_fake",
+    )
+    events = await service.list_event_responses(result.id, limit=500)
+    event_types = [event.event_type for event in events]
+    deltas = [
+        event.payload["delta"]
+        for event in events
+        if event.event_type == EventType.MODEL_TOKEN_DELTA.value
+    ]
+
+    assert result.status == RunStatus.COMPLETED
+    assert EventType.MODEL_STREAM_STARTED.value in event_types
+    assert EventType.MODEL_STREAM_COMPLETED.value in event_types
+    assert "".join(deltas) == "streamed agent output"
+    assert any(
+        event.event_type == EventType.MODEL_INVOKED.value
+        and event.payload["provider"] == "streaming_fake"
+        for event in events
+    )
 
 
 async def test_stop_created_run_cancels_and_unblocks_thread(service, tmp_path: pathlib.Path) -> None:

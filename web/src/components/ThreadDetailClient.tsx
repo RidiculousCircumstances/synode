@@ -56,6 +56,7 @@ export default function ThreadDetailClient({ threadId }: { threadId: string }) {
     () => buildProcessingStatus(latestRun, liveEvents),
     [latestRun, liveEvents],
   );
+  const streamingOutput = useMemo(() => buildStreamingOutput(liveEvents), [liveEvents]);
   const [runsOpen, setRunsOpen] = useState(false);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const didInitialScroll = useRef(false);
@@ -142,7 +143,12 @@ export default function ThreadDetailClient({ threadId }: { threadId: string }) {
           wasNearBottom.current = isNearBottom(event.currentTarget);
         }}
       >
-        <ThreadMessages threadId={thread.id} messages={detail.messages} processingStatus={processingStatus} />
+        <ThreadMessages
+          threadId={thread.id}
+          messages={detail.messages}
+          processingStatus={processingStatus}
+          streamingOutput={streamingOutput}
+        />
       </div>
       <div className="thread-composer-dock">
         <FollowUpComposer
@@ -292,14 +298,16 @@ function ThreadMessages({
   threadId,
   messages,
   processingStatus,
+  streamingOutput,
 }: {
   threadId: string;
   messages: ThreadMessage[];
   processingStatus: ProcessingStatus | null;
+  streamingOutput: StreamingOutput | null;
 }) {
   const approvalDecisions = useMemo(() => buildApprovalDecisionMap(messages), [messages]);
 
-  if (!messages.length && !processingStatus) {
+  if (!messages.length && !processingStatus && !streamingOutput) {
     return <EmptyState title="No messages" />;
   }
 
@@ -313,6 +321,7 @@ function ThreadMessages({
           approvalDecision={approvalDecisions.get(metadataString(message.metadata, "approval_id")) ?? null}
         />
       ))}
+      {streamingOutput ? <ThreadStreamingMessage output={streamingOutput} /> : null}
       {processingStatus ? <ThreadProcessingEvent status={processingStatus} /> : null}
     </div>
   );
@@ -400,6 +409,24 @@ function ThreadProcessingEvent({ status }: { status: ProcessingStatus }) {
         ) : null}
       </div>
     </div>
+  );
+}
+
+function ThreadStreamingMessage({ output }: { output: StreamingOutput }) {
+  return (
+    <article className="thread-message agent thread-streaming-message" aria-live="polite">
+      <div className="thread-message-meta">
+        <StatusBadge value="agent">{output.role}</StatusBadge>
+        <span>{output.completed ? "streamed output" : "streaming output"}</span>
+      </div>
+      <div className="thread-message-body">
+        {output.content.trim() ? (
+          <MarkdownContent content={output.content} />
+        ) : (
+          <span className="muted">Waiting for model output...</span>
+        )}
+      </div>
+    </article>
   );
 }
 
@@ -886,6 +913,13 @@ type ProcessingStatus = {
   spinning: boolean;
 };
 
+type StreamingOutput = {
+  streamId: string;
+  role: string;
+  content: string;
+  completed: boolean;
+};
+
 type MarkdownBlock =
   | { type: "paragraph"; text: string }
   | { type: "heading"; depth: 2 | 3 | 4; text: string }
@@ -898,6 +932,12 @@ const TECHNICAL_SECTION_NAMES = new Set([
   "patch_proposal",
   "patch_results",
   "verification",
+]);
+
+const STREAM_EVENT_TYPES = new Set([
+  "model_stream_started",
+  "model_token_delta",
+  "model_stream_completed",
 ]);
 
 function buildProcessingStatus(run: Run | null, events: RunEvent[]): ProcessingStatus | null {
@@ -931,6 +971,18 @@ function buildProcessingStatus(run: Run | null, events: RunEvent[]): ProcessingS
 
 function describeRunEvent(event: RunEvent): string {
   const payload = event.payload;
+  if (event.event_type === "model_stream_started") {
+    const role = event.role || metadataString(payload, "role") || "model";
+    return `Streaming output from ${role}`;
+  }
+  if (event.event_type === "model_token_delta") {
+    const role = event.role || metadataString(payload, "role") || "model";
+    return `Receiving output from ${role}`;
+  }
+  if (event.event_type === "model_stream_completed") {
+    const role = event.role || metadataString(payload, "role") || "model";
+    return `Completed output from ${role}`;
+  }
   if (event.event_type === "node_started") {
     const node = metadataString(payload, "node") || "node";
     const role = event.role ? ` (${event.role})` : "";
@@ -973,7 +1025,41 @@ function describeRunEvent(event: RunEvent): string {
 }
 
 function isSpinningEvent(eventType: string): boolean {
-  return !["approval_required", "verification_completed", "artifact_created"].includes(eventType);
+  return ![
+    "approval_required",
+    "verification_completed",
+    "artifact_created",
+    "model_stream_completed",
+  ].includes(eventType);
+}
+
+function buildStreamingOutput(events: RunEvent[]): StreamingOutput | null {
+  const streamEvents = events.filter((event) => STREAM_EVENT_TYPES.has(event.event_type));
+  const latestStart = [...streamEvents]
+    .reverse()
+    .find((event) => event.event_type === "model_stream_started");
+  if (!latestStart) {
+    return null;
+  }
+  const streamId = metadataString(latestStart.payload, "stream_id");
+  if (!streamId) {
+    return null;
+  }
+  const role = latestStart.role || metadataString(latestStart.payload, "role") || "agent";
+  const content = streamEvents
+    .filter(
+      (event) =>
+        event.event_type === "model_token_delta" &&
+        metadataString(event.payload, "stream_id") === streamId,
+    )
+    .map((event) => metadataString(event.payload, "delta"))
+    .join("");
+  const completed = streamEvents.some(
+    (event) =>
+      event.event_type === "model_stream_completed" &&
+      metadataString(event.payload, "stream_id") === streamId,
+  );
+  return { streamId, role, content, completed };
 }
 
 function parseRunSummary(content: string): ParsedSummary {
