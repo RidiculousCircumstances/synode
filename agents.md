@@ -28,6 +28,9 @@ summary.
 
 - Keep `architecture.yml` aligned when components, dependency rules,
   entrypoints, contracts, or critical flows change.
+- Treat `thread` as the user-facing work unit and `run` as an immutable
+  execution attempt inside a thread. New user follow-ups create new runs in the
+  same thread; completed runs are not edited in place.
 - Do not hide architecture changes inside implementation-only diffs.
 - Use typed commands, queries, DTOs, enums, protocols, and value objects instead
   of loose dictionaries and magic strings when the value crosses a boundary.

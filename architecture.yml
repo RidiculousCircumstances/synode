@@ -8,13 +8,13 @@ components:
       - CLI and FastAPI application entrypoints
       - Model provider abstraction and Ollama provider
       - Tool policy, native tools, and MCP bridge
-      - Persistence, audit log, and approval state
+      - Persistence, conversational threads, audit log, and approval state
       - Structured run read models, SSE event stream, and metrics endpoints
       - Optional Langfuse trace emission
   - name: web
     path: web
     responsibilities:
-      - Next.js operator UI for chat, runs, approvals, graph, timeline, artifacts, diff/tests, and metrics
+      - Next.js operator UI for threads, runs, approvals, graph, timeline, artifacts, diff/tests, and metrics
       - Runtime API base URL loading through env.js
   - name: agents
     path: src/synode/agents
@@ -56,7 +56,8 @@ rules:
   - API and CLI must call the orchestration service, not duplicate graph behavior.
   - UI must consume structured API read models and events, not parse final_answer.
   - MCP tools must pass the same policy and audit path as native tools.
-  - Persistence owns mutable run, event, approval, artifact, audit, and memory state.
+  - Persistence owns mutable thread, run, event, approval, artifact, audit, and memory state.
+  - Threads are the user-facing work unit; runs are immutable execution attempts inside threads.
   - Agent role YAML files must not name concrete model IDs.
   - Runtime decisions must use structured model output or fail explicitly.
   - Coding workflow mutations must pass patch proposal, approval, patch apply, verification, and review.
@@ -94,7 +95,7 @@ entrypoints:
 
 critical_flows:
   - name: run-task
-    description: User task becomes a persisted run, graph execution, audited tool calls, reviewer output, and final answer.
+    description: User message becomes a thread run, graph execution, audited tool calls, reviewer output, and final answer.
   - name: coding-task
     description: Coding task flows through structured planning, inspection, patch proposal, approval, patch apply, focused verification, and review.
   - name: structured-decision
@@ -104,6 +105,6 @@ critical_flows:
   - name: mcp-tool-call
     description: MCP discovery and calls are normalized into governed tool invocations.
   - name: operator-ui
-    description: Browser UI creates runs and monitors structured events, graph state, approvals, artifacts, diffs, tests, and metrics.
+    description: Browser UI creates and continues threads while monitoring structured run events, graph state, approvals, artifacts, diffs, tests, and metrics.
   - name: observability
     description: Enabled Langfuse config emits run, node, model, and tool observations linked by run trace id.

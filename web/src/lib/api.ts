@@ -7,6 +7,10 @@ import type {
   RunEvent,
   RunMetrics,
   RunMode,
+  Thread,
+  ThreadDetail,
+  ThreadMessage,
+  ThreadStatus,
   SystemMetrics,
   ToolAudit,
 } from "@/types";
@@ -101,6 +105,65 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export function listRuns(): Promise<Run[]> {
   return request<Run[]>("/runs");
+}
+
+export function listThreads(status: ThreadStatus | "all" = "active", search?: string): Promise<Thread[]> {
+  const params = new URLSearchParams();
+  if (status !== "all") {
+    params.set("status", status);
+  }
+  if (search?.trim()) {
+    params.set("search", search.trim());
+  }
+  const query = params.toString();
+  return request<Thread[]>(`/threads${query ? `?${query}` : ""}`);
+}
+
+export function getThread(threadId: string): Promise<ThreadDetail> {
+  return request<ThreadDetail>(`/threads/${threadId}`);
+}
+
+export function createThread(payload: {
+  message: string;
+  title?: string | null;
+  workspace?: string | null;
+  model_provider?: string | null;
+  mode: RunMode;
+}): Promise<ThreadDetail> {
+  return request<ThreadDetail>("/threads", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function updateThread(threadId: string, payload: { title: string }): Promise<Thread> {
+  return request<Thread>(`/threads/${threadId}`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function archiveThread(threadId: string): Promise<Thread> {
+  return request<Thread>(`/threads/${threadId}/archive`, { method: "POST", body: "{}" });
+}
+
+export function listThreadMessages(threadId: string): Promise<ThreadMessage[]> {
+  return request<ThreadMessage[]>(`/threads/${threadId}/messages`);
+}
+
+export function createThreadRun(
+  threadId: string,
+  payload: {
+    message: string;
+    workspace?: string | null;
+    model_provider?: string | null;
+    mode: RunMode;
+  },
+): Promise<Run> {
+  return request<Run>(`/threads/${threadId}/runs`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
 }
 
 export function getRun(runId: string): Promise<Run> {

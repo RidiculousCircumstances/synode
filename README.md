@@ -72,9 +72,10 @@ make ui-build
 make ui-test
 ```
 
-The browser UI is a Next.js operator console with chat, runs, run-detail tabs,
-agent graph monitoring, timeline, approvals, artifacts, diff/tests, settings,
-and observability views.
+The browser UI is a Next.js operator console with thread-based conversations,
+run-detail tabs, agent graph monitoring, timeline, approvals, artifacts,
+diff/tests, settings, and observability views. Threads are the user-facing
+workspace; runs are immutable execution attempts inside a thread.
 
 Deterministic test smoke without a real model:
 

@@ -27,6 +27,9 @@
 - Realtime UI transport is SSE first. WebSocket is deferred.
 - Langfuse self-hosting is optional and enabled through an explicit Compose
   overlay plus `.env.observability`.
+- Threads are the user-facing work unit. Runs are immutable execution attempts
+  inside a thread; continuing a conversation creates a new run in the same
+  thread after the previous run reaches a terminal state.
 
 ## State:
 ### Done:
@@ -64,9 +67,16 @@
 - Structured API read models are implemented for runs, events, artifacts,
   approvals, tool audit, run metrics, and system metrics.
 - SSE now emits event ids, event names, JSON data envelopes, and heartbeats.
-- Next.js operator UI is implemented in `web/` with chat/run launcher, runs
-  list, run detail tabs, approvals, full-size artifacts, coding diff/tests,
-  timeline, graph, observability, and settings screens.
+- Next.js operator UI is implemented in `web/` with threads, run detail tabs,
+  approvals, full-size artifacts, coding diff/tests, timeline, graph,
+  observability, and settings screens. `/chat` redirects to `/threads`.
+- Thread persistence and API endpoints are implemented: create/list/detail,
+  rename, archive, messages, and follow-up run creation.
+- Threads-first work was verified with `uv run pytest`, `uv run ruff check .`,
+  `uv run mypy`, `python3 tools/guardrails.py`, `npm run lint`,
+  `npm run build`, `npm run test:e2e`, `uv run synode db upgrade`,
+  `docker compose up -d --build api ui`, HTTP `/health`, HTTP `/threads`, and
+  `make docker-smoke`.
 - UI Docker image and Compose `ui` service are implemented. UI is served on
   `http://127.0.0.1:3000` by default.
 - UI runtime config defaults to `apiBaseUrl=auto`: browser clients resolve API
@@ -78,7 +88,8 @@
   Postgres, ClickHouse, Redis, and MinIO services.
 
 ### Now:
-- MVP backend and operator UI implementation are ready for local verification.
+- MVP backend and operator UI are running through Compose with the threads-first
+  UI at `http://127.0.0.1:3000`.
 - Ollama runs as a system service and serves `qwen2.5-coder:7b` on
   `127.0.0.1:11434`.
 

@@ -9,7 +9,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from sqlalchemy.types import JSON
 
-from synode.schemas import ApprovalStatus, RunMode, RunStatus
+from synode.schemas import ApprovalStatus, RunMode, RunStatus, ThreadStatus
 
 
 def new_id() -> str:
@@ -24,10 +24,30 @@ class JsonType(JSON):
     """Portable JSON type; migrations use JSONB for Postgres where useful."""
 
 
-class RunRecord(Base):
-    __tablename__ = "runs"
+class ThreadRecord(Base):
+    __tablename__ = "threads"
+    __table_args__ = (Index("ix_threads_status_updated", "status", "updated_at"),)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default=ThreadStatus.ACTIVE.value, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    runs: Mapped[list["RunRecord"]] = relationship(back_populates="thread")
+    messages: Mapped[list["ThreadMessageRecord"]] = relationship(
+        back_populates="thread", cascade="all, delete-orphan"
+    )
+
+
+class RunRecord(Base):
+    __tablename__ = "runs"
+    __table_args__ = (Index("ix_runs_thread_created", "thread_id", "created_at"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    thread_id: Mapped[str] = mapped_column(ForeignKey("threads.id", ondelete="RESTRICT"), nullable=False)
     status: Mapped[str] = mapped_column(String(32), default=RunStatus.CREATED.value, nullable=False)
     mode: Mapped[str] = mapped_column(String(32), default=RunMode.GENERAL.value, nullable=False)
     task: Mapped[str] = mapped_column(Text, nullable=False)
@@ -41,7 +61,27 @@ class RunRecord(Base):
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
 
+    thread: Mapped[ThreadRecord] = relationship(back_populates="runs")
     events: Mapped[list["RunEventRecord"]] = relationship(back_populates="run", cascade="all, delete-orphan")
+
+
+class ThreadMessageRecord(Base):
+    __tablename__ = "thread_messages"
+    __table_args__ = (Index("ix_thread_messages_thread_id_id", "thread_id", "id"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    thread_id: Mapped[str] = mapped_column(ForeignKey("threads.id", ondelete="CASCADE"), nullable=False)
+    run_id: Mapped[str | None] = mapped_column(ForeignKey("runs.id", ondelete="SET NULL"), nullable=True)
+    author_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    author_name: Mapped[str] = mapped_column(String(80), nullable=False)
+    message_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    metadata_: Mapped[dict[str, Any]] = mapped_column(
+        "metadata", JsonType().with_variant(JSONB, "postgresql"), default=dict
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    thread: Mapped[ThreadRecord] = relationship(back_populates="messages")
 
 
 class RunEventRecord(Base):

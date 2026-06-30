@@ -29,7 +29,7 @@ type NavItem = {
 };
 
 const NAV_ITEMS: NavItem[] = [
-  { href: "/chat", label: "Chat", description: "new task", icon: MessageSquare },
+  { href: "/threads", label: "Threads", description: "work queue", icon: MessageSquare },
   { href: "/runs", label: "Runs", description: "runtime", icon: GitBranch },
   { href: "/agents", label: "Agents", description: "nodes", icon: Bot },
   { href: "/observability", label: "Observability", description: "metrics", icon: Activity },
@@ -128,7 +128,7 @@ function Sidebar({
 }) {
   return (
     <aside className="app-sidebar">
-      <Link href="/chat" className="brand" onClick={onNavigate}>
+      <Link href="/threads" className="brand" onClick={onNavigate}>
         <span className="brand-mark">S</span>
         <span>
           <strong>Synode</strong>
@@ -140,7 +140,10 @@ function Sidebar({
           <span>Workspace</span>
         </div>
         {NAV_ITEMS.map((item) => {
-          const active = item.href === "/chat" ? pathname === "/" || pathname.startsWith("/chat") : pathname.startsWith(item.href);
+          const active =
+            item.href === "/threads"
+              ? pathname === "/" || pathname.startsWith("/threads") || pathname.startsWith("/chat")
+              : pathname.startsWith(item.href);
           const Icon = item.icon;
           return (
             <Link

@@ -13,7 +13,12 @@ from synode.config import Settings
 from synode.models.provider import ModelProviderRegistry
 from synode.observability import Observability
 from synode.persistence.database import Database
-from synode.persistence.repository import Repository, to_run_response
+from synode.persistence.repository import (
+    Repository,
+    to_run_response,
+    to_thread_message_response,
+    to_thread_response,
+)
 from synode.registry import RoleRegistry
 from synode.runtime.graph import GraphDependencies, build_graph
 from synode.schemas import (
@@ -29,11 +34,23 @@ from synode.schemas import (
     RunResponse,
     RunStatus,
     SystemMetricsResponse,
+    ThreadDetailResponse,
+    ThreadMessageAuthorType,
+    ThreadMessageResponse,
+    ThreadMessageType,
+    ThreadResponse,
+    ThreadStatus,
     TokenUsage,
     ToolAuditResponse,
     ToolRisk,
 )
 from synode.tools import ToolExecutor, ToolRegistry, build_tool_registry
+
+ACTIVE_RUN_STATUSES = {
+    RunStatus.CREATED.value,
+    RunStatus.RUNNING.value,
+    RunStatus.WAITING_APPROVAL.value,
+}
 
 
 class OrchestrationService:
@@ -73,6 +90,112 @@ class OrchestrationService:
                 observability_trace_id=trace_id,
             )
             return to_run_response(run)
+
+    async def create_thread(
+        self,
+        message: str,
+        title: str | None = None,
+        workspace: str | None = None,
+        model_provider: str | None = None,
+        mode: RunMode = RunMode.GENERAL,
+    ) -> ThreadDetailResponse:
+        provider = model_provider or self.settings.model_provider
+        trace_id = self.observability.create_trace_id()
+        async with self.database.session() as session:
+            repo = Repository(session)
+            thread = await repo.create_thread(title or message)
+            await repo.create_run(
+                task=message,
+                workspace=workspace,
+                model_provider=provider,
+                mode=mode,
+                observability_trace_id=trace_id,
+                thread_id=thread.id,
+            )
+            return await self._thread_detail(repo, thread.id)
+
+    async def list_threads(
+        self,
+        status: ThreadStatus | None = ThreadStatus.ACTIVE,
+        search: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[ThreadResponse]:
+        async with self.database.session() as session:
+            repo = Repository(session)
+            threads = await repo.list_threads(status=status, search=search, limit=limit, offset=offset)
+            responses: list[ThreadResponse] = []
+            for thread in threads:
+                responses.append(
+                    to_thread_response(
+                        thread,
+                        latest_run=await repo.latest_thread_run(thread.id),
+                        latest_message=await repo.latest_thread_message(thread.id),
+                    )
+                )
+            return responses
+
+    async def get_thread(self, thread_id: str) -> ThreadDetailResponse:
+        async with self.database.session() as session:
+            repo = Repository(session)
+            return await self._thread_detail(repo, thread_id)
+
+    async def update_thread_title(self, thread_id: str, title: str) -> ThreadResponse:
+        async with self.database.session() as session:
+            repo = Repository(session)
+            thread = await repo.update_thread_title(thread_id, title)
+            return to_thread_response(
+                thread,
+                latest_run=await repo.latest_thread_run(thread.id),
+                latest_message=await repo.latest_thread_message(thread.id),
+            )
+
+    async def archive_thread(self, thread_id: str) -> ThreadResponse:
+        async with self.database.session() as session:
+            repo = Repository(session)
+            thread = await repo.archive_thread(thread_id)
+            return to_thread_response(
+                thread,
+                latest_run=await repo.latest_thread_run(thread.id),
+                latest_message=await repo.latest_thread_message(thread.id),
+            )
+
+    async def create_thread_run(
+        self,
+        thread_id: str,
+        message: str,
+        workspace: str | None = None,
+        model_provider: str | None = None,
+        mode: RunMode = RunMode.GENERAL,
+    ) -> RunResponse:
+        provider = model_provider or self.settings.model_provider
+        trace_id = self.observability.create_trace_id()
+        async with self.database.session() as session:
+            repo = Repository(session)
+            thread = await repo.get_thread(thread_id)
+            if thread is None:
+                raise LookupError(f"thread not found: {thread_id}")
+            if thread.status != ThreadStatus.ACTIVE.value:
+                raise ValueError(f"thread is not active: {thread_id}")
+            latest_run = await repo.latest_thread_run(thread_id)
+            if latest_run is not None and latest_run.status in ACTIVE_RUN_STATUSES:
+                raise ValueError(f"thread has an active run: {latest_run.id}")
+            run = await repo.create_run(
+                task=message,
+                workspace=workspace,
+                model_provider=provider,
+                mode=mode,
+                observability_trace_id=trace_id,
+                thread_id=thread_id,
+            )
+            return to_run_response(run)
+
+    async def list_thread_messages(self, thread_id: str) -> list[ThreadMessageResponse]:
+        async with self.database.session() as session:
+            repo = Repository(session)
+            if await repo.get_thread(thread_id) is None:
+                raise LookupError(f"thread not found: {thread_id}")
+            return [to_thread_message_response(message) for message in await repo.list_thread_messages(thread_id)]
 
     async def list_runs(
         self,
@@ -208,6 +331,16 @@ class OrchestrationService:
             model_provider = run.model_provider
             mode = run.mode
             trace_id = run.observability_trace_id
+            thread_id = run.thread_id
+            await repo.add_thread_message(
+                thread_id,
+                author_type=ThreadMessageAuthorType.SYSTEM,
+                author_name="runtime",
+                message_type=ThreadMessageType.RUN_SUMMARY,
+                content="Run started.",
+                run_id=run_id,
+                metadata={"status": RunStatus.RUNNING.value},
+            )
 
         try:
             state: dict[str, Any] = {
@@ -235,27 +368,87 @@ class OrchestrationService:
                 blockers = list(review.get("blockers", []))
                 if any("Approval required" in blocker for blocker in blockers):
                     await repo.set_run_status(run_id, RunStatus.WAITING_APPROVAL, final_answer=final_answer)
+                    await repo.add_thread_message(
+                        thread_id,
+                        author_type=ThreadMessageAuthorType.SYSTEM,
+                        author_name="runtime",
+                        message_type=ThreadMessageType.RUN_SUMMARY,
+                        content="Run is waiting for approval.",
+                        run_id=run_id,
+                        metadata={"status": RunStatus.WAITING_APPROVAL.value},
+                    )
                 elif mode == RunMode.CODING.value and not review.get("can_proceed", False):
                     await repo.set_run_status(run_id, RunStatus.FAILED_VERIFICATION, final_answer=final_answer)
+                    await repo.add_thread_message(
+                        thread_id,
+                        author_type=ThreadMessageAuthorType.AGENT,
+                        author_name="reviewer",
+                        message_type=ThreadMessageType.FINAL,
+                        content=final_answer or "Run failed verification.",
+                        run_id=run_id,
+                        metadata={"status": RunStatus.FAILED_VERIFICATION.value},
+                    )
                 else:
                     await repo.set_run_status(run_id, RunStatus.COMPLETED, final_answer=final_answer)
                     await repo.add_event(run_id, EventType.RUN_COMPLETED.value, None, {})
+                    await repo.add_thread_message(
+                        thread_id,
+                        author_type=ThreadMessageAuthorType.AGENT,
+                        author_name="synode",
+                        message_type=ThreadMessageType.FINAL,
+                        content=final_answer or "Run completed.",
+                        run_id=run_id,
+                        metadata={"status": RunStatus.COMPLETED.value},
+                    )
         except Exception as exc:
             async with self.database.session() as session:
                 repo = Repository(session)
+                run = await repo.get_run(run_id)
                 await repo.set_run_status(run_id, RunStatus.FAILED, error=str(exc))
                 await repo.add_event(run_id, EventType.RUN_FAILED.value, None, {"error": str(exc)})
+                if run is not None:
+                    await repo.add_thread_message(
+                        run.thread_id,
+                        author_type=ThreadMessageAuthorType.SYSTEM,
+                        author_name="runtime",
+                        message_type=ThreadMessageType.RUN_SUMMARY,
+                        content=f"Run failed: {exc}",
+                        run_id=run_id,
+                        metadata={"status": RunStatus.FAILED.value},
+                    )
             raise
 
     async def approve(self, approval_id: str, reason: str | None = None) -> None:
         async with self.database.session() as session:
             repo = Repository(session)
-            await repo.decide_approval(approval_id, ApprovalStatus.APPROVED, reason)
+            approval = await repo.decide_approval(approval_id, ApprovalStatus.APPROVED, reason)
+            run = await repo.get_run(approval.run_id)
+            if run is not None:
+                await repo.add_thread_message(
+                    run.thread_id,
+                    author_type=ThreadMessageAuthorType.SYSTEM,
+                    author_name="approval",
+                    message_type=ThreadMessageType.APPROVAL_DECISION,
+                    content=f"Approval approved for {approval.tool_name}.",
+                    run_id=run.id,
+                    metadata={"approval_id": approval.id, "status": ApprovalStatus.APPROVED.value},
+                )
 
     async def reject(self, approval_id: str, reason: str | None = None) -> None:
         async with self.database.session() as session:
             repo = Repository(session)
-            await repo.decide_approval(approval_id, ApprovalStatus.REJECTED, reason)
+            approval = await repo.decide_approval(approval_id, ApprovalStatus.REJECTED, reason)
+            run = await repo.get_run(approval.run_id)
+            if run is not None:
+                await repo.add_thread_message(
+                    run.thread_id,
+                    author_type=ThreadMessageAuthorType.SYSTEM,
+                    author_name="approval",
+                    message_type=ThreadMessageType.APPROVAL_DECISION,
+                    content=f"Approval rejected for {approval.tool_name}.",
+                    run_id=run.id,
+                    metadata={"approval_id": approval.id, "status": ApprovalStatus.REJECTED.value},
+                )
 
     async def resume_run(self, run_id: str) -> None:
         await self.execute_run(run_id)
@@ -355,6 +548,20 @@ class OrchestrationService:
     async def close(self) -> None:
         await self.database.close()
         self.observability.shutdown()
+
+    async def _thread_detail(self, repo: Repository, thread_id: str) -> ThreadDetailResponse:
+        thread = await repo.get_thread(thread_id)
+        if thread is None:
+            raise LookupError(f"thread not found: {thread_id}")
+        runs = await repo.list_thread_runs(thread_id)
+        messages = await repo.list_thread_messages(thread_id)
+        latest_run = runs[0] if runs else None
+        latest_message = messages[-1] if messages else None
+        return ThreadDetailResponse(
+            thread=to_thread_response(thread, latest_run=latest_run, latest_message=latest_message),
+            runs=[to_run_response(run) for run in runs],
+            messages=[to_thread_message_response(message) for message in messages],
+        )
 
 
 async def create_service(settings: Settings, include_mcp: bool = True) -> OrchestrationService:

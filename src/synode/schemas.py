@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 def now_utc() -> datetime:
@@ -23,6 +23,25 @@ class RunStatus(StrEnum):
 class RunMode(StrEnum):
     GENERAL = "general"
     CODING = "coding"
+
+
+class ThreadStatus(StrEnum):
+    ACTIVE = "active"
+    ARCHIVED = "archived"
+
+
+class ThreadMessageAuthorType(StrEnum):
+    USER = "user"
+    AGENT = "agent"
+    SYSTEM = "system"
+
+
+class ThreadMessageType(StrEnum):
+    TEXT = "text"
+    RUN_SUMMARY = "run_summary"
+    APPROVAL_REQUEST = "approval_request"
+    APPROVAL_DECISION = "approval_decision"
+    FINAL = "final"
 
 
 class ApprovalStatus(StrEnum):
@@ -91,14 +110,59 @@ class PlanStep(BaseModel):
 
 
 class RunCreateRequest(BaseModel):
-    task: str
+    task: str = Field(min_length=1)
     workspace: str | None = None
     model_provider: str | None = None
     mode: RunMode = RunMode.GENERAL
 
+    @field_validator("task")
+    @classmethod
+    def validate_task(cls, value: str) -> str:
+        return _non_blank(value, "task")
+
+
+class ThreadCreateRequest(BaseModel):
+    message: str = Field(min_length=1)
+    title: str | None = None
+    workspace: str | None = None
+    model_provider: str | None = None
+    mode: RunMode = RunMode.GENERAL
+
+    @field_validator("message")
+    @classmethod
+    def validate_message(cls, value: str) -> str:
+        return _non_blank(value, "message")
+
+    @field_validator("title")
+    @classmethod
+    def validate_title(cls, value: str | None) -> str | None:
+        return _optional_non_blank(value, "title")
+
+
+class ThreadUpdateRequest(BaseModel):
+    title: str = Field(min_length=1)
+
+    @field_validator("title")
+    @classmethod
+    def validate_title(cls, value: str) -> str:
+        return _non_blank(value, "title")
+
+
+class ThreadRunCreateRequest(BaseModel):
+    message: str = Field(min_length=1)
+    workspace: str | None = None
+    model_provider: str | None = None
+    mode: RunMode = RunMode.GENERAL
+
+    @field_validator("message")
+    @classmethod
+    def validate_message(cls, value: str) -> str:
+        return _non_blank(value, "message")
+
 
 class RunResponse(BaseModel):
     id: str
+    thread_id: str
     status: RunStatus
     mode: RunMode
     task: str
@@ -108,6 +172,35 @@ class RunResponse(BaseModel):
     final_answer: str | None = None
     created_at: datetime
     updated_at: datetime
+
+
+class ThreadResponse(BaseModel):
+    id: str
+    title: str
+    status: ThreadStatus
+    latest_run_id: str | None = None
+    latest_run_status: RunStatus | None = None
+    last_message: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ThreadMessageResponse(BaseModel):
+    id: int
+    thread_id: str
+    run_id: str | None = None
+    author_type: ThreadMessageAuthorType
+    author_name: str
+    message_type: ThreadMessageType
+    content: str
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime
+
+
+class ThreadDetailResponse(BaseModel):
+    thread: ThreadResponse
+    runs: list[RunResponse] = Field(default_factory=list)
+    messages: list[ThreadMessageResponse] = Field(default_factory=list)
 
 
 class ApprovalDecision(BaseModel):
@@ -199,3 +292,15 @@ class GpuMetrics(BaseModel):
 class SystemMetricsResponse(BaseModel):
     process: ProcessMetrics
     gpu: list[GpuMetrics] = Field(default_factory=list)
+
+
+def _non_blank(value: str, field_name: str) -> str:
+    if not value.strip():
+        raise ValueError(f"{field_name} must not be blank")
+    return value
+
+
+def _optional_non_blank(value: str | None, field_name: str) -> str | None:
+    if value is None:
+        return None
+    return _non_blank(value, field_name)

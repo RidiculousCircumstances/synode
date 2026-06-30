@@ -10,7 +10,7 @@ import { CompactList, CompactRow, EmptyState, StatusBadge } from "@/components/u
 
 export default function RunsTable({ runs, selectedRunId }: { runs: Run[]; selectedRunId?: string }) {
   if (!runs.length) {
-    return <EmptyState title="No runs yet" text="Create a task from Chat to start the first run." />;
+    return <EmptyState title="No runs yet" text="Create a thread to start the first run." />;
   }
 
   return (

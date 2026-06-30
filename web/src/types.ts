@@ -10,8 +10,20 @@ export type RunMode = "general" | "coding";
 
 export type ApprovalStatus = "pending" | "approved" | "rejected";
 
+export type ThreadStatus = "active" | "archived";
+
+export type ThreadMessageAuthorType = "user" | "agent" | "system";
+
+export type ThreadMessageType =
+  | "text"
+  | "run_summary"
+  | "approval_request"
+  | "approval_decision"
+  | "final";
+
 export interface Run {
   id: string;
+  thread_id: string;
   status: RunStatus;
   mode: RunMode;
   task: string;
@@ -21,6 +33,35 @@ export interface Run {
   final_answer: string | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface Thread {
+  id: string;
+  title: string;
+  status: ThreadStatus;
+  latest_run_id: string | null;
+  latest_run_status: RunStatus | null;
+  last_message: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ThreadMessage {
+  id: number;
+  thread_id: string;
+  run_id: string | null;
+  author_type: ThreadMessageAuthorType;
+  author_name: string;
+  message_type: ThreadMessageType;
+  content: string;
+  metadata: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface ThreadDetail {
+  thread: Thread;
+  runs: Run[];
+  messages: ThreadMessage[];
 }
 
 export interface RunEvent {

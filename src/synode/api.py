@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
-from typing import AsyncIterator
+from typing import Any, AsyncIterator, Coroutine
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -22,8 +22,19 @@ from synode.schemas import (
     RunResponse,
     RunStatus,
     SystemMetricsResponse,
+    ThreadCreateRequest,
+    ThreadDetailResponse,
+    ThreadMessageResponse,
+    ThreadResponse,
+    ThreadRunCreateRequest,
+    ThreadStatus,
+    ThreadUpdateRequest,
     ToolAuditResponse,
 )
+
+
+def _schedule_background(coro: Coroutine[Any, Any, None]) -> None:
+    asyncio.create_task(coro)
 
 
 @asynccontextmanager
@@ -53,11 +64,91 @@ def create_app() -> FastAPI:
     async def health() -> dict[str, str]:
         return {"status": "ok"}
 
+    @app.post("/threads", response_model=ThreadDetailResponse)
+    async def create_thread(payload: ThreadCreateRequest, request: Request) -> ThreadDetailResponse:
+        service: OrchestrationService = request.app.state.service
+        detail = await service.create_thread(
+            message=payload.message,
+            title=payload.title,
+            workspace=payload.workspace,
+            model_provider=payload.model_provider,
+            mode=payload.mode,
+        )
+        if detail.thread.latest_run_id is None:
+            raise HTTPException(status_code=500, detail="thread was created without a run")
+        _schedule_background(service.execute_run(detail.thread.latest_run_id))
+        return detail
+
+    @app.get("/threads", response_model=list[ThreadResponse])
+    async def list_threads(
+        request: Request,
+        status: ThreadStatus | None = ThreadStatus.ACTIVE,
+        search: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[ThreadResponse]:
+        service: OrchestrationService = request.app.state.service
+        return await service.list_threads(status=status, search=search, limit=min(limit, 200), offset=offset)
+
+    @app.get("/threads/{thread_id}", response_model=ThreadDetailResponse)
+    async def get_thread(thread_id: str, request: Request) -> ThreadDetailResponse:
+        service: OrchestrationService = request.app.state.service
+        try:
+            return await service.get_thread(thread_id)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.patch("/threads/{thread_id}", response_model=ThreadResponse)
+    async def update_thread(
+        thread_id: str, payload: ThreadUpdateRequest, request: Request
+    ) -> ThreadResponse:
+        service: OrchestrationService = request.app.state.service
+        try:
+            return await service.update_thread_title(thread_id, payload.title)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/threads/{thread_id}/archive", response_model=ThreadResponse)
+    async def archive_thread(thread_id: str, request: Request) -> ThreadResponse:
+        service: OrchestrationService = request.app.state.service
+        try:
+            return await service.archive_thread(thread_id)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/threads/{thread_id}/messages", response_model=list[ThreadMessageResponse])
+    async def list_thread_messages(thread_id: str, request: Request) -> list[ThreadMessageResponse]:
+        service: OrchestrationService = request.app.state.service
+        try:
+            return await service.list_thread_messages(thread_id)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/threads/{thread_id}/runs", response_model=RunResponse)
+    async def create_thread_run(
+        thread_id: str, payload: ThreadRunCreateRequest, request: Request
+    ) -> RunResponse:
+        service: OrchestrationService = request.app.state.service
+        try:
+            run = await service.create_thread_run(
+                thread_id=thread_id,
+                message=payload.message,
+                workspace=payload.workspace,
+                model_provider=payload.model_provider,
+                mode=payload.mode,
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        _schedule_background(service.execute_run(run.id))
+        return run
+
     @app.post("/runs", response_model=RunResponse)
     async def create_run(payload: RunCreateRequest, request: Request) -> RunResponse:
         service: OrchestrationService = request.app.state.service
         run = await service.create_run(payload.task, payload.workspace, payload.model_provider, payload.mode)
-        asyncio.create_task(service.execute_run(run.id))
+        _schedule_background(service.execute_run(run.id))
         return run
 
     @app.get("/runs", response_model=list[RunResponse])
@@ -135,7 +226,7 @@ def create_app() -> FastAPI:
     @app.post("/runs/{run_id}/resume")
     async def resume_run(run_id: str, request: Request) -> dict[str, str]:
         service: OrchestrationService = request.app.state.service
-        asyncio.create_task(service.resume_run(run_id))
+        _schedule_background(service.resume_run(run_id))
         return {"status": "scheduled"}
 
     @app.post("/approvals/{approval_id}/approve")

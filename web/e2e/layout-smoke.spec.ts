@@ -1,6 +1,7 @@
 import { expect, test, type Page, type Route } from "@playwright/test";
 
 const runId = "run-layout-smoke-0001";
+const threadId = "thread-layout-smoke-0001";
 const now = new Date("2026-06-30T00:00:00.000Z").toISOString();
 
 test.beforeEach(async ({ page }) => {
@@ -8,6 +9,8 @@ test.beforeEach(async ({ page }) => {
 });
 
 const routes = [
+  "/threads",
+  `/threads/${threadId}`,
   "/chat",
   "/runs",
   `/runs/${runId}`,
@@ -65,6 +68,18 @@ async function installApiRoutes(page: Page) {
     const url = new URL(route.request().url());
     if (url.pathname === "/runs") {
       await fulfillJson(route, [runFixture()]);
+      return;
+    }
+    if (url.pathname === "/threads") {
+      await fulfillJson(route, [threadFixture()]);
+      return;
+    }
+    if (url.pathname === `/threads/${threadId}`) {
+      await fulfillJson(route, threadDetailFixture());
+      return;
+    }
+    if (url.pathname === `/threads/${threadId}/messages`) {
+      await fulfillJson(route, threadDetailFixture().messages);
       return;
     }
     if (url.pathname === "/agents") {
@@ -126,6 +141,7 @@ async function fulfillJson(route: Route, value: unknown) {
 function runFixture() {
   return {
     id: runId,
+    thread_id: threadId,
     status: "completed",
     mode: "coding",
     task: "Refactor the layout smoke fixture and verify the diff output stays readable",
@@ -135,6 +151,50 @@ function runFixture() {
     final_answer: "Implemented a focused layout fixture with full-size artifacts and diff panels.",
     created_at: now,
     updated_at: now,
+  };
+}
+
+function threadFixture() {
+  return {
+    id: threadId,
+    title: "Refactor layout smoke fixture",
+    status: "active",
+    latest_run_id: runId,
+    latest_run_status: "completed",
+    last_message: "Implemented a focused layout fixture with full-size artifacts and diff panels.",
+    created_at: now,
+    updated_at: now,
+  };
+}
+
+function threadDetailFixture() {
+  return {
+    thread: threadFixture(),
+    runs: [runFixture()],
+    messages: [
+      {
+        id: 1,
+        thread_id: threadId,
+        run_id: runId,
+        author_type: "user",
+        author_name: "user",
+        message_type: "text",
+        content: "Refactor the layout smoke fixture and verify the diff output stays readable",
+        metadata: {},
+        created_at: now,
+      },
+      {
+        id: 2,
+        thread_id: threadId,
+        run_id: runId,
+        author_type: "agent",
+        author_name: "synode",
+        message_type: "final",
+        content: "Implemented a focused layout fixture with full-size artifacts and diff panels.",
+        metadata: { status: "completed" },
+        created_at: now,
+      },
+    ],
   };
 }
 
