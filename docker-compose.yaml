@@ -1,4 +1,32 @@
 services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: synode:local
+    command: ["serve"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      searxng:
+        condition: service_started
+    network_mode: host
+    environment:
+      SYNODE_DATABASE_URL: postgresql+asyncpg://synode:synode@127.0.0.1:${SYNODE_POSTGRES_PORT:-15432}/synode
+      SYNODE_CHECKPOINT_DATABASE_URL: postgresql://synode:synode@127.0.0.1:${SYNODE_POSTGRES_PORT:-15432}/synode?sslmode=disable
+      SYNODE_ENABLE_POSTGRES_CHECKPOINTER: "true"
+      SYNODE_SEARXNG_URL: http://127.0.0.1:${SYNODE_SEARXNG_PORT:-18080}
+      SYNODE_MODEL_PROVIDER: ollama
+      SYNODE_OLLAMA_BASE_URL: ${SYNODE_OLLAMA_BASE_URL:-http://127.0.0.1:11434}
+      SYNODE_OLLAMA_MODEL: ${SYNODE_OLLAMA_MODEL:-qwen2.5-coder:7b}
+      SYNODE_MODEL_TIMEOUT_SECONDS: ${SYNODE_MODEL_TIMEOUT_SECONDS:-60}
+      SYNODE_PORT: ${SYNODE_API_PORT:-8787}
+      SYNODE_WORKSPACE_ALLOWLIST: /workspace,/app/samples,/tmp
+      SYNODE_MCP_CONFIG_PATH: /app/.mcp.json
+    volumes:
+      - ./var/workspaces:/workspace
+    restart: unless-stopped
+
   postgres:
     image: postgres:17-alpine
     environment:
@@ -6,7 +34,7 @@ services:
       POSTGRES_PASSWORD: synode
       POSTGRES_DB: synode
     ports:
-      - "15432:5432"
+      - "${SYNODE_POSTGRES_PORT:-15432}:5432"
     volumes:
       - synode-postgres:/var/lib/postgresql/data
     healthcheck:
@@ -14,16 +42,17 @@ services:
       interval: 5s
       timeout: 5s
       retries: 20
+    restart: unless-stopped
 
   searxng:
     image: searxng/searxng:latest
     ports:
-      - "18080:8080"
+      - "${SYNODE_SEARXNG_PORT:-18080}:8080"
     environment:
       SEARXNG_BASE_URL: http://127.0.0.1:18080/
     volumes:
       - ./deploy/searxng:/etc/searxng:ro
+    restart: unless-stopped
 
 volumes:
   synode-postgres:
-

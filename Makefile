@@ -2,7 +2,7 @@ PYTHON ?= python3
 UV ?= uv
 PYTEST ?= $(UV) run pytest
 
-.PHONY: dev-install test lint typecheck guardrails smoke smoke-ollama db-upgrade serve
+.PHONY: dev-install test lint typecheck guardrails smoke smoke-ollama db-upgrade serve docker-up docker-down docker-logs docker-smoke
 
 dev-install:
 	$(UV) sync --extra dev
@@ -31,3 +31,16 @@ smoke-ollama:
 
 serve:
 	$(UV) run synode serve --host 127.0.0.1 --port 8787
+
+docker-up:
+	docker compose up -d --build
+
+docker-down:
+	docker compose down
+
+docker-logs:
+	docker compose logs -f api
+
+docker-smoke:
+	docker compose exec api synode models health
+	docker compose exec api synode run "Analyze sample data and summarize findings" --workspace /app/samples --model-provider ollama

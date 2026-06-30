@@ -10,6 +10,29 @@ provider is kept for tests and explicit local diagnostics only.
 
 ## Quick Start
 
+### Docker Compose
+
+Ollama runs outside Docker on the host. The compose stack starts Synode API,
+Postgres, and SearxNG. On Linux, the API container uses host networking so it
+can reach the host-local Ollama service at `127.0.0.1:11434` without exposing
+Ollama on all interfaces.
+
+```bash
+systemctl status ollama --no-pager
+docker compose up -d --build
+curl http://127.0.0.1:8787/models/health
+make docker-smoke
+```
+
+The API is available at `http://127.0.0.1:8787`. Compose uses
+`http://127.0.0.1:11434` for the external Ollama endpoint from the API
+container's host network.
+
+Optional port/model overrides can be copied from `.env.docker.example` into
+`.env`.
+
+### Local Python
+
 ```bash
 uv sync --extra dev
 docker compose up -d postgres searxng

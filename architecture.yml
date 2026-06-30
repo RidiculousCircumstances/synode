@@ -25,7 +25,13 @@ components:
   - name: deploy
     path: docker-compose.yaml
     responsibilities:
-      - Local MVP dependencies for Postgres and SearxNG
+      - Local Docker Compose deployment for Synode API, Postgres, and SearxNG
+      - External host Ollama integration through API host networking
+  - name: docker
+    path: Dockerfile
+    responsibilities:
+      - Container image for Synode API and CLI
+      - Startup entrypoint that applies migrations before serving the API
 
 rules:
   - Orchestration may depend on model, tool, persistence, and registry modules.
@@ -54,6 +60,10 @@ entrypoints:
     path: src/synode/cli.py
     type: cli
     command: synode models health
+  - name: docker-compose
+    path: docker-compose.yaml
+    type: deployment
+    command: docker compose up -d --build
 
 critical_flows:
   - name: run-task

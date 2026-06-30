@@ -53,6 +53,11 @@
 - The system-wide Ollama unit is installed at `/etc/systemd/system/ollama.service`
   and reports enabled/active. Synode model health reports Ollama `ok=true`.
 - Real-provider validation passed with `make smoke-ollama`.
+- Docker Compose quick deployment is implemented for Synode API, Postgres, and
+  SearxNG. Ollama remains outside Docker and is reached through
+  API host networking at `127.0.0.1:11434`.
+- Docker Compose deployment was validated with `docker compose up -d --build`
+  and `make docker-smoke`.
 
 ### Now:
 - MVP implementation is ready for local use.
