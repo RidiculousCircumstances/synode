@@ -32,8 +32,13 @@ components:
   - name: deploy
     path: docker-compose.yaml
     responsibilities:
-      - Local Docker Compose deployment for Synode UI, API, Postgres, and SearxNG
+      - Local Docker Compose deployment for Synode UI, API, worker, Postgres, and SearxNG
       - External host Ollama integration through API host networking
+  - name: sandbox-deploy
+    path: docker-compose.sandbox.yaml
+    responsibilities:
+      - Optional Docker Compose overlay that grants API and worker access to the Docker Engine socket for container sandbox execution
+      - Host-to-container workspace path mapping for Docker-outside-of-Docker sandbox runs
   - name: observability-deploy
     path: docker-compose.observability.yaml
     responsibilities:
@@ -44,6 +49,11 @@ components:
     responsibilities:
       - Container image for Synode API and CLI
       - Startup entrypoint that applies migrations before serving the API
+  - name: docker-sandbox
+    path: Dockerfile.sandbox
+    responsibilities:
+      - Minimal command execution image for the Docker sandbox backend
+      - Python, pytest, uv, git, and ripgrep toolchain for isolated shell/Python runs
   - name: docker-ui
     path: Dockerfile.ui
     responsibilities:
@@ -67,6 +77,7 @@ rules:
   - Rejected approvals and explicit stops must move runs to terminal cancelled state and unblock the thread.
   - API lists that can grow must accept pagination and apply limit/offset in persistence queries.
   - Langfuse must remain optional and fail startup when enabled without required credentials.
+  - Docker sandbox runs must use one short-lived container per command and fail explicitly when the Docker Engine socket is unavailable.
 
 entrypoints:
   - name: cli
@@ -89,6 +100,14 @@ entrypoints:
     path: docker-compose.yaml
     type: deployment
     command: docker compose up -d --build
+  - name: docker-sandbox-compose
+    path: docker-compose.sandbox.yaml
+    type: deployment
+    command: docker compose -f docker-compose.yaml -f docker-compose.sandbox.yaml up -d --build
+  - name: docker-sandbox-build
+    path: Dockerfile.sandbox
+    type: deployment
+    command: make docker-sandbox-build
   - name: ui-dev
     path: web
     type: frontend
@@ -113,6 +132,8 @@ critical_flows:
     description: Operator stop or approval rejection cancels the run, records a cancellation event, rejects pending approvals, and allows a new run in the same thread.
   - name: mcp-tool-call
     description: MCP discovery and calls are normalized into governed tool invocations.
+  - name: sandboxed-command-execution
+    description: Risky shell and Python execution pass through the configured sandbox backend; Docker mode creates an isolated container with explicit network and resource limits.
   - name: operator-ui
     description: Browser UI creates and continues threads while monitoring structured run events, streamed agent output, graph state, approvals, artifacts, diffs, tests, and metrics.
   - name: observability

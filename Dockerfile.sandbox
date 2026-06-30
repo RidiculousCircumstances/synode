@@ -1,0 +1,18 @@
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates git ripgrep \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --upgrade pip \
+    && pip install pytest uv \
+    && useradd --create-home --uid 1000 --user-group --shell /usr/sbin/nologin sandbox
+
+USER sandbox
+WORKDIR /workspace
+
+CMD ["python", "-V"]

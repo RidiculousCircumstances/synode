@@ -49,6 +49,22 @@ which enforces workspace, timeout, output, CPU, RAM, and file-size limits. Set
 `SYNODE_SANDBOX_BACKEND=none` only for diagnostics; approved write tools will
 then fail closed.
 
+For stronger command/Python isolation, build the sandbox image and enable the
+explicit Docker sandbox overlay:
+
+```bash
+make docker-sandbox-build
+docker compose -f docker-compose.yaml -f docker-compose.sandbox.yaml up -d --build
+curl http://127.0.0.1:8787/runtime/sandbox
+```
+
+The overlay mounts `/var/run/docker.sock` into the API and worker containers so
+Synode can create short-lived sandbox containers. Keep it on a trusted local
+host only. The Docker sandbox runs commands with `--network none` semantics by
+default, a bind-mounted workspace, read-only container root filesystem,
+dropped capabilities, `no-new-privileges`, PID/CPU/RAM/file-size limits, and
+captured stdout/stderr.
+
 If you store API keys in Synode DB secrets, set `SYNODE_SECRETS_KEY` before
 starting the API. Without it, secret creation and secret-backed profiles fail
 explicitly. Ollama-only local use does not require this key.

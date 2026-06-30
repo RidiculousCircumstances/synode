@@ -2,7 +2,7 @@ PYTHON ?= python3
 UV ?= uv
 PYTEST ?= $(UV) run pytest
 
-.PHONY: dev-install test lint typecheck guardrails smoke smoke-ollama db-upgrade serve worker runtime-status cleanup backup restore ui-dev ui-build ui-lint ui-test docker-up docker-down docker-logs docker-smoke docker-observability-up docker-observability-down
+.PHONY: dev-install test lint typecheck guardrails smoke smoke-ollama db-upgrade serve worker runtime-status cleanup backup restore ui-dev ui-build ui-lint ui-test docker-up docker-down docker-logs docker-smoke docker-sandbox-build docker-sandbox-up docker-observability-up docker-observability-down
 
 dev-install:
 	$(UV) sync --extra dev
@@ -73,6 +73,13 @@ docker-logs:
 docker-smoke:
 	docker compose exec api synode models health
 	docker compose exec api synode run "Analyze sample data and summarize findings" --workspace /app/samples --model-provider ollama
+
+docker-sandbox-build:
+	docker build -f Dockerfile.sandbox -t synode-sandbox:local .
+
+docker-sandbox-up:
+	$(MAKE) docker-sandbox-build
+	docker compose -f docker-compose.yaml -f docker-compose.sandbox.yaml up -d --build
 
 docker-observability-up:
 	test -f .env.observability

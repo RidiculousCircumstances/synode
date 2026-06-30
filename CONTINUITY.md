@@ -112,6 +112,17 @@
   tests`, `uv run pytest`, `uv run mypy`, `python3 tools/guardrails.py`,
   `npm run lint`, `npm run build`, `npm run test:e2e`, `uv run synode db
   upgrade`, and `git diff --check`.
+- Optional Docker sandbox backend is implemented for shell and Python
+  execution. It uses one short-lived container per command, Docker Engine unix
+  socket access, bind-mounted workspace, default `network=none`, read-only root
+  filesystem, dropped capabilities, `no-new-privileges`, PID/CPU/RAM/file-size
+  limits, captured stdout/stderr, and cleanup after completion.
+- Docker sandbox deployment support is documented through `Dockerfile.sandbox`,
+  `docker-compose.sandbox.yaml`, and `make docker-sandbox-build`.
+- Verification passed for Docker sandbox work: `uv run pytest`,
+  `uv run ruff check .`, `uv run mypy`, `docker compose config`,
+  `docker compose -f docker-compose.yaml -f docker-compose.sandbox.yaml config`,
+  `make docker-sandbox-build`, and a real `SandboxRunner` Docker smoke command.
 
 ### Now:
 - MVP backend and operator UI include DB-backed runtime configuration screens
@@ -122,9 +133,14 @@
   because both paths now produce terminal `cancelled` runs.
 - Thread chat now receives prior conversation context, auto-resumes approved
   runs from UI approval actions, and renders compact live status in the chat.
+- Default sandbox remains `process`; Docker sandbox is opt-in with an explicit
+  local operator overlay that mounts `/var/run/docker.sock`.
 
 ### Next:
 - Tune real-model prompts against broader local workloads.
+- If direct file-write tools must be treated as untrusted code execution, move
+  `native.fs_write` and `native.patch_apply` mutations into the same
+  containerized mutation path. They are currently approval-gated host writes.
 - Add production auth before exposing UI/API outside localhost.
 - Add Prometheus/Grafana metrics if host-level dashboards are required.
 

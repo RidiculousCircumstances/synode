@@ -1,0 +1,22 @@
+services:
+  api:
+    user: root
+    environment:
+      SYNODE_SANDBOX_BACKEND: docker
+      SYNODE_SANDBOX_DOCKER_IMAGE: ${SYNODE_SANDBOX_DOCKER_IMAGE:-synode-sandbox:local}
+      SYNODE_SANDBOX_DOCKER_SOCKET: /var/run/docker.sock
+      SYNODE_SANDBOX_DOCKER_HOST_WORKSPACE: ${SYNODE_SANDBOX_DOCKER_HOST_WORKSPACE:-${PWD}/var/workspaces}
+      SYNODE_SANDBOX_DOCKER_CONTAINER_WORKSPACE: /workspace
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  worker:
+    user: root
+    environment:
+      SYNODE_SANDBOX_BACKEND: docker
+      SYNODE_SANDBOX_DOCKER_IMAGE: ${SYNODE_SANDBOX_DOCKER_IMAGE:-synode-sandbox:local}
+      SYNODE_SANDBOX_DOCKER_SOCKET: /var/run/docker.sock
+      SYNODE_SANDBOX_DOCKER_HOST_WORKSPACE: ${SYNODE_SANDBOX_DOCKER_HOST_WORKSPACE:-${PWD}/var/workspaces}
+      SYNODE_SANDBOX_DOCKER_CONTAINER_WORKSPACE: /workspace
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock

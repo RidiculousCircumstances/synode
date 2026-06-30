@@ -49,6 +49,15 @@ timeouts, output truncation, CPU, RAM, and file-size limits. If
 `SYNODE_SANDBOX_BACKEND=none`, approved write tools fail closed with a sandbox
 error.
 
+Use `SYNODE_SANDBOX_BACKEND=docker` for container isolation of shell and Python
+execution. The Docker backend talks to the Docker Engine through a unix socket,
+creates one short-lived container per command, bind-mounts the requested
+workspace at `/workspace`, disables networking by default, drops Linux
+capabilities, sets `no-new-privileges`, uses a read-only container root
+filesystem plus tmpfs `/tmp`, applies CPU/RAM/PID/file-size limits, captures
+stdout/stderr, and removes the container after completion. It fails closed when
+the Docker socket is missing or unreachable.
+
 Relevant settings:
 
 ```bash
@@ -57,7 +66,34 @@ SYNODE_SANDBOX_CPU_SECONDS=30
 SYNODE_SANDBOX_MEMORY_MB=512
 SYNODE_SANDBOX_DISK_MB=1024
 SYNODE_SANDBOX_OUTPUT_MAX_BYTES=12000
+SYNODE_SANDBOX_DOCKER_IMAGE=synode-sandbox:local
+SYNODE_SANDBOX_DOCKER_SOCKET=/var/run/docker.sock
+SYNODE_SANDBOX_DOCKER_NETWORK=none
+SYNODE_SANDBOX_DOCKER_WORKDIR=/workspace
+SYNODE_SANDBOX_DOCKER_USER=1000:1000
+SYNODE_SANDBOX_DOCKER_CPUS=1
+SYNODE_SANDBOX_DOCKER_PIDS_LIMIT=128
+SYNODE_SANDBOX_DOCKER_TMPFS_MB=64
 ```
+
+Build the default sandbox image:
+
+```bash
+make docker-sandbox-build
+```
+
+To run the Compose stack with the Docker sandbox, use the explicit overlay:
+
+```bash
+docker compose -f docker-compose.yaml -f docker-compose.sandbox.yaml up -d --build
+```
+
+The overlay mounts `/var/run/docker.sock` and runs API/worker as root so they
+can talk to the host Docker daemon. That is an intentional local-operator
+tradeoff, not a public SaaS boundary. The overlay maps container workspaces
+under `/workspace` to the host path in `SYNODE_SANDBOX_DOCKER_HOST_WORKSPACE`;
+set it to an absolute path if your shell does not export `PWD` or if you run
+Compose from another directory.
 
 ## Data Lifecycle
 

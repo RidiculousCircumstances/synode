@@ -22,11 +22,21 @@ class Settings(BaseSettings):
     workspace_allowlist: str = "/home/rd/proj,/tmp"
     mcp_config_path: Path = Path(".mcp.json")
     shell_timeout_seconds: float = 20.0
-    sandbox_backend: Literal["process", "none"] = "process"
+    sandbox_backend: Literal["process", "docker", "none"] = "process"
     sandbox_cpu_seconds: int = 30
     sandbox_memory_mb: int = 512
     sandbox_disk_mb: int = 1024
     sandbox_output_max_bytes: int = 12000
+    sandbox_docker_image: str = "synode-sandbox:local"
+    sandbox_docker_socket: str = "/var/run/docker.sock"
+    sandbox_docker_network: str = "none"
+    sandbox_docker_workdir: str = "/workspace"
+    sandbox_docker_user: str = "1000:1000"
+    sandbox_docker_cpus: float = 1.0
+    sandbox_docker_pids_limit: int = 128
+    sandbox_docker_tmpfs_mb: int = 64
+    sandbox_docker_host_workspace: str | None = None
+    sandbox_docker_container_workspace: str | None = None
     worker_id: str | None = None
     worker_poll_interval_seconds: float = 1.0
     worker_heartbeat_interval_seconds: float = 5.0
@@ -78,6 +88,9 @@ class Settings(BaseSettings):
             "SYNODE_SANDBOX_MEMORY_MB": self.sandbox_memory_mb,
             "SYNODE_SANDBOX_DISK_MB": self.sandbox_disk_mb,
             "SYNODE_SANDBOX_OUTPUT_MAX_BYTES": self.sandbox_output_max_bytes,
+            "SYNODE_SANDBOX_DOCKER_CPUS": self.sandbox_docker_cpus,
+            "SYNODE_SANDBOX_DOCKER_PIDS_LIMIT": self.sandbox_docker_pids_limit,
+            "SYNODE_SANDBOX_DOCKER_TMPFS_MB": self.sandbox_docker_tmpfs_mb,
             "SYNODE_MAX_EVENT_PAYLOAD_BYTES": self.max_event_payload_bytes,
             "SYNODE_MAX_TOOL_AUDIT_PAYLOAD_BYTES": self.max_tool_audit_payload_bytes,
             "SYNODE_MAX_ARTIFACT_PAYLOAD_BYTES": self.max_artifact_payload_bytes,
@@ -85,6 +98,27 @@ class Settings(BaseSettings):
         invalid = [name for name, value in positive_limits.items() if value <= 0]
         if invalid:
             raise RuntimeError(f"runtime limit settings must be positive: {', '.join(invalid)}")
+        if self.sandbox_backend == "docker" and not self.sandbox_docker_image.strip():
+            raise RuntimeError("SYNODE_SANDBOX_DOCKER_IMAGE is required for docker sandbox backend")
+        if not self.sandbox_docker_socket.strip():
+            raise RuntimeError("SYNODE_SANDBOX_DOCKER_SOCKET must not be blank")
+        if "://" in self.sandbox_docker_socket and not self.sandbox_docker_socket.startswith("unix://"):
+            raise RuntimeError("SYNODE_SANDBOX_DOCKER_SOCKET currently supports only unix socket paths")
+        if not self.sandbox_docker_network.strip():
+            raise RuntimeError("SYNODE_SANDBOX_DOCKER_NETWORK must not be blank")
+        if not Path(self.sandbox_docker_workdir).is_absolute():
+            raise RuntimeError("SYNODE_SANDBOX_DOCKER_WORKDIR must be an absolute container path")
+        if bool(self.sandbox_docker_host_workspace) != bool(self.sandbox_docker_container_workspace):
+            raise RuntimeError(
+                "SYNODE_SANDBOX_DOCKER_HOST_WORKSPACE and "
+                "SYNODE_SANDBOX_DOCKER_CONTAINER_WORKSPACE must be set together"
+            )
+        if self.sandbox_docker_container_workspace and not Path(
+            self.sandbox_docker_container_workspace
+        ).is_absolute():
+            raise RuntimeError(
+                "SYNODE_SANDBOX_DOCKER_CONTAINER_WORKSPACE must be an absolute container path"
+            )
 
 
 @lru_cache(maxsize=1)
