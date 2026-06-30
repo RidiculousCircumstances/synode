@@ -1,0 +1,77 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "synode"
+version = "0.1.0"
+description = "Local-first LangGraph multi-agent MVP"
+readme = "README.md"
+requires-python = ">=3.12,<3.15"
+license = { text = "Proprietary" }
+authors = [{ name = "Synode" }]
+dependencies = [
+  "alembic>=1.16,<2",
+  "asyncpg>=0.30,<1",
+  "fastapi>=0.116,<1",
+  "httpx>=0.28,<1",
+  "langchain-core>=0.3,<1",
+  "langchain-mcp-adapters>=0.1,<1",
+  "langgraph>=0.5,<1",
+  "langgraph-checkpoint-postgres>=2.0,<4",
+  "pydantic>=2.11,<3",
+  "pydantic-settings>=2.8,<3",
+  "psycopg[binary,pool]>=3.2,<4",
+  "PyYAML>=6.0,<7",
+  "rich>=13.9,<15",
+  "SQLAlchemy>=2.0,<3",
+  "typer>=0.16,<1",
+  "uvicorn>=0.35,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "aiosqlite>=0.21,<1",
+  "mypy>=1.16,<2",
+  "pytest>=8.4,<9",
+  "pytest-asyncio>=1.0,<2",
+  "pytest-timeout>=2.4,<3",
+  "ruff>=0.12,<1",
+  "types-PyYAML>=6.0,<7",
+]
+
+[project.scripts]
+synode = "synode.cli:main"
+
+[project.entry-points."uvicorn.factories"]
+synode = "synode.api:create_app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/synode"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+asyncio_mode = "auto"
+timeout = 120
+markers = [
+  "unit: pure unit tests",
+  "integration: integration tests using local app dependencies",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E9", "F401", "F811", "F821", "I"]
+
+[tool.mypy]
+python_version = "3.12"
+files = ["src/synode"]
+ignore_missing_imports = true
+no_implicit_optional = true
+warn_unused_ignores = true
+warn_return_any = false
+show_error_codes = true
+pretty = true

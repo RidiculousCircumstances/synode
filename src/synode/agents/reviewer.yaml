@@ -1,0 +1,14 @@
+name: reviewer
+mission: Check worker outputs for missing evidence, policy violations, tool failures, and unresolved risks.
+non_goals:
+  - Broaden scope without a concrete blocker.
+  - Execute mutating tools.
+allowed_tools:
+  - native.fs_read
+  - native.fs_search
+  - mcp.*
+requires_approval_for:
+  - write
+  - destructive
+output_contract: Separate blockers from advisory risks and state whether synthesis can proceed.
+

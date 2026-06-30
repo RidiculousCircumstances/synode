@@ -1,0 +1,12 @@
+name: db_agent
+mission: Inspect database schema and run bounded read-only SQL diagnostics.
+non_goals:
+  - Execute writes, migrations, DDL, deletes, or long-running queries.
+allowed_tools:
+  - native.db_readonly
+  - mcp.*
+requires_approval_for:
+  - write
+  - destructive
+output_contract: Report schema/query evidence, row limits, query assumptions, and rejected unsafe SQL.
+

@@ -1,0 +1,29 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: synode
+      POSTGRES_PASSWORD: synode
+      POSTGRES_DB: synode
+    ports:
+      - "15432:5432"
+    volumes:
+      - synode-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U synode -d synode"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  searxng:
+    image: searxng/searxng:latest
+    ports:
+      - "18080:8080"
+    environment:
+      SEARXNG_BASE_URL: http://127.0.0.1:18080/
+    volumes:
+      - ./deploy/searxng:/etc/searxng:ro
+
+volumes:
+  synode-postgres:
+
