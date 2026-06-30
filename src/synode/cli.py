@@ -39,6 +39,18 @@ app.add_typer(maintenance_app, name="maintenance")
 console = Console()
 
 
+@app.command(
+    "fabricator",
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+)
+def fabricator_command(ctx: typer.Context) -> None:
+    """Forward to the Synode Fabricator workflow CLI."""
+
+    from synode.fabricator.cli import main as fabricator_main
+
+    raise typer.Exit(fabricator_main(list(ctx.args)))
+
+
 @app.command()
 def run(
     task: str = typer.Argument(..., help="Task to run"),

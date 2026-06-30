@@ -123,6 +123,11 @@
   `uv run ruff check .`, `uv run mypy`, `docker compose config`,
   `docker compose -f docker-compose.yaml -f docker-compose.sandbox.yaml config`,
   `make docker-sandbox-build`, and a real `SandboxRunner` Docker smoke command.
+- Synode Fabricator is implemented as a local developer CLI/docs workflow under
+  `src/synode/fabricator` and `docs/fabricator`, with Synode-specific experts,
+  routing profiles, prompts, stance packs, templates, smoke workflow, and tests.
+- Verification passed for Fabricator work: `uv run synode fabricator validate`,
+  `uv run synode fabricator smoke`, and `uv run pytest tests/test_fabricator.py`.
 
 ### Now:
 - MVP backend and operator UI include DB-backed runtime configuration screens
@@ -135,6 +140,9 @@
   runs from UI approval actions, and renders compact live status in the chat.
 - Default sandbox remains `process`; Docker sandbox is opt-in with an explicit
   local operator overlay that mounts `/var/run/docker.sock`.
+- Fabricator is available through `synode fabricator ...` and remains advisory:
+  it creates planning/review artifacts but does not commit, push, or bypass
+  Synode runtime tool policy.
 
 ### Next:
 - Tune real-model prompts against broader local workloads.
@@ -152,5 +160,8 @@
 - Compose Postgres and SearxNG services were started for verification.
 - Frontend commands: `make ui-lint`, `make ui-build`, `make ui-test`,
   `make ui-dev`.
+- Fabricator commands: `uv run synode fabricator validate`,
+  `uv run synode fabricator smoke`, `make fabricator-validate`, and
+  `make fabricator-smoke`.
 - Observability commands: copy `.env.observability.example` to
   `.env.observability`, then `make docker-observability-up`.

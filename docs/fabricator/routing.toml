@@ -1,0 +1,127 @@
+schema_version = 1
+
+[defaults]
+max_optional_experts = 4
+human_merge_gate = true
+run_artifact_root = "var/fabricator/runs"
+forbidden_git_actions = ["commit", "push", "open_pr", "open_mr"]
+
+[[profiles]]
+id = "docs_process"
+description = "Documentation, guardrails, architecture map, continuity ledger, and process changes."
+risk_profile = "docs"
+experts = ["developer_docs_reviewer", "complexity_controller", "qa_regression_strategist"]
+required_docs = ["agents.md", "architecture.yml", "CONTINUITY.md", "docs/verification.md"]
+verification = ["uv run synode fabricator validate", "python3 tools/guardrails.py", "git diff --check"]
+challenge_triggers = ["Architecture map changes", "Guardrail changes", "New workflow or process authority"]
+navigation_required = true
+challenge_policy = "conditional"
+max_challenge_experts = 2
+
+[[profiles]]
+id = "developer_tooling"
+description = "Developer tooling, CLI, Make targets, test harnesses, and Fabricator itself."
+risk_profile = "small-code"
+experts = ["developer_docs_reviewer", "qa_regression_strategist", "complexity_controller"]
+required_docs = ["agents.md", "docs/verification.md", "architecture.yml"]
+verification = ["uv run pytest tests/test_fabricator*.py", "uv run ruff check .", "git diff --check"]
+challenge_triggers = ["New CLI surface", "New generated artifacts", "Changes to commit or verification workflow"]
+navigation_required = true
+challenge_policy = "conditional"
+max_challenge_experts = 2
+
+[[profiles]]
+id = "runtime_orchestration"
+description = "Thread/run semantics, LangGraph execution, worker queue, resume, cancellation, and graph snapshots."
+risk_profile = "critical-code"
+experts = ["synode_runtime_architect", "persistence_lifecycle_reviewer", "qa_regression_strategist", "observability_diagnostics_reviewer"]
+required_docs = ["agents.md", "architecture.yml", "docs/llm_guardrails.md", "docs/verification.md"]
+verification = ["uv run pytest", "uv run mypy", "uv run ruff check .", "git diff --check"]
+challenge_triggers = ["Run state transition changes", "Worker recovery changes", "Historical run behavior changes"]
+navigation_required = true
+challenge_policy = "auto"
+max_challenge_experts = 2
+
+[[profiles]]
+id = "tools_sandbox_mcp"
+description = "Native tools, approvals, audit records, workspace policy, Docker sandbox, and MCP side-effect boundaries."
+risk_profile = "critical-code"
+experts = ["tool_policy_sandbox_reviewer", "security_boundary_reviewer", "qa_regression_strategist", "observability_diagnostics_reviewer"]
+required_docs = ["agents.md", "docs/mcp.md", "docs/llm_guardrails.md", "docs/verification.md"]
+verification = ["uv run pytest", "uv run mypy", "make docker-sandbox-build", "git diff --check"]
+challenge_triggers = ["Mutation policy changes", "Sandbox isolation changes", "MCP side-effect behavior changes"]
+navigation_required = true
+challenge_policy = "auto"
+max_challenge_experts = 2
+
+[[profiles]]
+id = "model_provider_profiles"
+description = "Model providers, profile bindings, structured output, streaming, and provider health."
+risk_profile = "critical-code"
+experts = ["model_provider_routing_reviewer", "synode_runtime_architect", "qa_regression_strategist", "operator_ux_reviewer"]
+required_docs = ["agents.md", "architecture.yml", "docs/llm_guardrails.md", "docs/verification.md"]
+verification = ["uv run pytest", "uv run synode models health", "uv run ruff check .", "git diff --check"]
+challenge_triggers = ["Provider fallback risk", "Structured output behavior changes", "Graph/profile binding changes"]
+navigation_required = true
+challenge_policy = "conditional"
+max_challenge_experts = 2
+
+[[profiles]]
+id = "persistence_migration"
+description = "Database schema, migrations, repositories, retention, pagination, backup, and cleanup."
+risk_profile = "critical-code"
+experts = ["persistence_lifecycle_reviewer", "synode_runtime_architect", "qa_regression_strategist", "deployment_operator_reviewer"]
+required_docs = ["agents.md", "architecture.yml", "docs/production.md", "docs/verification.md"]
+verification = ["uv run pytest", "uv run synode db upgrade", "uv run mypy", "git diff --check"]
+challenge_triggers = ["Migration changes", "Retention changes", "Growing state without pagination or cleanup"]
+navigation_required = true
+challenge_policy = "auto"
+max_challenge_experts = 2
+
+[[profiles]]
+id = "operator_ui"
+description = "Next.js operator UI, workflow pages, role catalog, model profile settings, approvals, and diagnostics."
+risk_profile = "small-code"
+experts = ["operator_ux_reviewer", "model_provider_routing_reviewer", "observability_diagnostics_reviewer", "qa_regression_strategist"]
+required_docs = ["agents.md", "architecture.yml", "docs/verification.md"]
+verification = ["npm --prefix web run lint", "npm --prefix web run build", "npm --prefix web run test:e2e", "git diff --check"]
+challenge_triggers = ["Creation flow changes", "Run state display changes", "Settings/profile workflow changes"]
+navigation_required = true
+challenge_policy = "conditional"
+max_challenge_experts = 2
+
+[[profiles]]
+id = "local_deployment"
+description = "Docker Compose local distribution, startup checks, trusted LAN guidance, and operator deployment docs."
+risk_profile = "critical-code"
+experts = ["deployment_operator_reviewer", "security_boundary_reviewer", "observability_diagnostics_reviewer", "qa_regression_strategist"]
+required_docs = ["agents.md", "docs/production.md", "architecture.yml", "docs/verification.md"]
+verification = ["docker compose config", "make docker-sandbox-build", "uv run pytest", "git diff --check"]
+challenge_triggers = ["Container privilege changes", "Public exposure risk", "Startup ordering changes"]
+navigation_required = true
+challenge_policy = "conditional"
+max_challenge_experts = 2
+
+[[profiles]]
+id = "security_boundary"
+description = "Trusted-local security assumptions, secrets, network exposure, unsafe tools, and fail-closed behavior."
+risk_profile = "critical-code"
+experts = ["security_boundary_reviewer", "tool_policy_sandbox_reviewer", "red_team_reviewer", "qa_regression_strategist"]
+required_docs = ["agents.md", "docs/llm_guardrails.md", "docs/mcp.md", "docs/production.md"]
+verification = ["uv run pytest", "uv run mypy", "python3 tools/guardrails.py", "git diff --check"]
+challenge_triggers = ["Secrets boundary changes", "Sandbox privilege changes", "Network exposure changes"]
+navigation_required = true
+challenge_policy = "auto"
+max_challenge_experts = 2
+
+[[profiles]]
+id = "review_only"
+description = "Review-only Fabricator runs for an existing Synode diff or plan."
+risk_profile = "analysis"
+experts = ["qa_regression_strategist", "complexity_controller", "developer_docs_reviewer"]
+required_docs = ["agents.md", "docs/verification.md"]
+verification = ["git diff --check", "targeted commands from reviewed change"]
+challenge_triggers = ["Human requests a challenge round"]
+navigation_required = false
+challenge_policy = "manual"
+max_challenge_experts = 1

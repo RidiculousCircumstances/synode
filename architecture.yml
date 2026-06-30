@@ -25,6 +25,12 @@ components:
     path: docs
     responsibilities:
       - Project governance, verification, MCP, and guardrail contracts
+  - name: fabricator
+    path: src/synode/fabricator
+    responsibilities:
+      - Local developer workflow CLI for structured multi-expert planning and review
+      - Synode-specific expert registry, routing, prompts, stance packs, templates, and run artifacts under docs/fabricator
+      - Advisory handoff artifacts only; no commits, pushes, pull requests, or app runtime tool authority
   - name: tests
     path: tests
     responsibilities:
@@ -73,6 +79,7 @@ rules:
   - DB secrets must be encrypted with `SYNODE_SECRETS_KEY`; missing keys are explicit errors.
   - Runtime decisions must use structured model output or fail explicitly.
   - Structured model calls do not stream; unstructured model calls stream by default only when the selected provider explicitly supports streaming.
+  - Fabricator is a developer workflow helper and must remain advisory; it must not bypass Synode tool policy, approval gates, or human-controlled commits and pushes.
   - Coding workflow mutations must pass patch proposal, approval, patch apply, verification, and review.
   - Rejected approvals and explicit stops must move runs to terminal cancelled state and unblock the thread.
   - API lists that can grow must accept pagination and apply limit/offset in persistence queries.
@@ -96,6 +103,10 @@ entrypoints:
     path: src/synode/cli.py
     type: cli
     command: synode models health
+  - name: fabricator
+    path: src/synode/cli.py
+    type: cli
+    command: synode fabricator
   - name: docker-compose
     path: docker-compose.yaml
     type: deployment
@@ -134,6 +145,8 @@ critical_flows:
     description: MCP discovery and calls are normalized into governed tool invocations.
   - name: sandboxed-command-execution
     description: Risky shell and Python execution pass through the configured sandbox backend; Docker mode creates an isolated container with explicit network and resource limits.
+  - name: fabricator-workflow
+    description: Developer starts a local Fabricator run, records navigation evidence, dispatches Synode-specific experts, synthesizes findings, and produces human-reviewed handoff artifacts without committing or pushing.
   - name: operator-ui
     description: Browser UI creates and continues threads while monitoring structured run events, streamed agent output, graph state, approvals, artifacts, diffs, tests, and metrics.
   - name: observability

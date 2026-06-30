@@ -1,0 +1,136 @@
+schema_version = 1
+
+[defaults]
+mandatory_expert = "principal_arbiter"
+default_max_optional_experts = 4
+
+[[experts]]
+id = "principal_arbiter"
+name = "Principal Arbiter"
+purpose = "Owns the final Synode engineering decision, resolves tradeoffs, and keeps one implementation path."
+activate_when = "Every Fabricator run."
+do_not_activate_when = "Never; this expert is mandatory."
+inputs_required = "Task intake, navigation evidence, selected expert responses, and relevant Synode docs."
+output_focus = "Decision, implementation boundary, required invariants, verification, and human handoff."
+default_review_role = "decision_owner"
+mandatory = true
+
+[[experts]]
+id = "synode_runtime_architect"
+name = "Synode Runtime Architect"
+purpose = "Reviews LangGraph orchestration, thread/run semantics, worker execution, resume, cancellation, and graph snapshots."
+activate_when = "Runtime services, run lifecycle, worker queue, agent graph, or state transitions change."
+do_not_activate_when = "Docs-only or narrow UI changes that do not affect execution semantics."
+inputs_required = "Runtime code, schemas, persistence contracts, architecture map, and verification policy."
+output_focus = "Execution invariants, state ownership, idempotency, recovery, and failure behavior."
+default_review_role = "runtime_reviewer"
+
+[[experts]]
+id = "tool_policy_sandbox_reviewer"
+name = "Tool Policy And Sandbox Reviewer"
+purpose = "Reviews native tools, MCP tool boundaries, approvals, audit logging, workspace policy, and Docker sandbox behavior."
+activate_when = "Tool execution, shell/python/filesystem writes, MCP, approvals, or sandbox configuration changes."
+do_not_activate_when = "Pure presentation changes without tool or policy impact."
+inputs_required = "Tool registry, sandbox backend, approval flow, audit records, and MCP docs."
+output_focus = "Strict policy enforcement, sandbox availability, mutation authorization, and auditable failures."
+default_review_role = "policy_reviewer"
+
+[[experts]]
+id = "model_provider_routing_reviewer"
+name = "Model Provider Routing Reviewer"
+purpose = "Reviews model profiles, provider selection, structured output, streaming behavior, and health checks."
+activate_when = "Model providers, model profile bindings, graph/profile selection, or structured output contracts change."
+do_not_activate_when = "Tasks unrelated to LLM invocation or profile configuration."
+inputs_required = "Provider code, model profile schemas, graph configuration, tests, and guardrails."
+output_focus = "No hidden fallback, explicit provider errors, structured output validation, and historical run stability."
+default_review_role = "model_reviewer"
+
+[[experts]]
+id = "persistence_lifecycle_reviewer"
+name = "Persistence Lifecycle Reviewer"
+purpose = "Reviews database schema, migrations, repositories, retention, pagination, backup, and cleanup behavior."
+activate_when = "Postgres/SQLite schema, Alembic migrations, run events, artifacts, or growing state changes."
+do_not_activate_when = "Stateless frontend or documentation changes without lifecycle impact."
+inputs_required = "Persistence models, migrations, repository queries, retention docs, and tests."
+output_focus = "Single source of truth, durable state, bounded growth, database pagination, and restore confidence."
+default_review_role = "persistence_reviewer"
+
+[[experts]]
+id = "operator_ux_reviewer"
+name = "Operator UX Reviewer"
+purpose = "Reviews Synode operator workflows, role catalog, agent graphs, settings, approvals, diagnostics, and layout behavior."
+activate_when = "Next.js UI, workflows, model profile settings, approvals, run state, or diagnostics change."
+do_not_activate_when = "Backend-only changes with no operator-visible surface."
+inputs_required = "UI routes, components, API DTOs, e2e coverage, and current product rules."
+output_focus = "Task-oriented UX, clear state, modal creation flows, no layout regressions, and domain-appropriate wording."
+default_review_role = "ux_reviewer"
+
+[[experts]]
+id = "deployment_operator_reviewer"
+name = "Deployment Operator Reviewer"
+purpose = "Reviews Docker Compose distribution, startup ordering, healthchecks, local/LAN assumptions, and operator docs."
+activate_when = "Dockerfiles, compose overlays, env validation, health checks, production docs, or local deployment scripts change."
+do_not_activate_when = "Application logic changes that do not alter deployment or startup behavior."
+inputs_required = "Docker config, Make targets, env docs, production guidance, and smoke commands."
+output_focus = "Reliable local deployment, explicit trust boundary, predictable startup, and actionable diagnostics."
+default_review_role = "deployment_reviewer"
+
+[[experts]]
+id = "observability_diagnostics_reviewer"
+name = "Observability Diagnostics Reviewer"
+purpose = "Reviews Langfuse traces, structured logs, run diagnostics, worker status, sandbox status, and failure reporting."
+activate_when = "Tracing, logs, runtime status, queue status, failures, token usage, or diagnostics UI changes."
+do_not_activate_when = "Changes with no operational visibility impact."
+inputs_required = "Runtime diagnostics, logging fields, UI status displays, and tests for failure states."
+output_focus = "Operator-readable failures, traceability, run/thread correlation, and no hidden degraded behavior."
+default_review_role = "diagnostics_reviewer"
+
+[[experts]]
+id = "security_boundary_reviewer"
+name = "Security Boundary Reviewer"
+purpose = "Reviews trusted-local assumptions, secrets handling, public exposure risks, Docker socket use, and unsafe capability boundaries."
+activate_when = "Secrets, network exposure, auth-adjacent behavior, sandbox privileges, shell execution, or deployment boundary changes."
+do_not_activate_when = "Cosmetic docs or UI changes with no boundary impact."
+inputs_required = "Security assumptions, env config, sandbox policy, Docker guidance, and approval/tool code."
+output_focus = "Explicit trust model, fail-closed behavior, no accidental SaaS assumptions, and safe local operator defaults."
+default_review_role = "security_reviewer"
+
+[[experts]]
+id = "qa_regression_strategist"
+name = "QA Regression Strategist"
+purpose = "Defines focused and broad verification for Synode workflows, fake provider CI, optional real-model tests, and frontend e2e."
+activate_when = "Any behavior changes that need regression confidence or acceptance criteria."
+do_not_activate_when = "Tiny docs-only changes where verification is simple and obvious."
+inputs_required = "Changed behavior, existing tests, verification policy, and risk label."
+output_focus = "Minimal sufficient tests, deterministic CI coverage, optional slow gates, and skipped-test rationale."
+default_review_role = "qa_reviewer"
+
+[[experts]]
+id = "developer_docs_reviewer"
+name = "Developer Documentation Reviewer"
+purpose = "Reviews agents.md, architecture.yml, continuity ledger, MCP docs, production docs, and developer runbooks."
+activate_when = "Docs, architecture maps, guardrails, Make targets, or workflow instructions change."
+do_not_activate_when = "Implementation-only changes that do not affect documented contracts."
+inputs_required = "Docs touched by the task, code contracts, tests, and continuity requirements."
+output_focus = "Docs-code alignment, concise operator guidance, and no stale or misleading instructions."
+default_review_role = "docs_reviewer"
+
+[[experts]]
+id = "complexity_controller"
+name = "Complexity Controller"
+purpose = "Challenges unnecessary abstractions, broad rewrites, duplicate state, and process-only changes without product value."
+activate_when = "Scope grows, new layers are proposed, or the task risks overfitting Fabricator ceremony."
+do_not_activate_when = "The change is already tightly scoped and implementation-simple."
+inputs_required = "Task goal, proposed scope, affected files, and competing simpler approaches."
+output_focus = "Smallest sufficient change, clear deferrals, and removed non-essential work."
+default_review_role = "scope_reviewer"
+
+[[experts]]
+id = "red_team_reviewer"
+name = "Red Team Reviewer"
+purpose = "Stress-tests assumptions, adversarial failure modes, and places where Synode may silently do the wrong thing."
+activate_when = "Critical runtime, sandbox, secret, deployment, or data lifecycle changes need adversarial review."
+do_not_activate_when = "Routine low-risk docs or UI copy changes."
+inputs_required = "Threat boundary, failure modes, policy invariants, and proposed verification."
+output_focus = "Concrete breakage scenarios, blocker severity calibration, and targeted mitigation tests."
+default_review_role = "adversarial_reviewer"
