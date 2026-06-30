@@ -313,12 +313,19 @@ class SandboxRunner:
             stderr=_decode_tail(stderr, output_limit),
         )
 
-    async def run_python(self, code: str, *, cwd: Path, timeout: float) -> SandboxResult:
+    async def run_python(
+        self,
+        code: str,
+        *,
+        cwd: Path,
+        timeout: float,
+        env: dict[str, str] | None = None,
+    ) -> SandboxResult:
         return await self.run_command(
             ["python", "-I", "-c", code],
             cwd=cwd,
             timeout=timeout,
-            env={"PYTHONNOUSERSITE": "1"},
+            env={**(env or {}), "PYTHONNOUSERSITE": "1"},
         )
 
 

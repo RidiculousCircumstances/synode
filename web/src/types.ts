@@ -187,6 +187,8 @@ export interface RuntimeStatus {
   running_count: number;
   cancelling_count: number;
   stale_running_count: number;
+  worker_concurrency: number;
+  secrets_configured: boolean;
   workers: WorkerHeartbeat[];
   sandbox: SandboxStatus;
 }

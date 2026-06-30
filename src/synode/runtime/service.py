@@ -864,6 +864,8 @@ class OrchestrationService:
             running_count=running_count,
             cancelling_count=cancelling_count,
             stale_running_count=stale_running_count,
+            worker_concurrency=self.settings.worker_concurrency,
+            secrets_configured=bool(self.settings.secrets_key and self.settings.secrets_key.strip()),
             workers=[
                 WorkerHeartbeatResponse(
                     worker_id=heartbeat.worker_id,

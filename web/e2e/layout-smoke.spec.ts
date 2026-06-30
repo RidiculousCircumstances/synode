@@ -22,6 +22,7 @@ const routes = [
   `/runs/${runId}?tab=agents`,
   `/runs/${runId}?tab=metrics`,
   "/agents",
+  "/workflows",
   "/observability",
   "/settings",
 ];
@@ -215,6 +216,7 @@ test("entity creation opens modal dialogs from list actions", async ({ page }) =
   await forcePageScrollbar(page);
 
   const newRoleButton = page.getByRole("button", { name: "New role" });
+  await page.getByRole("button", { name: /^Roles/ }).click();
   await newRoleButton.scrollIntoViewIfNeeded();
   const beforeRole = await layoutBox(page);
   await newRoleButton.click();
@@ -224,6 +226,7 @@ test("entity creation opens modal dialogs from list actions", async ({ page }) =
   await expect(page.locator(".modal-layer")).toHaveCount(0);
 
   const newGraphButton = page.getByRole("button", { name: "New graph" });
+  await page.getByRole("button", { name: /^Workflows/ }).click();
   await newGraphButton.scrollIntoViewIfNeeded();
   const beforeGraph = await layoutBox(page);
   await newGraphButton.click();
@@ -253,10 +256,11 @@ test("configuration screens edit profiles roles and graph templates", async ({ p
   await profilePatchPromise;
 
   await page.goto("/agents", { waitUntil: "networkidle" });
+  await page.getByRole("button", { name: /^Roles/ }).click();
   const rolePatchPromise = page.waitForRequest(
     (request) => request.method() === "PATCH" && request.url().endsWith("/agents/role-coder"),
   );
-  await page.locator(".agent-catalog-row", { hasText: "coder" }).getByRole("button", { name: "Edit" }).click();
+  await page.locator("tr", { hasText: "coder" }).getByRole("button", { name: "Edit" }).click();
   await expect(page.getByRole("dialog", { name: "Edit role" })).toBeVisible();
   await page.getByRole("textbox", { name: "Mission" }).fill("Inspect codebases and prepare scoped patches");
   await page.getByRole("button", { name: "Save role" }).click();
@@ -265,6 +269,7 @@ test("configuration screens edit profiles roles and graph templates", async ({ p
   const graphCreatePromise = page.waitForRequest(
     (request) => request.method() === "POST" && request.url().endsWith("/agent-graphs"),
   );
+  await page.getByRole("button", { name: /^Workflows/ }).click();
   await page.getByRole("button", { name: "New graph" }).click();
   await expect(page.getByRole("dialog", { name: "New graph" })).toBeVisible();
   await page.getByRole("button", { name: "Create graph" }).click();
@@ -278,6 +283,20 @@ test("configuration screens edit profiles roles and graph templates", async ({ p
     { from_role: "role-supervisor", to_role: "role-coder" },
     { from_role: "role-coder", to_role: "role-reviewer" },
   ]);
+});
+
+test("workflows uses compact tabbed tables", async ({ page }) => {
+  await page.goto("/workflows", { waitUntil: "networkidle" });
+  await expect(page.locator(".agents-layout")).toHaveCount(0);
+  await expect(page.locator(".compact-table")).toBeVisible();
+  await expect(page.locator("tr", { hasText: "default" })).toBeVisible();
+
+  await page.getByRole("button", { name: /^Roles/ }).click();
+  await expect(page.locator(".compact-table")).toBeVisible();
+  await expect(page.locator("tr", { hasText: "coder" })).toBeVisible();
+
+  const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+  expect(overflow).toBeLessThanOrEqual(2);
 });
 
 test("browser API auto-resolution uses the current host", async ({ page }) => {
@@ -420,6 +439,14 @@ async function installApiRoutes(page: Page) {
     }
     if (url.pathname === "/metrics/system") {
       await fulfillJson(route, systemFixture());
+      return;
+    }
+    if (url.pathname === "/runtime/status") {
+      await fulfillJson(route, runtimeFixture());
+      return;
+    }
+    if (url.pathname === "/runtime/sandbox") {
+      await fulfillJson(route, runtimeFixture().sandbox);
       return;
     }
     if (url.pathname === `/runs/${runId}`) {
@@ -881,6 +908,37 @@ function systemFixture() {
         error: null,
       },
     ],
+  };
+}
+
+function runtimeFixture() {
+  return {
+    queue_depth: 1,
+    running_count: 1,
+    cancelling_count: 0,
+    stale_running_count: 0,
+    worker_concurrency: 2,
+    secrets_configured: true,
+    workers: [
+      {
+        worker_id: "layout-worker:slot-1",
+        hostname: "layout-host",
+        pid: 42,
+        status: "running",
+        current_run_id: streamRunId,
+        started_at: now,
+        heartbeat_at: now,
+      },
+    ],
+    sandbox: {
+      backend: "process",
+      available: true,
+      detail: "process backend with local limits",
+      cpu_seconds: 30,
+      memory_mb: 512,
+      disk_mb: 1024,
+      output_max_bytes: 12000,
+    },
   };
 }
 

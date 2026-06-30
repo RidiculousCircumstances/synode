@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import pathlib
 from datetime import UTC, datetime, timedelta
 
@@ -26,6 +27,56 @@ async def test_worker_claims_queued_run_and_completes(service, tmp_path: pathlib
     assert completed.worker_id is None
     assert runtime.queue_depth == 0
     assert any(heartbeat.worker_id == "test-worker" for heartbeat in runtime.workers)
+
+
+async def test_worker_service_honors_configured_concurrency(
+    service, database, tmp_path: pathlib.Path, monkeypatch
+) -> None:
+    service.settings.worker_concurrency = 2
+    service.settings.worker_poll_interval_seconds = 0.01
+    service.settings.worker_heartbeat_interval_seconds = 0.01
+    run_a = await service.create_run("Parallel run A", workspace=str(tmp_path), model_provider="fake")
+    run_b = await service.create_run("Parallel run B", workspace=str(tmp_path), model_provider="fake")
+    await service.start_run(run_a.id)
+    await service.start_run(run_b.id)
+    started: list[str] = []
+    both_started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def execute_run(run_id: str) -> None:
+        started.append(run_id)
+        if len(started) == 2:
+            both_started.set()
+        await release.wait()
+        async with database.session() as session:
+            repo = Repository(session)
+            await repo.set_run_status(run_id, RunStatus.COMPLETED, final_answer="done")
+
+    monkeypatch.setattr(service, "execute_run", execute_run)
+    worker = RunWorker(service, worker_id="parallel-worker")
+    task = asyncio.create_task(worker.serve_forever())
+    try:
+        await asyncio.wait_for(both_started.wait(), timeout=1)
+        running_a = await service.get_run(run_a.id)
+        running_b = await service.get_run(run_b.id)
+
+        assert {running_a.status, running_b.status} == {RunStatus.RUNNING}
+        assert {running_a.worker_id, running_b.worker_id} == {
+            "parallel-worker:slot-1",
+            "parallel-worker:slot-2",
+        }
+    finally:
+        release.set()
+        worker.stop()
+        await asyncio.wait_for(task, timeout=1)
+
+    runtime = await service.runtime_status()
+
+    assert runtime.worker_concurrency == 2
+    assert {heartbeat.worker_id for heartbeat in runtime.workers} >= {
+        "parallel-worker:slot-1",
+        "parallel-worker:slot-2",
+    }
 
 
 async def test_stale_running_run_is_requeued(service, database, tmp_path: pathlib.Path) -> None:

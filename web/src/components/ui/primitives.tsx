@@ -1,5 +1,5 @@
 import type { LucideIcon } from "lucide-react";
-import type { ReactNode } from "react";
+import type { CSSProperties, ReactNode } from "react";
 
 import { cn } from "@/lib/utils";
 
@@ -184,6 +184,30 @@ export function CompactRow({
   className?: string;
 }) {
   return <div className={cn("compact-row", selected && "selected", className)}>{children}</div>;
+}
+
+export function CompactTableShell({
+  children,
+  className,
+  minWidth = "56rem",
+  maxHeight,
+}: {
+  children: ReactNode;
+  className?: string;
+  minWidth?: string;
+  maxHeight?: string;
+}) {
+  return (
+    <div className={cn("compact-table-shell", className)} style={{ "--compact-table-max-height": maxHeight } as CSSProperties}>
+      <div className="compact-table-scroll" style={{ minWidth }}>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+export function CompactTable({ children, className }: { children: ReactNode; className?: string }) {
+  return <table className={cn("compact-table", className)}>{children}</table>;
 }
 
 export function EmptyState({ title, text }: { title: string; text?: string }) {

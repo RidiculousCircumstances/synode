@@ -144,7 +144,7 @@ critical_flows:
   - name: mcp-tool-call
     description: MCP discovery and calls are normalized into governed tool invocations.
   - name: sandboxed-command-execution
-    description: Risky shell and Python execution pass through the configured sandbox backend; Docker mode creates an isolated container with explicit network and resource limits.
+    description: Risky shell, Python, filesystem write, and patch-apply mutations pass through the configured sandbox backend; Docker mode creates an isolated container with explicit network and resource limits.
   - name: fabricator-workflow
     description: Developer starts a local Fabricator run, records navigation evidence, dispatches Synode-specific experts, synthesizes findings, and produces human-reviewed handoff artifacts without committing or pushing.
   - name: operator-ui

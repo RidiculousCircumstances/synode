@@ -136,6 +136,14 @@
   lint`, `npm --prefix web run build`, `npm --prefix web run test:e2e`,
   Docker UI rebuild, HTTP `/workflows` 200, API `/health`, and UI
   `/api/health`.
+- Approved `native.fs_write` and `native.patch_apply` mutations now execute
+  through the configured sandbox runner instead of writing directly in the API
+  process. Tool audit output includes sandbox backend diagnostics for these
+  mutations.
+- Worker daemon mode honors `SYNODE_WORKER_CONCURRENCY` through logical worker
+  slots while preserving single-run `worker once` behavior.
+- Workflows UI now uses compact top tabs and table views for graph presets and
+  role catalog, with `/agents` kept as a compatible route.
 
 ### Now:
 - MVP backend and operator UI include DB-backed runtime configuration screens
@@ -148,6 +156,8 @@
   runs from UI approval actions, and renders compact live status in the chat.
 - Default sandbox remains `process`; Docker sandbox is opt-in with an explicit
   local operator overlay that mounts `/var/run/docker.sock`.
+- Runtime diagnostics expose worker concurrency and whether
+  `SYNODE_SECRETS_KEY` is configured.
 - Fabricator is available through `synode fabricator ...` and remains advisory:
   it creates planning/review artifacts but does not commit, push, or bypass
   Synode runtime tool policy.
@@ -156,9 +166,6 @@
 
 ### Next:
 - Tune real-model prompts against broader local workloads.
-- If direct file-write tools must be treated as untrusted code execution, move
-  `native.fs_write` and `native.patch_apply` mutations into the same
-  containerized mutation path. They are currently approval-gated host writes.
 - Add production auth before exposing UI/API outside localhost.
 - Add Prometheus/Grafana metrics if host-level dashboards are required.
 

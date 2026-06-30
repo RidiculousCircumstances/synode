@@ -5,6 +5,7 @@ from typing import Any
 
 from synode.schemas import ToolResult, ToolRisk
 from synode.tools.base import ToolContext
+from synode.tools.mutations import run_sandboxed_file_write
 
 
 class FileReadTool:
@@ -68,8 +69,8 @@ class FileWriteTool:
 
     async def run(self, context: ToolContext, arguments: dict[str, Any]) -> ToolResult:
         context.sandbox.ensure_available()
-        path = context.workspace_policy.resolve_path(context.workspace, str(arguments["path"]))
-        content = str(arguments.get("content", ""))
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content, encoding="utf-8")
-        return ToolResult(tool_name=self.name, ok=True, risk=ToolRisk.WRITE, output={"path": str(path), "bytes": len(content)})
+        return await run_sandboxed_file_write(
+            context,
+            raw_path=str(arguments["path"]),
+            content=str(arguments.get("content", "")),
+        )

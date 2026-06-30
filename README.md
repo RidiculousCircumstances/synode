@@ -157,7 +157,7 @@ settings. See `docs/production.md` for trusted-LAN and backup guidance.
 Configuration UI:
 
 - Settings: model health, model profiles, and encrypted secret records.
-- Agents: DB-backed role catalog and simple graph configuration.
+- Workflows: DB-backed graph presets, role catalog, and latest execution graph.
 - New thread / follow-up composer: selects agent graph and model profile.
 
 ## Project Rules

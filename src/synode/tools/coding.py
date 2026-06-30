@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import hashlib
 from typing import Any
 
 from synode.schemas import ToolResult, ToolRisk
 from synode.tools.base import ToolContext
+from synode.tools.mutations import run_sandboxed_patch_apply
 from synode.tools.shell import is_safe_command
 
 
@@ -39,47 +39,7 @@ class PatchApplyTool:
 
     async def run(self, context: ToolContext, arguments: dict[str, Any]) -> ToolResult:
         context.sandbox.ensure_available()
-        patches = list(arguments.get("patches", []))
-        if not patches:
-            return ToolResult(tool_name=self.name, ok=False, risk=ToolRisk.WRITE, error="patches are required")
-        changed: list[dict[str, Any]] = []
-        for patch in patches:
-            path = context.workspace_policy.resolve_path(context.workspace, str(patch["path"]))
-            if not path.exists() or not path.is_file():
-                return ToolResult(
-                    tool_name=self.name,
-                    ok=False,
-                    risk=ToolRisk.WRITE,
-                    error=f"patch target is not an existing file: {path}",
-                )
-            old_content = path.read_text(encoding="utf-8")
-            digest = hashlib.sha256(old_content.encode("utf-8")).hexdigest()
-            expected_sha256 = str(patch["expected_sha256"])
-            if digest != expected_sha256:
-                return ToolResult(
-                    tool_name=self.name,
-                    ok=False,
-                    risk=ToolRisk.WRITE,
-                    error=f"checksum mismatch for {path}: expected {expected_sha256}, got {digest}",
-                )
-            old_text = str(patch["old_text"])
-            new_text = str(patch["new_text"])
-            occurrences = old_content.count(old_text)
-            if occurrences != 1:
-                return ToolResult(
-                    tool_name=self.name,
-                    ok=False,
-                    risk=ToolRisk.WRITE,
-                    error=f"old_text must occur exactly once in {path}; occurrences={occurrences}",
-                )
-            path.write_text(old_content.replace(old_text, new_text, 1), encoding="utf-8")
-            changed.append({"path": str(path), "old_sha256": digest})
-        return ToolResult(
-            tool_name=self.name,
-            ok=True,
-            risk=ToolRisk.WRITE,
-            output={"changed": changed},
-        )
+        return await run_sandboxed_patch_apply(context, patches=list(arguments.get("patches", [])))
 
 
 class VerifyTool:

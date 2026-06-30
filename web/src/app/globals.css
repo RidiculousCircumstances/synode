@@ -1104,7 +1104,7 @@ a {
 
 .page-tabs {
   display: grid;
-  grid-template-columns: repeat(7, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(8.5rem, 1fr));
   gap: 0.45rem;
   overflow-x: auto;
   border-radius: 1rem;
@@ -1380,6 +1380,83 @@ a {
 
 .compact-row.selected {
   background: color-mix(in srgb, var(--primary-soft) 72%, var(--surface-tint));
+}
+
+.compact-table-shell {
+  min-width: 0;
+  max-height: var(--compact-table-max-height, none);
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 0.85rem;
+  background: color-mix(in srgb, var(--surface-tint) 72%, var(--muted));
+}
+
+.compact-table-scroll {
+  width: 100%;
+}
+
+.compact-table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+  font-size: 0.78rem;
+}
+
+.compact-table th,
+.compact-table td {
+  min-width: 0;
+  border-bottom: 1px solid var(--border);
+  padding: 0.56rem 0.65rem;
+  text-align: left;
+  vertical-align: middle;
+}
+
+.compact-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: color-mix(in srgb, var(--muted) 72%, var(--surface-tint));
+  color: var(--muted-foreground);
+  font-size: 0.65rem;
+  font-weight: 850;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.compact-table tbody tr {
+  background: color-mix(in srgb, var(--surface-tint) 76%, var(--muted));
+}
+
+.compact-table tbody tr:hover {
+  background: color-mix(in srgb, var(--primary-soft) 46%, var(--surface-tint));
+}
+
+.compact-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.table-primary-cell,
+.table-primary-cell strong,
+.table-primary-cell em,
+.table-truncate {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.table-primary-cell em {
+  margin-top: 0.12rem;
+  color: var(--muted-foreground);
+  font-style: normal;
+}
+
+.table-meta-list {
+  display: flex;
+  gap: 0.28rem;
+  min-width: 0;
+  flex-wrap: wrap;
 }
 
 .row-link {
@@ -2764,6 +2841,19 @@ a {
   gap: 0.65rem;
 }
 
+.workflow-table-panel .panel-header {
+  align-items: center;
+}
+
+.workflow-table-panel .row-actions {
+  justify-content: flex-start;
+}
+
+.workflow-execution-panel .graph-canvas {
+  height: 54vh;
+  min-height: 24rem;
+}
+
 .graph-preview {
   display: flex;
   align-items: center;
@@ -2852,10 +2942,6 @@ a {
   .observability-grid,
   .metrics-workbench {
     grid-template-columns: 1fr;
-  }
-
-  .page-tabs {
-    grid-template-columns: repeat(4, minmax(8.5rem, 1fr));
   }
 
   .overview-main,

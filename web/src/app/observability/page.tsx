@@ -67,6 +67,7 @@ export default function ObservabilityPage() {
             <MetricTile label="Running" value={runtime?.running_count ?? 0} />
             <MetricTile label="Cancelling" value={runtime?.cancelling_count ?? 0} />
             <MetricTile label="Stale" value={runtime?.stale_running_count ?? 0} tone={(runtime?.stale_running_count ?? 0) > 0 ? "danger" : "normal"} />
+            <MetricTile label="Concurrency" value={runtime?.worker_concurrency ?? 1} />
           </div>
           <CompactList>
             {(runtime?.workers ?? []).map((worker) => (
@@ -93,6 +94,11 @@ export default function ObservabilityPage() {
             <MetricTile label="Status" value={<StatusBadge value={runtime?.sandbox.available ? "ready" : "error"} />} />
             <MetricTile label="CPU limit" value={runtime ? `${runtime.sandbox.cpu_seconds}s` : "n/a"} />
             <MetricTile label="Memory" value={runtime ? `${runtime.sandbox.memory_mb} MiB` : "n/a"} />
+            <MetricTile
+              label="Secrets"
+              value={<StatusBadge value={runtime?.secrets_configured ? "ready" : "error"} />}
+              tone={runtime?.secrets_configured === false ? "danger" : "normal"}
+            />
           </div>
           {runtime?.sandbox.detail ? <div className="muted">{runtime.sandbox.detail}</div> : null}
         </Panel>

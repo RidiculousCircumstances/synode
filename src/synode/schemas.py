@@ -532,6 +532,8 @@ class RuntimeStatusResponse(BaseModel):
     running_count: int
     cancelling_count: int
     stale_running_count: int
+    worker_concurrency: int
+    secrets_configured: bool
     workers: list[WorkerHeartbeatResponse] = Field(default_factory=list)
     sandbox: SandboxStatusResponse
 

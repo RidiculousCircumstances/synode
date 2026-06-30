@@ -49,6 +49,11 @@ timeouts, output truncation, CPU, RAM, and file-size limits. If
 `SYNODE_SANDBOX_BACKEND=none`, approved write tools fail closed with a sandbox
 error.
 
+Shell, Python, `native.fs_write`, and `native.patch_apply` mutations execute
+through the configured sandbox runner. The API process still validates
+workspace paths and approvals, but it must not perform the final write itself.
+Tool audit output includes sandbox backend diagnostics for approved mutations.
+
 Use `SYNODE_SANDBOX_BACKEND=docker` for container isolation of shell and Python
 execution. The Docker backend talks to the Docker Engine through a unix socket,
 creates one short-lived container per command, bind-mounts the requested
@@ -94,6 +99,11 @@ tradeoff, not a public SaaS boundary. The overlay maps container workspaces
 under `/workspace` to the host path in `SYNODE_SANDBOX_DOCKER_HOST_WORKSPACE`;
 set it to an absolute path if your shell does not export `PWD` or if you run
 Compose from another directory.
+
+Disk limits are enforced before direct write-tool payload execution and again
+after sandbox command completion. Arbitrary shell/Python commands are not
+rolled back after a post-run disk-limit failure; the run records an explicit
+failure so the operator can inspect and clean the workspace.
 
 ## Data Lifecycle
 

@@ -11,6 +11,7 @@ import {
   createSecret,
   getApiBaseUrl,
   getModelHealth,
+  getRuntimeStatus,
   listModelProfiles,
   listSecrets,
   testModelProfile,
@@ -50,6 +51,7 @@ export default function SettingsPage() {
     staleTime: Infinity,
   });
   const modelsQuery = useQuery({ queryKey: ["model-health"], queryFn: getModelHealth, refetchInterval: 10000 });
+  const runtimeQuery = useQuery({ queryKey: ["runtime-status"], queryFn: getRuntimeStatus, refetchInterval: 4000 });
   const profilesQuery = useQuery({ queryKey: ["model-profiles"], queryFn: listModelProfiles });
   const secretsQuery = useQuery({ queryKey: ["secrets"], queryFn: listSecrets });
   const [secretName, setSecretName] = useState("");
@@ -68,6 +70,7 @@ export default function SettingsPage() {
     Boolean(profileForm.model.trim()) &&
     optionsParse.ok &&
     (!providerRequiresBaseUrl || Boolean(profileForm.baseUrl.trim()));
+  const secretsUnavailable = runtimeQuery.data ? !runtimeQuery.data.secrets_configured : false;
 
   const resetSecretForm = () => {
     setSecretName("");
@@ -297,12 +300,20 @@ export default function SettingsPage() {
         <Panel
           title="Secrets"
           action={
-            <button type="button" className="primary-button" onClick={() => setSecretDialogOpen(true)}>
+            <button
+              type="button"
+              className="primary-button"
+              onClick={() => setSecretDialogOpen(true)}
+              disabled={secretsUnavailable}
+            >
               <Plus size={15} aria-hidden />
               New secret
             </button>
           }
         >
+          {secretsUnavailable ? (
+            <div className="error-line">SYNODE_SECRETS_KEY is required before DB secrets can be created.</div>
+          ) : null}
           <CompactList>
             {(secretsQuery.data ?? []).map((secret) => (
               <CompactRow key={secret.id} className="provider-row">

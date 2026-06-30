@@ -24,11 +24,51 @@ class RunWorker:
         self._stopping = False
 
     async def serve_forever(self) -> None:
-        while not self._stopping:
-            did_work = await self.run_once()
-            if not did_work:
-                await self._heartbeat("idle", None)
-                await asyncio.sleep(self.service.settings.worker_poll_interval_seconds)
+        slot_ids = self._slot_ids()
+        active: dict[str, asyncio.Task[None]] = {}
+        while not self._stopping or active:
+            if not self._stopping:
+                await self.service.recover_stale_runs()
+                for slot_id in slot_ids:
+                    if slot_id in active:
+                        continue
+                    run = await self.service.claim_next_queued_run(slot_id)
+                    if run is None:
+                        continue
+                    log_event(
+                        logger,
+                        "worker_claimed_run",
+                        worker_id=slot_id,
+                        run_id=run.id,
+                        thread_id=run.thread_id,
+                        trace_id=run.observability_trace_id,
+                        provider=run.model_provider,
+                    )
+                    active[slot_id] = asyncio.create_task(self._execute_claimed_run(run.id, slot_id))
+
+            completed_slots = [slot_id for slot_id, task in active.items() if task.done()]
+            for slot_id in completed_slots:
+                task = active.pop(slot_id)
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception("worker slot failed", extra={"worker_id": slot_id})
+
+            if active:
+                await asyncio.wait(
+                    set(active.values()),
+                    timeout=self.service.settings.worker_poll_interval_seconds,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                continue
+
+            if self._stopping:
+                break
+            for slot_id in slot_ids:
+                await self._heartbeat("idle", None, slot_id)
+            await asyncio.sleep(self.service.settings.worker_poll_interval_seconds)
 
     def stop(self) -> None:
         self._stopping = True
@@ -47,21 +87,21 @@ class RunWorker:
             trace_id=run.observability_trace_id,
             provider=run.model_provider,
         )
-        await self._execute_claimed_run(run.id)
+        await self._execute_claimed_run(run.id, self.worker_id)
         return True
 
-    async def _execute_claimed_run(self, run_id: str) -> None:
+    async def _execute_claimed_run(self, run_id: str, worker_id: str) -> None:
         try:
             if self.service.database.engine.dialect.name == "sqlite":
-                await self._heartbeat("running", run_id)
-                await self.service.heartbeat_run(run_id, self.worker_id)
+                await self._heartbeat("running", run_id, worker_id)
+                await self.service.heartbeat_run(run_id, worker_id)
                 await self.service.execute_run(run_id)
                 return
             task = asyncio.create_task(self.service.execute_run(run_id))
             cancelled_for_run = False
             while not task.done():
-                await self._heartbeat("running", run_id)
-                await self.service.heartbeat_run(run_id, self.worker_id)
+                await self._heartbeat("running", run_id, worker_id)
+                await self.service.heartbeat_run(run_id, worker_id)
                 run = await self.service.get_run(run_id)
                 if run.status == RunStatus.CANCELLING:
                     cancelled_for_run = True
@@ -83,13 +123,14 @@ class RunWorker:
                 task.cancel()
             raise
         except Exception:
-            logger.exception("worker run execution failed", extra={"run_id": run_id, "worker_id": self.worker_id})
+            logger.exception("worker run execution failed", extra={"run_id": run_id, "worker_id": worker_id})
         finally:
-            await self._heartbeat("idle", None)
+            await self._heartbeat("idle", None, worker_id)
 
-    async def _heartbeat(self, status: str, current_run_id: str | None) -> None:
+    async def _heartbeat(self, status: str, current_run_id: str | None, worker_id: str | None = None) -> None:
+        effective_worker_id = worker_id or self.worker_id
         await self.service.record_worker_heartbeat(
-            worker_id=self.worker_id,
+            worker_id=effective_worker_id,
             hostname=self.hostname,
             pid=self.pid,
             status=status,
@@ -100,10 +141,16 @@ class RunWorker:
             log_event(
                 logger,
                 EventType.WORKER_HEARTBEAT.value,
-                worker_id=self.worker_id,
+                worker_id=effective_worker_id,
                 run_id=current_run_id,
                 status=status,
             )
+
+    def _slot_ids(self) -> list[str]:
+        concurrency = max(1, int(self.service.settings.worker_concurrency))
+        if concurrency == 1:
+            return [self.worker_id]
+        return [f"{self.worker_id}:slot-{index}" for index in range(1, concurrency + 1)]
 
 
 def _default_worker_id() -> str:
