@@ -48,6 +48,9 @@ summary.
 - State that can grow must have a retention or cleanup story.
 - List APIs over growing state must expose pagination, and persistence queries
   must apply `limit`/`offset` at the database layer.
+- UI screens that list entities must create new entities through an explicit
+  action button and modal dialog. Do not place creation forms inline below
+  entity lists.
 
 ## Tool And MCP Rules
 

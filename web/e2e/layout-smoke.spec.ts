@@ -132,6 +132,52 @@ test("overlays do not shift the page layout", async ({ page }) => {
   expectLayoutStable(beforeDrawer, await layoutBox(page));
 });
 
+test("entity creation opens modal dialogs from list actions", async ({ page }) => {
+  await page.goto("/settings", { waitUntil: "networkidle" });
+  await expect(page.locator("#main-content")).toBeVisible();
+  await expect(page.locator(".entity-modal-form")).toHaveCount(0);
+  await forcePageScrollbar(page);
+
+  const newProfileButton = page.getByRole("button", { name: "New profile" });
+  await newProfileButton.scrollIntoViewIfNeeded();
+  const beforeProfile = await layoutBox(page);
+  await newProfileButton.click();
+  await expect(page.getByRole("dialog", { name: "New model profile" })).toBeVisible();
+  expectLayoutStable(beforeProfile, await layoutBox(page));
+  await page.locator(".modal-header .icon-button").click();
+  await expect(page.locator(".modal-layer")).toHaveCount(0);
+
+  const newSecretButton = page.getByRole("button", { name: "New secret" });
+  await newSecretButton.scrollIntoViewIfNeeded();
+  const beforeSecret = await layoutBox(page);
+  await newSecretButton.click();
+  await expect(page.getByRole("dialog", { name: "New secret" })).toBeVisible();
+  expectLayoutStable(beforeSecret, await layoutBox(page));
+  await page.locator(".modal-header .icon-button").click();
+  await expect(page.locator(".modal-layer")).toHaveCount(0);
+
+  await page.goto("/agents", { waitUntil: "networkidle" });
+  await expect(page.locator("#main-content")).toBeVisible();
+  await expect(page.locator(".entity-modal-form")).toHaveCount(0);
+  await forcePageScrollbar(page);
+
+  const newRoleButton = page.getByRole("button", { name: "New role" });
+  await newRoleButton.scrollIntoViewIfNeeded();
+  const beforeRole = await layoutBox(page);
+  await newRoleButton.click();
+  await expect(page.getByRole("dialog", { name: "New role" })).toBeVisible();
+  expectLayoutStable(beforeRole, await layoutBox(page));
+  await page.locator(".modal-header .icon-button").click();
+  await expect(page.locator(".modal-layer")).toHaveCount(0);
+
+  const newGraphButton = page.getByRole("button", { name: "New graph" });
+  await newGraphButton.scrollIntoViewIfNeeded();
+  const beforeGraph = await layoutBox(page);
+  await newGraphButton.click();
+  await expect(page.getByRole("dialog", { name: "New graph" })).toBeVisible();
+  expectLayoutStable(beforeGraph, await layoutBox(page));
+});
+
 test("browser API auto-resolution uses the current host", async ({ page }) => {
   await page.goto("/settings", { waitUntil: "domcontentloaded" });
   await expect(page.locator(".header-title code")).toHaveText("http://127.0.0.1:8787");
