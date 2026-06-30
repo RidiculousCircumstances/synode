@@ -417,7 +417,6 @@ function ThreadStreamingMessage({ output }: { output: StreamingOutput }) {
     <article className="thread-message agent thread-streaming-message" aria-live="polite">
       <div className="thread-message-meta">
         <StatusBadge value="agent">{output.role}</StatusBadge>
-        <span>{output.completed ? "streamed output" : "streaming output"}</span>
       </div>
       <div className="thread-message-body">
         {output.content.trim() ? (
@@ -575,6 +574,7 @@ function GenericMessageContent({ content }: { content: string }) {
 
 function RunSummaryContent({ content }: { content: string }) {
   const summary = parseRunSummary(content);
+  const planGroups = groupAdjacentPlanItems(summary.plan);
   return (
     <div className="run-summary-content">
       <div className="run-summary-topline">
@@ -585,11 +585,17 @@ function RunSummaryContent({ content }: { content: string }) {
         <details className="technical-details compact">
           <summary>Plan</summary>
           <div className="summary-plan-list">
-            {summary.plan.map((item, index) => (
-              <div key={`${item.role}-${index}`} className="summary-plan-row">
-                <StatusBadge value={item.role} />
-                <span>{item.task}</span>
-              </div>
+            {planGroups.map((group) => (
+              <section key={group.key} className="summary-plan-group">
+                <div className="summary-plan-role">
+                  <StatusBadge value={group.role} />
+                </div>
+                <ol>
+                  {group.steps.map((item, index) => (
+                    <li key={`${group.role}-${index}`}>{item.task}</li>
+                  ))}
+                </ol>
+              </section>
             ))}
           </div>
         </details>
@@ -901,6 +907,12 @@ type ParsedSummary = {
   advisory: string[];
 };
 
+type PlanGroup = {
+  key: string;
+  role: string;
+  steps: Array<{ role: string; task: string }>;
+};
+
 type ApprovalDecision = {
   status: string;
   reason: string;
@@ -939,6 +951,19 @@ const STREAM_EVENT_TYPES = new Set([
   "model_token_delta",
   "model_stream_completed",
 ]);
+
+function groupAdjacentPlanItems(plan: Array<{ role: string; task: string }>): PlanGroup[] {
+  const groups: PlanGroup[] = [];
+  for (const item of plan) {
+    const previous = groups.at(-1);
+    if (previous?.role === item.role) {
+      previous.steps.push(item);
+      continue;
+    }
+    groups.push({ key: `${item.role}-${groups.length}`, role: item.role, steps: [item] });
+  }
+  return groups;
+}
 
 function buildProcessingStatus(run: Run | null, events: RunEvent[]): ProcessingStatus | null {
   if (!run || !RUN_BUSY_STATUSES.includes(run.status)) {

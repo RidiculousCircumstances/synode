@@ -54,6 +54,12 @@ import type { Approval, Artifact, Run, RunEvent, RunMetrics, SystemMetrics, Tool
 
 type RunTab = "overview" | "agents" | "timeline" | "artifacts" | "diff-tests" | "approvals" | "metrics";
 
+type EventGroup = {
+  key: string;
+  role: string;
+  events: RunEvent[];
+};
+
 const RUN_TABS: Array<{
   id: RunTab;
   label: string;
@@ -241,6 +247,7 @@ function OverviewTab({
   const selectedRoles = Array.from(
     new Set(events.map((event) => event.role).filter((role): role is string => role !== null)),
   ).sort();
+  const latestEventGroups = groupAdjacentEvents(events.slice(-6).reverse());
   return (
     <div className="overview-grid">
       <Panel title="Final synthesis" className="overview-main">
@@ -261,12 +268,18 @@ function OverviewTab({
       </Panel>
       <Panel title="Latest events">
         <CompactList>
-          {events.slice(-6).reverse().map((event) => (
-            <CompactRow key={event.id} className="event-row-compact">
-              <span className="mono">#{event.id}</span>
-              <strong>{event.event_type}</strong>
-              <em>{event.role ?? "system"}</em>
-            </CompactRow>
+          {latestEventGroups.map((group) => (
+            <div key={group.key} className="event-role-group">
+              <div className="event-role-header">
+                <StatusBadge value={group.role} />
+              </div>
+              {group.events.map((event) => (
+                <CompactRow key={event.id} className="event-row-compact compact">
+                  <span className="mono">#{event.id}</span>
+                  <strong>{event.event_type}</strong>
+                </CompactRow>
+              ))}
+            </div>
           ))}
         </CompactList>
       </Panel>
@@ -285,6 +298,7 @@ function TimelineTab({ events }: { events: RunEvent[] }) {
     const roleOk = roleFilter === "all" || (event.role ?? "system") === roleFilter;
     return typeOk && roleOk;
   });
+  const grouped = groupAdjacentEvents(filtered);
   const selected = filtered.find((event) => event.id === selectedId) ?? filtered.at(-1) ?? null;
 
   return (
@@ -313,17 +327,23 @@ function TimelineTab({ events }: { events: RunEvent[] }) {
         }
       >
         <CompactList className="timeline-list">
-          {filtered.map((event) => (
-            <button key={event.id} className="event-button" type="button" onClick={() => setSelectedId(event.id)}>
-              <CompactRow selected={selected?.id === event.id} className="timeline-row">
-                <span className="mono">#{event.id}</span>
-                <span>
-                  <strong>{event.event_type}</strong>
-                  <em>{formatDateTime(event.created_at)}</em>
-                </span>
-                <StatusBadge value={event.role ?? "system"} />
-              </CompactRow>
-            </button>
+          {grouped.map((group) => (
+            <div key={group.key} className="event-role-group">
+              <div className="event-role-header">
+                <StatusBadge value={group.role} />
+              </div>
+              {group.events.map((event) => (
+                <button key={event.id} className="event-button" type="button" onClick={() => setSelectedId(event.id)}>
+                  <CompactRow selected={selected?.id === event.id} className="timeline-row compact">
+                    <span className="mono">#{event.id}</span>
+                    <span>
+                      <strong>{event.event_type}</strong>
+                      <em>{formatDateTime(event.created_at)}</em>
+                    </span>
+                  </CompactRow>
+                </button>
+              ))}
+            </div>
           ))}
         </CompactList>
       </Panel>
@@ -336,6 +356,20 @@ function TimelineTab({ events }: { events: RunEvent[] }) {
       </Panel>
     </div>
   );
+}
+
+function groupAdjacentEvents(events: RunEvent[]): EventGroup[] {
+  const groups: EventGroup[] = [];
+  for (const event of events) {
+    const role = event.role ?? "system";
+    const previous = groups.at(-1);
+    if (previous?.role === role) {
+      previous.events.push(event);
+      continue;
+    }
+    groups.push({ key: `${role}-${event.id}`, role, events: [event] });
+  }
+  return groups;
 }
 
 function ArtifactsTab({ artifacts }: { artifacts: Artifact[] }) {

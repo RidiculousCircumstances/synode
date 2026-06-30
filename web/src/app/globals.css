@@ -835,6 +835,29 @@ a {
   align-items: center;
 }
 
+.event-row-compact.compact {
+  grid-template-columns: 3.6rem minmax(0, 1fr);
+}
+
+.event-role-group {
+  min-width: 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.event-role-group:last-child {
+  border-bottom: 0;
+}
+
+.event-role-group .compact-row:last-child {
+  border-bottom: 0;
+}
+
+.event-role-header {
+  display: flex;
+  padding: 0.55rem 0.75rem 0.25rem;
+  background: color-mix(in srgb, var(--muted) 58%, white);
+}
+
 .detail-split {
   display: grid;
   grid-template-columns: minmax(18rem, 26rem) minmax(0, 1fr);
@@ -863,6 +886,10 @@ a {
   grid-template-columns: 3.5rem minmax(0, 1fr) auto;
   gap: 0.65rem;
   align-items: start;
+}
+
+.timeline-row.compact {
+  grid-template-columns: 3.5rem minmax(0, 1fr);
 }
 
 .timeline-row strong,
@@ -1641,14 +1668,24 @@ a {
   gap: 0.45rem;
 }
 
-.summary-plan-row {
+.summary-plan-group {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  gap: 0.55rem;
-  align-items: center;
+  gap: 0.35rem;
+  min-width: 0;
 }
 
-.summary-plan-row span:last-child {
+.summary-plan-role {
+  display: flex;
+}
+
+.summary-plan-group ol {
+  display: grid;
+  gap: 0.28rem;
+  margin: 0;
+  padding-left: 1.25rem;
+}
+
+.summary-plan-group li {
   min-width: 0;
   overflow-wrap: anywhere;
 }

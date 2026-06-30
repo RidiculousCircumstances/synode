@@ -99,6 +99,14 @@ test("thread chat renders technical run summary compactly", async ({ page }) => 
     ),
   ).toBeLessThan(4);
 
+  await page.locator(".technical-details.compact summary", { hasText: "Plan" }).click();
+  await expect(page.locator(".summary-plan-role .status-badge[title='data_analyst']")).toHaveCount(1);
+  const dataAnalystPlanGroup = page.locator(".summary-plan-group").filter({
+    has: page.locator(".status-badge[title='data_analyst']"),
+  });
+  await expect(dataAnalystPlanGroup.locator("li")).toHaveCount(2);
+  await expect(page.locator(".summary-plan-row .status-badge[title='data_analyst']")).toHaveCount(0);
+
   await page.getByRole("button", { name: /runs/i }).first().click();
   await expect(page.getByRole("dialog", { name: "Run history" })).toBeVisible();
 });
@@ -122,7 +130,19 @@ test("thread chat renders streamed agent output", async ({ page }) => {
   await page.goto(`/threads/${streamThreadId}`, { waitUntil: "domcontentloaded" });
   await expect(page.locator(".thread-streaming-message")).toBeVisible();
   await expect(page.locator(".thread-streaming-message")).toContainText("Inspecting the repository and preparing a concise answer.");
+  await expect(page.locator(".thread-streaming-message")).not.toContainText("streaming output");
+  await expect(page.locator(".thread-streaming-message")).not.toContainText("streamed output");
   await expect(page.locator(".thread-service-event.live")).toContainText("Receiving output");
+});
+
+test("run events group repeated role labels", async ({ page }) => {
+  await page.goto(`/runs/${runId}`, { waitUntil: "domcontentloaded" });
+  await expect(page.locator(".overview-grid .event-role-header .status-badge[title='coder']")).toHaveCount(1);
+  await expect(page.locator(".event-row-compact .status-badge[title='coder']")).toHaveCount(0);
+
+  await page.goto(`/runs/${runId}?tab=timeline`, { waitUntil: "domcontentloaded" });
+  await expect(page.locator(".timeline-list .event-role-header .status-badge[title='coder']")).toHaveCount(1);
+  await expect(page.locator(".timeline-row .status-badge[title='coder']")).toHaveCount(0);
 });
 
 test("overlays do not shift the page layout", async ({ page }) => {
@@ -514,7 +534,7 @@ function threadDetailFixture() {
         author_name: "synode",
         message_type: "final",
         content:
-          "Synode run summary:\nMode: coding\n- coder: Inspect the UI and compact technical output\n\n[coder]\nImplemented a focused layout fixture with full-size artifacts and diff panels.\n- native.git_diff: ok {\"stdout\":\"diff --git a/web/src/app/globals.css b/web/src/app/globals.css\\n+ .thread-workbench { display: block; }\"}\n\n[verification]\n{\"ok\":true,\"commands\":[{\"command\":\"npm run test:e2e\",\"status\":\"passed\"}]}",
+          "Synode run summary:\nMode: coding\n- data_analyst: Profile the sample metrics\n- data_analyst: Compare trend changes\n- coder: Inspect the UI and compact technical output\n\n[coder]\nImplemented a focused layout fixture with full-size artifacts and diff panels.\n- native.git_diff: ok {\"stdout\":\"diff --git a/web/src/app/globals.css b/web/src/app/globals.css\\n+ .thread-workbench { display: block; }\"}\n\n[verification]\n{\"ok\":true,\"commands\":[{\"command\":\"npm run test:e2e\",\"status\":\"passed\"}]}",
         metadata: { status: "completed" },
         created_at: now,
       },
