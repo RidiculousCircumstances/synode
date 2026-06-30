@@ -25,6 +25,12 @@ class RunMode(StrEnum):
     CODING = "coding"
 
 
+class ModelProviderType(StrEnum):
+    FAKE = "fake"
+    OLLAMA = "ollama"
+    OPENAI_COMPATIBLE = "openai_compatible"
+
+
 class ThreadStatus(StrEnum):
     ACTIVE = "active"
     ARCHIVED = "archived"
@@ -109,10 +115,160 @@ class PlanStep(BaseModel):
     task: str
 
 
+class SecretCreateRequest(BaseModel):
+    name: str = Field(min_length=1)
+    value: str = Field(min_length=1)
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str) -> str:
+        return _non_blank(value, "name")
+
+
+class SecretUpdateRequest(BaseModel):
+    value: str = Field(min_length=1)
+
+    @field_validator("value")
+    @classmethod
+    def validate_value(cls, value: str) -> str:
+        return _non_blank(value, "value")
+
+
+class SecretResponse(BaseModel):
+    id: str
+    name: str
+    secret_set: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class ModelProfileCreateRequest(BaseModel):
+    name: str = Field(min_length=1)
+    provider_type: ModelProviderType
+    base_url: str | None = None
+    model: str = Field(min_length=1)
+    options: dict[str, Any] = Field(default_factory=dict)
+    secret_id: str | None = None
+    enabled: bool = True
+
+    @field_validator("name", "model")
+    @classmethod
+    def validate_required_text(cls, value: str) -> str:
+        return _non_blank(value, "field")
+
+
+class ModelProfileUpdateRequest(BaseModel):
+    name: str | None = None
+    provider_type: ModelProviderType | None = None
+    base_url: str | None = None
+    model: str | None = None
+    options: dict[str, Any] | None = None
+    secret_id: str | None = None
+    enabled: bool | None = None
+
+
+class ModelProfileResponse(BaseModel):
+    id: str
+    name: str
+    provider_type: ModelProviderType
+    base_url: str | None = None
+    model: str
+    options: dict[str, Any] = Field(default_factory=dict)
+    secret_id: str | None = None
+    secret_set: bool = False
+    enabled: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class AgentRoleCreateRequest(BaseModel):
+    name: str = Field(min_length=1)
+    mission: str = Field(min_length=1)
+    non_goals: list[str] = Field(default_factory=list)
+    allowed_tools: list[str] = Field(default_factory=list)
+    requires_approval_for: list[str] = Field(default_factory=list)
+    output_contract: str = ""
+    enabled: bool = True
+
+    @field_validator("name", "mission")
+    @classmethod
+    def validate_required_text(cls, value: str) -> str:
+        return _non_blank(value, "field")
+
+
+class AgentRoleUpdateRequest(BaseModel):
+    mission: str | None = None
+    non_goals: list[str] | None = None
+    allowed_tools: list[str] | None = None
+    requires_approval_for: list[str] | None = None
+    output_contract: str | None = None
+    enabled: bool | None = None
+
+
+class AgentRoleResponse(BaseModel):
+    id: str
+    name: str
+    mission: str
+    non_goals: list[str] = Field(default_factory=list)
+    allowed_tools: list[str] = Field(default_factory=list)
+    requires_approval_for: list[str] = Field(default_factory=list)
+    output_contract: str
+    builtin: bool
+    enabled: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class AgentGraphEdge(BaseModel):
+    from_role: str = Field(min_length=1)
+    to_role: str = Field(min_length=1)
+
+
+class AgentGraphCreateRequest(BaseModel):
+    name: str = Field(min_length=1)
+    role_ids: list[str] = Field(min_length=1)
+    edges: list[AgentGraphEdge] = Field(default_factory=list)
+    default_model_profile_id: str | None = None
+    role_model_profile_ids: dict[str, str] = Field(default_factory=dict)
+    is_default: bool = False
+    enabled: bool = True
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str) -> str:
+        return _non_blank(value, "name")
+
+
+class AgentGraphUpdateRequest(BaseModel):
+    name: str | None = None
+    role_ids: list[str] | None = None
+    edges: list[AgentGraphEdge] | None = None
+    default_model_profile_id: str | None = None
+    role_model_profile_ids: dict[str, str] | None = None
+    is_default: bool | None = None
+    enabled: bool | None = None
+
+
+class AgentGraphResponse(BaseModel):
+    id: str
+    name: str
+    role_ids: list[str] = Field(default_factory=list)
+    edges: list[AgentGraphEdge] = Field(default_factory=list)
+    default_model_profile_id: str | None = None
+    role_model_profile_ids: dict[str, str] = Field(default_factory=dict)
+    is_default: bool
+    enabled: bool
+    created_at: datetime
+    updated_at: datetime
+
+
 class RunCreateRequest(BaseModel):
     task: str = Field(min_length=1)
     workspace: str | None = None
     model_provider: str | None = None
+    default_model_profile_id: str | None = None
+    role_model_profile_ids: dict[str, str] = Field(default_factory=dict)
+    agent_graph_id: str | None = None
     mode: RunMode = RunMode.GENERAL
 
     @field_validator("task")
@@ -126,6 +282,9 @@ class ThreadCreateRequest(BaseModel):
     title: str | None = None
     workspace: str | None = None
     model_provider: str | None = None
+    default_model_profile_id: str | None = None
+    role_model_profile_ids: dict[str, str] = Field(default_factory=dict)
+    agent_graph_id: str | None = None
     mode: RunMode = RunMode.GENERAL
 
     @field_validator("message")
@@ -152,6 +311,9 @@ class ThreadRunCreateRequest(BaseModel):
     message: str = Field(min_length=1)
     workspace: str | None = None
     model_provider: str | None = None
+    default_model_profile_id: str | None = None
+    role_model_profile_ids: dict[str, str] = Field(default_factory=dict)
+    agent_graph_id: str | None = None
     mode: RunMode = RunMode.GENERAL
 
     @field_validator("message")
@@ -168,6 +330,10 @@ class RunResponse(BaseModel):
     task: str
     workspace: str | None = None
     model_provider: str
+    default_model_profile_id: str | None = None
+    role_model_profile_ids: dict[str, str] = Field(default_factory=dict)
+    agent_graph_id: str | None = None
+    agent_graph_snapshot: dict[str, Any] = Field(default_factory=dict)
     observability_trace_id: str | None = None
     final_answer: str | None = None
     created_at: datetime

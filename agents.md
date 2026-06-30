@@ -31,6 +31,12 @@ summary.
 - Treat `thread` as the user-facing work unit and `run` as an immutable
   execution attempt inside a thread. New user follow-ups create new runs in the
   same thread; completed runs are not edited in place.
+- Model profiles, agent roles, and agent graphs are DB-backed runtime
+  configuration. Builtin role YAML files are seed data, not the live runtime
+  source after startup.
+- Runs must store the resolved agent graph snapshot and model profile bindings.
+  Later edits to roles, graphs, or profiles must not mutate historical run
+  behavior.
 - Do not hide architecture changes inside implementation-only diffs.
 - Use typed commands, queries, DTOs, enums, protocols, and value objects instead
   of loose dictionaries and magic strings when the value crosses a boundary.
@@ -81,6 +87,9 @@ Use risk labels before verification:
 - Prefer explicit failure over degraded behavior.
 - Model/provider unavailability is an error unless the caller explicitly chose
   a different provider.
+- Missing model profiles, disabled profiles, missing graph roles, missing
+  `SYNODE_SECRETS_KEY`, or undecryptable DB secrets are errors. Do not silently
+  route to the default provider.
 - Structured output validation failure is an error; do not silently use
   heuristic routing.
 - Missing MCP tools, denied tools, unsafe SQL, unsafe shell, and unapproved

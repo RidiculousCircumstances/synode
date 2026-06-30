@@ -24,6 +24,9 @@
   states.
 - Real-provider target is Ollama with `qwen2.5-coder:7b`; fake provider is
   explicit test/diagnostic only.
+- Runtime model routing is DB-backed through model profiles. Agent roles and
+  agent graphs are DB-backed after builtin YAML seed, and runs store immutable
+  graph/profile snapshots.
 - Realtime UI transport is SSE first. WebSocket is deferred.
 - Langfuse self-hosting is optional and enabled through an explicit Compose
   overlay plus `.env.observability`.
@@ -86,10 +89,18 @@
   instruments runs, graph nodes, model calls, and tool calls.
 - `docker-compose.observability.yaml` adds Langfuse web/worker plus separate
   Postgres, ClickHouse, Redis, and MinIO services.
+- DB-backed configuration is implemented for encrypted secrets, model profiles,
+  agent roles, and agent graphs. Run creation resolves a graph/profile snapshot;
+  general mode executes selected workers in graph topological order; coding
+  mode uses the same per-role model profile resolver.
+- OpenAI-compatible model profiles are supported for local vLLM, LM Studio, and
+  llama.cpp-style `/v1/chat/completions` endpoints.
+- Verification passed for this configuration work: `uv run ruff check src tests`,
+  `uv run pytest`, `npm run lint`, `npm run build`, and `npm run test:e2e`.
 
 ### Now:
-- MVP backend and operator UI are running through Compose with the threads-first
-  UI at `http://127.0.0.1:3000`.
+- MVP backend and operator UI include DB-backed runtime configuration screens
+  for model profiles, agent roles, and agent graphs.
 - Ollama runs as a system service and serves `qwen2.5-coder:7b` on
   `127.0.0.1:11434`.
 

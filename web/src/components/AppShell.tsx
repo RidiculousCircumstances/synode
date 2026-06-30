@@ -19,6 +19,7 @@ import { useQuery } from "@tanstack/react-query";
 import { getApiBaseUrl, getModelHealth, getSystemMetrics } from "@/lib/api";
 import { asPercent, formatBytes } from "@/lib/format";
 import { cn } from "@/lib/utils";
+import { useBodyScrollLock } from "@/hooks/useBodyScrollLock";
 import { StatusBadge } from "@/components/ui/primitives";
 
 type NavItem = {
@@ -59,16 +60,7 @@ export default function AppShell({ children }: { children: ReactNode }) {
     setMobileOpen(false);
   }, [pathname]);
 
-  useEffect(() => {
-    if (!mobileOpen) {
-      return;
-    }
-    const previous = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    return () => {
-      document.body.style.overflow = previous;
-    };
-  }, [mobileOpen]);
+  useBodyScrollLock(mobileOpen);
 
   const modelOk = modelHealthQuery.data?.every((model) => model.ok) ?? false;
   const memory = formatBytes(systemMetricsQuery.data?.process.memory_rss_bytes);

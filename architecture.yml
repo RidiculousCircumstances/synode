@@ -6,9 +6,9 @@ components:
     responsibilities:
       - LangGraph orchestration runtime
       - CLI and FastAPI application entrypoints
-      - Model provider abstraction and Ollama provider
+      - Model provider abstraction, DB-backed model profiles, Ollama provider, and OpenAI-compatible provider
       - Tool policy, native tools, and MCP bridge
-      - Persistence, conversational threads, audit log, and approval state
+      - Persistence, conversational threads, agent graphs, encrypted secrets, audit log, and approval state
       - Structured run read models, SSE event stream, and metrics endpoints
       - Optional Langfuse trace emission
   - name: web
@@ -19,8 +19,8 @@ components:
   - name: agents
     path: src/synode/agents
     responsibilities:
-      - Role registry YAML files
-      - Prompt-independent role metadata and tool allowlists
+      - Builtin seed role YAML files
+      - Prompt-independent role metadata and tool allowlists seeded into DB-backed role records
   - name: docs
     path: docs
     responsibilities:
@@ -59,6 +59,8 @@ rules:
   - Persistence owns mutable thread, run, event, approval, artifact, audit, and memory state.
   - Threads are the user-facing work unit; runs are immutable execution attempts inside threads.
   - Agent role YAML files must not name concrete model IDs.
+  - DB-backed model profiles, role profile bindings, and agent graph snapshots own runtime model routing.
+  - DB secrets must be encrypted with `SYNODE_SECRETS_KEY`; missing keys are explicit errors.
   - Runtime decisions must use structured model output or fail explicitly.
   - Coding workflow mutations must pass patch proposal, approval, patch apply, verification, and review.
   - Langfuse must remain optional and fail startup when enabled without required credentials.
@@ -100,6 +102,8 @@ critical_flows:
     description: Coding task flows through structured planning, inspection, patch proposal, approval, patch apply, focused verification, and review.
   - name: structured-decision
     description: Supervisor and reviewer model calls must return schema-valid JSON or stop with an explicit error.
+  - name: configurable-agent-graph
+    description: Run creation resolves a DB agent graph, model profile bindings, and role records into an immutable run snapshot before LangGraph execution.
   - name: approval
     description: Risky tool requests pause through approval state before execution can resume.
   - name: mcp-tool-call

@@ -8,6 +8,8 @@ export type RunStatus =
 
 export type RunMode = "general" | "coding";
 
+export type ModelProviderType = "fake" | "ollama" | "openai_compatible";
+
 export type ApprovalStatus = "pending" | "approved" | "rejected";
 
 export type ThreadStatus = "active" | "archived";
@@ -29,6 +31,10 @@ export interface Run {
   task: string;
   workspace: string | null;
   model_provider: string;
+  default_model_profile_id: string | null;
+  role_model_profile_ids: Record<string, string>;
+  agent_graph_id: string | null;
+  agent_graph_snapshot: Record<string, unknown>;
   observability_trace_id: string | null;
   final_answer: string | null;
   created_at: string;
@@ -148,16 +154,67 @@ export interface SystemMetrics {
 }
 
 export interface AgentSpec {
+  id: string;
   name: string;
   mission: string;
+  non_goals: string[];
   allowed_tools: string[];
+  requires_approval_for: string[];
+  output_contract: string;
+  builtin: boolean;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface ModelHealth {
   provider: string;
   ok: boolean;
+  profile_id?: string | null;
+  profile_name?: string | null;
+  provider_type?: ModelProviderType | string | null;
   model?: string | null;
   error?: string | null;
+}
+
+export interface Secret {
+  id: string;
+  name: string;
+  secret_set: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ModelProfile {
+  id: string;
+  name: string;
+  provider_type: ModelProviderType;
+  base_url: string | null;
+  model: string;
+  options: Record<string, unknown>;
+  secret_id: string | null;
+  secret_set: boolean;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AgentGraphEdge {
+  from_role: string;
+  to_role: string;
+}
+
+export interface AgentGraph {
+  id: string;
+  name: string;
+  role_ids: string[];
+  edges: AgentGraphEdge[];
+  default_model_profile_id: string | null;
+  role_model_profile_ids: Record<string, string>;
+  is_default: boolean;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
 }
 
 declare global {

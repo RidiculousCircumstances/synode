@@ -8,6 +8,13 @@ The MVP is model-agnostic at the orchestration boundary and ships with an
 Ollama provider configured for `qwen2.5-coder:7b`. The deterministic `fake`
 provider is kept for tests and explicit local diagnostics only.
 
+Model routing is configured through database-backed model profiles. Supported
+profile types are `ollama`, `openai_compatible`, and `fake`. Agent roles and
+agent graphs are also database-backed after startup seed from the builtin YAML
+roles. A run stores a snapshot of the selected graph plus the selected default
+model profile and per-role profile overrides, so later role/graph edits do not
+rewrite historical runs.
+
 ## Quick Start
 
 ### Docker Compose
@@ -33,6 +40,10 @@ container's host network.
 
 Optional port/model overrides can be copied from `.env.docker.example` into
 `.env`.
+
+If you store API keys in Synode DB secrets, set `SYNODE_SECRETS_KEY` before
+starting the API. Without it, secret creation and secret-backed profiles fail
+explicitly. Ollama-only local use does not require this key.
 
 ### Observability
 
@@ -94,6 +105,12 @@ uv run synode run "Inspect this repo and propose a tiny README wording change" \
 
 File mutations require approval. Use `synode approve` and `synode resume` to
 continue a waiting run.
+
+Configuration UI:
+
+- Settings: model health, model profiles, and encrypted secret records.
+- Agents: DB-backed role catalog and simple graph configuration.
+- New thread / follow-up composer: selects agent graph and model profile.
 
 ## Project Rules
 

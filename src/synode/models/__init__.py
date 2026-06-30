@@ -5,6 +5,7 @@ from synode.models.provider import (
     ModelRequest,
     ModelResponse,
     OllamaProvider,
+    OpenAICompatibleProvider,
 )
 
 __all__ = [
@@ -14,4 +15,5 @@ __all__ = [
     "ModelRequest",
     "ModelResponse",
     "OllamaProvider",
+    "OpenAICompatibleProvider",
 ]

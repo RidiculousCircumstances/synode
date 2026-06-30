@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import DateTime, ForeignKey, Index, String, Text, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, String, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from sqlalchemy.types import JSON
@@ -53,6 +53,14 @@ class RunRecord(Base):
     task: Mapped[str] = mapped_column(Text, nullable=False)
     workspace: Mapped[str | None] = mapped_column(Text, nullable=True)
     model_provider: Mapped[str] = mapped_column(String(80), nullable=False)
+    default_model_profile_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    role_model_profile_ids: Mapped[dict[str, Any]] = mapped_column(
+        JsonType().with_variant(JSONB, "postgresql"), default=dict
+    )
+    agent_graph_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    agent_graph_snapshot: Mapped[dict[str, Any]] = mapped_column(
+        JsonType().with_variant(JSONB, "postgresql"), default=dict
+    )
     observability_trace_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     final_answer: Mapped[str | None] = mapped_column(Text, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -152,3 +160,79 @@ class MemoryItemRecord(Base):
     key: Mapped[str] = mapped_column(String(200), nullable=False)
     content: Mapped[dict[str, Any]] = mapped_column(JsonType().with_variant(JSONB, "postgresql"), default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class SecretRecord(Base):
+    __tablename__ = "secrets"
+    __table_args__ = (UniqueConstraint("name", name="uq_secrets_name"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    encrypted_value: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class ModelProfileRecord(Base):
+    __tablename__ = "model_profiles"
+    __table_args__ = (UniqueConstraint("name", name="uq_model_profiles_name"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    provider_type: Mapped[str] = mapped_column(String(80), nullable=False)
+    base_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    model: Mapped[str] = mapped_column(String(200), nullable=False)
+    options: Mapped[dict[str, Any]] = mapped_column(
+        JsonType().with_variant(JSONB, "postgresql"), default=dict
+    )
+    secret_id: Mapped[str | None] = mapped_column(ForeignKey("secrets.id", ondelete="SET NULL"), nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean(), default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class AgentRoleRecord(Base):
+    __tablename__ = "agent_roles"
+    __table_args__ = (UniqueConstraint("name", name="uq_agent_roles_name"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    name: Mapped[str] = mapped_column(String(80), nullable=False)
+    mission: Mapped[str] = mapped_column(Text, nullable=False)
+    non_goals: Mapped[list[str]] = mapped_column(JsonType().with_variant(JSONB, "postgresql"), default=list)
+    allowed_tools: Mapped[list[str]] = mapped_column(JsonType().with_variant(JSONB, "postgresql"), default=list)
+    requires_approval_for: Mapped[list[str]] = mapped_column(
+        JsonType().with_variant(JSONB, "postgresql"), default=list
+    )
+    output_contract: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    builtin: Mapped[bool] = mapped_column(Boolean(), default=False, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean(), default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class AgentGraphRecord(Base):
+    __tablename__ = "agent_graphs"
+    __table_args__ = (UniqueConstraint("name", name="uq_agent_graphs_name"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    role_ids: Mapped[list[str]] = mapped_column(JsonType().with_variant(JSONB, "postgresql"), default=list)
+    edges: Mapped[list[dict[str, str]]] = mapped_column(
+        JsonType().with_variant(JSONB, "postgresql"), default=list
+    )
+    default_model_profile_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    role_model_profile_ids: Mapped[dict[str, str]] = mapped_column(
+        JsonType().with_variant(JSONB, "postgresql"), default=dict
+    )
+    is_default: Mapped[bool] = mapped_column(Boolean(), default=False, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean(), default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )

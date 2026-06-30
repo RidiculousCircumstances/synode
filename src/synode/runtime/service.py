@@ -15,24 +15,41 @@ from synode.observability import Observability
 from synode.persistence.database import Database
 from synode.persistence.repository import (
     Repository,
+    to_agent_graph_response,
+    to_agent_role_response,
+    to_model_profile_response,
     to_run_response,
+    to_secret_response,
     to_thread_message_response,
     to_thread_response,
 )
-from synode.registry import RoleRegistry
+from synode.registry import RoleRegistry, RoleSpec
 from synode.runtime.graph import GraphDependencies, build_graph
 from synode.schemas import (
+    AgentGraphCreateRequest,
+    AgentGraphResponse,
+    AgentGraphUpdateRequest,
+    AgentRoleCreateRequest,
+    AgentRoleResponse,
+    AgentRoleUpdateRequest,
     ApprovalResponse,
     ApprovalStatus,
     ArtifactResponse,
     EventType,
     GpuMetrics,
+    ModelProfileCreateRequest,
+    ModelProfileResponse,
+    ModelProfileUpdateRequest,
     ProcessMetrics,
+    RoleName,
     RunEventResponse,
     RunMetricsResponse,
     RunMode,
     RunResponse,
     RunStatus,
+    SecretCreateRequest,
+    SecretResponse,
+    SecretUpdateRequest,
     SystemMetricsResponse,
     ThreadDetailResponse,
     ThreadMessageAuthorType,
@@ -44,6 +61,7 @@ from synode.schemas import (
     ToolAuditResponse,
     ToolRisk,
 )
+from synode.security import SecretCipher
 from synode.tools import ToolExecutor, ToolRegistry, build_tool_registry
 
 ACTIVE_RUN_STATUSES = {
@@ -69,6 +87,7 @@ class OrchestrationService:
         self.models = models
         self.tools = tools
         self.observability = observability or Observability(settings)
+        self.secret_cipher = SecretCipher(settings) if settings.secrets_key else None
         self.tool_executor = ToolExecutor(database, roles, tools, settings, self.observability)
 
     async def create_run(
@@ -77,17 +96,31 @@ class OrchestrationService:
         workspace: str | None = None,
         model_provider: str | None = None,
         mode: RunMode = RunMode.GENERAL,
+        default_model_profile_id: str | None = None,
+        role_model_profile_ids: dict[str, str] | None = None,
+        agent_graph_id: str | None = None,
     ) -> RunResponse:
-        provider = model_provider or self.settings.model_provider
         trace_id = self.observability.create_trace_id()
         async with self.database.session() as session:
             repo = Repository(session)
+            config = await self._prepare_run_config(
+                repo,
+                mode=mode,
+                model_provider=model_provider,
+                default_model_profile_id=default_model_profile_id,
+                role_model_profile_ids=role_model_profile_ids or {},
+                agent_graph_id=agent_graph_id,
+            )
             run = await repo.create_run(
                 task=task,
                 workspace=workspace,
-                model_provider=provider,
+                model_provider=config["model_provider"],
                 mode=mode,
                 observability_trace_id=trace_id,
+                default_model_profile_id=config["default_model_profile_id"],
+                role_model_profile_ids=config["role_model_profile_ids"],
+                agent_graph_id=config["agent_graph_id"],
+                agent_graph_snapshot=config["agent_graph_snapshot"],
             )
             return to_run_response(run)
 
@@ -98,19 +131,33 @@ class OrchestrationService:
         workspace: str | None = None,
         model_provider: str | None = None,
         mode: RunMode = RunMode.GENERAL,
+        default_model_profile_id: str | None = None,
+        role_model_profile_ids: dict[str, str] | None = None,
+        agent_graph_id: str | None = None,
     ) -> ThreadDetailResponse:
-        provider = model_provider or self.settings.model_provider
         trace_id = self.observability.create_trace_id()
         async with self.database.session() as session:
             repo = Repository(session)
+            config = await self._prepare_run_config(
+                repo,
+                mode=mode,
+                model_provider=model_provider,
+                default_model_profile_id=default_model_profile_id,
+                role_model_profile_ids=role_model_profile_ids or {},
+                agent_graph_id=agent_graph_id,
+            )
             thread = await repo.create_thread(title or message)
             await repo.create_run(
                 task=message,
                 workspace=workspace,
-                model_provider=provider,
+                model_provider=config["model_provider"],
                 mode=mode,
                 observability_trace_id=trace_id,
                 thread_id=thread.id,
+                default_model_profile_id=config["default_model_profile_id"],
+                role_model_profile_ids=config["role_model_profile_ids"],
+                agent_graph_id=config["agent_graph_id"],
+                agent_graph_snapshot=config["agent_graph_snapshot"],
             )
             return await self._thread_detail(repo, thread.id)
 
@@ -167,8 +214,10 @@ class OrchestrationService:
         workspace: str | None = None,
         model_provider: str | None = None,
         mode: RunMode = RunMode.GENERAL,
+        default_model_profile_id: str | None = None,
+        role_model_profile_ids: dict[str, str] | None = None,
+        agent_graph_id: str | None = None,
     ) -> RunResponse:
-        provider = model_provider or self.settings.model_provider
         trace_id = self.observability.create_trace_id()
         async with self.database.session() as session:
             repo = Repository(session)
@@ -180,13 +229,25 @@ class OrchestrationService:
             latest_run = await repo.latest_thread_run(thread_id)
             if latest_run is not None and latest_run.status in ACTIVE_RUN_STATUSES:
                 raise ValueError(f"thread has an active run: {latest_run.id}")
+            config = await self._prepare_run_config(
+                repo,
+                mode=mode,
+                model_provider=model_provider,
+                default_model_profile_id=default_model_profile_id,
+                role_model_profile_ids=role_model_profile_ids or {},
+                agent_graph_id=agent_graph_id,
+            )
             run = await repo.create_run(
                 task=message,
                 workspace=workspace,
-                model_provider=provider,
+                model_provider=config["model_provider"],
                 mode=mode,
                 observability_trace_id=trace_id,
                 thread_id=thread_id,
+                default_model_profile_id=config["default_model_profile_id"],
+                role_model_profile_ids=config["role_model_profile_ids"],
+                agent_graph_id=config["agent_graph_id"],
+                agent_graph_snapshot=config["agent_graph_snapshot"],
             )
             return to_run_response(run)
 
@@ -313,8 +374,19 @@ class OrchestrationService:
         workspace: str | None = None,
         model_provider: str | None = None,
         mode: RunMode = RunMode.GENERAL,
+        default_model_profile_id: str | None = None,
+        role_model_profile_ids: dict[str, str] | None = None,
+        agent_graph_id: str | None = None,
     ) -> RunResponse:
-        run = await self.create_run(task, workspace, model_provider, mode)
+        run = await self.create_run(
+            task,
+            workspace,
+            model_provider,
+            mode,
+            default_model_profile_id,
+            role_model_profile_ids,
+            agent_graph_id,
+        )
         await self.execute_run(run.id)
         return await self.get_run(run.id)
 
@@ -329,6 +401,13 @@ class OrchestrationService:
             task = run.task
             workspace = run.workspace
             model_provider = run.model_provider
+            default_model_profile_id = run.default_model_profile_id
+            role_model_profile_ids = {
+                str(key): str(value)
+                for key, value in (run.role_model_profile_ids or {}).items()
+            }
+            agent_graph_id = run.agent_graph_id
+            agent_graph_snapshot = run.agent_graph_snapshot or {}
             mode = run.mode
             trace_id = run.observability_trace_id
             thread_id = run.thread_id
@@ -348,6 +427,10 @@ class OrchestrationService:
                 "task": task,
                 "workspace": workspace,
                 "model_provider": model_provider,
+                "default_model_profile_id": default_model_profile_id,
+                "role_model_profile_ids": role_model_profile_ids,
+                "agent_graph_id": agent_graph_id,
+                "agent_graph_snapshot": agent_graph_snapshot,
                 "mode": mode,
                 "observability_trace_id": trace_id,
                 "worker_outputs": [],
@@ -454,7 +537,143 @@ class OrchestrationService:
         await self.execute_run(run_id)
 
     async def model_health(self) -> list[dict[str, object]]:
-        return [health.model_dump(mode="json") for health in await self.models.health()]
+        async with self.database.session() as session:
+            repo = Repository(session)
+            await self._ensure_default_configuration(repo)
+            profiles = await repo.list_model_profiles()
+            results: list[dict[str, object]] = []
+            for profile in profiles:
+                item = {
+                    "profile_id": profile.id,
+                    "profile_name": profile.name,
+                    "provider_type": profile.provider_type,
+                    "provider": profile.provider_type,
+                    "model": profile.model,
+                    "ok": False,
+                    "error": None,
+                }
+                if not profile.enabled:
+                    item["error"] = "profile is disabled"
+                    results.append(item)
+                    continue
+                try:
+                    provider = await self._provider_for_profile(repo, profile)
+                    health = await provider.health()
+                    item.update(health.model_dump(mode="json"))
+                except Exception as exc:
+                    item["error"] = str(exc)
+                results.append(item)
+            return results
+
+    async def list_secrets(self) -> list[SecretResponse]:
+        async with self.database.session() as session:
+            repo = Repository(session)
+            return [to_secret_response(secret) for secret in await repo.list_secrets()]
+
+    async def create_secret(self, payload: SecretCreateRequest) -> SecretResponse:
+        async with self.database.session() as session:
+            repo = Repository(session)
+            secret = await repo.create_secret(payload.name, self._cipher().encrypt(payload.value))
+            return to_secret_response(secret)
+
+    async def update_secret(self, secret_id: str, payload: SecretUpdateRequest) -> SecretResponse:
+        async with self.database.session() as session:
+            repo = Repository(session)
+            secret = await repo.update_secret(secret_id, self._cipher().encrypt(payload.value))
+            return to_secret_response(secret)
+
+    async def list_model_profiles(self) -> list[ModelProfileResponse]:
+        async with self.database.session() as session:
+            repo = Repository(session)
+            await self._ensure_default_configuration(repo)
+            return [to_model_profile_response(profile) for profile in await repo.list_model_profiles()]
+
+    async def create_model_profile(self, payload: ModelProfileCreateRequest) -> ModelProfileResponse:
+        async with self.database.session() as session:
+            repo = Repository(session)
+            profile = await repo.create_model_profile(
+                name=payload.name,
+                provider_type=payload.provider_type,
+                base_url=payload.base_url,
+                model=payload.model,
+                options=payload.options,
+                secret_id=payload.secret_id,
+                enabled=payload.enabled,
+            )
+            return to_model_profile_response(profile)
+
+    async def update_model_profile(
+        self,
+        profile_id: str,
+        payload: ModelProfileUpdateRequest,
+    ) -> ModelProfileResponse:
+        async with self.database.session() as session:
+            repo = Repository(session)
+            profile = await repo.update_model_profile(
+                profile_id,
+                payload.model_dump(exclude_unset=True),
+            )
+            return to_model_profile_response(profile)
+
+    async def list_agent_roles(self) -> list[AgentRoleResponse]:
+        async with self.database.session() as session:
+            repo = Repository(session)
+            await self._ensure_default_configuration(repo)
+            return [to_agent_role_response(role) for role in await repo.list_agent_roles()]
+
+    async def create_agent_role(self, payload: AgentRoleCreateRequest) -> AgentRoleResponse:
+        async with self.database.session() as session:
+            repo = Repository(session)
+            role = await repo.create_agent_role(
+                name=payload.name,
+                mission=payload.mission,
+                non_goals=payload.non_goals,
+                allowed_tools=payload.allowed_tools,
+                requires_approval_for=payload.requires_approval_for,
+                output_contract=payload.output_contract,
+                builtin=False,
+                enabled=payload.enabled,
+            )
+            return to_agent_role_response(role)
+
+    async def update_agent_role(self, role_id: str, payload: AgentRoleUpdateRequest) -> AgentRoleResponse:
+        async with self.database.session() as session:
+            repo = Repository(session)
+            role = await repo.update_agent_role(role_id, payload.model_dump(exclude_unset=True))
+            return to_agent_role_response(role)
+
+    async def list_agent_graphs(self) -> list[AgentGraphResponse]:
+        async with self.database.session() as session:
+            repo = Repository(session)
+            await self._ensure_default_configuration(repo)
+            return [to_agent_graph_response(graph) for graph in await repo.list_agent_graphs()]
+
+    async def create_agent_graph(self, payload: AgentGraphCreateRequest) -> AgentGraphResponse:
+        async with self.database.session() as session:
+            repo = Repository(session)
+            graph = await repo.create_agent_graph(
+                name=payload.name,
+                role_ids=payload.role_ids,
+                edges=[edge.model_dump(mode="json") for edge in payload.edges],
+                default_model_profile_id=payload.default_model_profile_id,
+                role_model_profile_ids=payload.role_model_profile_ids,
+                is_default=payload.is_default,
+                enabled=payload.enabled,
+            )
+            return to_agent_graph_response(graph)
+
+    async def update_agent_graph(
+        self,
+        graph_id: str,
+        payload: AgentGraphUpdateRequest,
+    ) -> AgentGraphResponse:
+        async with self.database.session() as session:
+            repo = Repository(session)
+            values = payload.model_dump(exclude_unset=True)
+            if "edges" in values:
+                values["edges"] = [edge.model_dump(mode="json") for edge in payload.edges or []]
+            graph = await repo.update_agent_graph(graph_id, values)
+            return to_agent_graph_response(graph)
 
     async def run_metrics(self, run_id: str) -> RunMetricsResponse:
         async with self.database.session() as session:
@@ -516,18 +735,199 @@ class OrchestrationService:
             )
         return SystemMetricsResponse(process=process_metrics, gpu=await _gpu_metrics())
 
+    async def ensure_default_configuration(self) -> None:
+        async with self.database.session() as session:
+            repo = Repository(session)
+            await self._ensure_default_configuration(repo)
+
+    async def _ensure_default_configuration(self, repo: Repository) -> None:
+        await repo.ensure_default_configuration(
+            builtin_roles=self.roles.as_public(),
+            ollama_base_url=self.settings.ollama_base_url,
+            ollama_model=self.settings.ollama_model,
+        )
+
+    async def _prepare_run_config(
+        self,
+        repo: Repository,
+        mode: RunMode,
+        model_provider: str | None,
+        default_model_profile_id: str | None,
+        role_model_profile_ids: dict[str, str],
+        agent_graph_id: str | None,
+    ) -> dict[str, Any]:
+        await self._ensure_default_configuration(repo)
+        graph = await repo.get_agent_graph(agent_graph_id) if agent_graph_id else await repo.get_default_agent_graph()
+        if graph is None:
+            raise LookupError("agent graph not found")
+        if not graph.enabled:
+            raise ValueError(f"agent graph is disabled: {graph.name}")
+
+        snapshot, roles_by_id, roles_by_name = await self._snapshot_graph(repo, graph)
+        role_bindings = await self._resolve_role_model_bindings(
+            repo,
+            roles_by_id,
+            roles_by_name,
+            {
+                **(graph.role_model_profile_ids or {}),
+                **role_model_profile_ids,
+            },
+        )
+        profile_id = None
+        if default_model_profile_id is not None:
+            profile_id = default_model_profile_id
+        elif model_provider is None:
+            profile_id = graph.default_model_profile_id
+
+        provider_label = model_provider or self.settings.model_provider
+        if profile_id is not None:
+            profile = await repo.get_model_profile(profile_id)
+            if profile is None:
+                raise LookupError(f"model profile not found: {profile_id}")
+            if not profile.enabled:
+                raise ValueError(f"model profile is disabled: {profile.name}")
+            provider_label = profile.provider_type
+
+        role_names = {role["name"] for role in snapshot["roles"]}
+        required = {RoleName.SUPERVISOR.value, RoleName.REVIEWER.value}
+        if mode == RunMode.CODING:
+            required.add(RoleName.CODER.value)
+        missing = required - role_names
+        if missing:
+            raise ValueError(f"agent graph is missing required roles for {mode.value}: {sorted(missing)}")
+
+        return {
+            "model_provider": provider_label,
+            "default_model_profile_id": profile_id,
+            "role_model_profile_ids": role_bindings,
+            "agent_graph_id": graph.id,
+            "agent_graph_snapshot": snapshot,
+        }
+
+    async def _snapshot_graph(
+        self,
+        repo: Repository,
+        graph: Any,
+    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+        roles_by_id: dict[str, Any] = {}
+        roles_by_name: dict[str, Any] = {}
+        roles: list[dict[str, Any]] = []
+        for role_id in graph.role_ids or []:
+            role = await repo.get_agent_role(role_id)
+            if role is None:
+                raise LookupError(f"agent role not found: {role_id}")
+            if not role.enabled:
+                continue
+            roles_by_id[role.id] = role
+            roles_by_name[role.name] = role
+            roles.append(
+                {
+                    "id": role.id,
+                    "name": role.name,
+                    "mission": role.mission,
+                    "non_goals": role.non_goals or [],
+                    "allowed_tools": role.allowed_tools or [],
+                    "requires_approval_for": role.requires_approval_for or [],
+                    "output_contract": role.output_contract,
+                    "builtin": role.builtin,
+                }
+            )
+        edges: list[dict[str, str]] = []
+        for edge in graph.edges or []:
+            source = roles_by_id.get(edge.get("from_role"))
+            target = roles_by_id.get(edge.get("to_role"))
+            if source is None or target is None:
+                raise ValueError("agent graph edges must reference enabled graph roles")
+            edges.append({"from_role": source.name, "to_role": target.name})
+        return (
+            {
+                "id": graph.id,
+                "name": graph.name,
+                "roles": roles,
+                "edges": edges,
+            },
+            roles_by_id,
+            roles_by_name,
+        )
+
+    async def _resolve_role_model_bindings(
+        self,
+        repo: Repository,
+        roles_by_id: dict[str, Any],
+        roles_by_name: dict[str, Any],
+        bindings: dict[str, str],
+    ) -> dict[str, str]:
+        resolved: dict[str, str] = {}
+        for key, profile_id in bindings.items():
+            role = roles_by_id.get(key) or roles_by_name.get(key)
+            if role is None:
+                raise LookupError(f"agent role not found in selected graph: {key}")
+            profile = await repo.get_model_profile(profile_id)
+            if profile is None:
+                raise LookupError(f"model profile not found: {profile_id}")
+            if not profile.enabled:
+                raise ValueError(f"model profile is disabled: {profile.name}")
+            resolved[role.name] = profile.id
+        return resolved
+
+    async def _provider_for_profile(self, repo: Repository, profile: Any) -> Any:
+        api_key = None
+        if profile.secret_id:
+            secret = await repo.get_secret(profile.secret_id)
+            if secret is None:
+                raise LookupError(f"secret not found: {profile.secret_id}")
+            api_key = self._cipher().decrypt(secret.encrypted_value)
+        return self.models.for_profile(profile, api_key)
+
+    def _cipher(self) -> SecretCipher:
+        if self.secret_cipher is None:
+            raise RuntimeError("SYNODE_SECRETS_KEY is required for DB secrets")
+        return self.secret_cipher
+
     async def _invoke_graph(self, run_id: str, state: dict[str, Any]) -> dict[str, Any]:
+        roles = self._role_registry_for_state(state)
+        tool_executor = ToolExecutor(
+            self.database,
+            roles,
+            self.tools,
+            self.settings,
+            self.observability,
+        )
         deps = GraphDependencies(
             database=self.database,
-            roles=self.roles,
+            roles=roles,
             models=self.models,
-            tool_executor=self.tool_executor,
+            tool_executor=tool_executor,
             observability=self.observability,
+            secret_cipher=self.secret_cipher,
         )
         async with self._checkpointer() as checkpointer:
             graph = build_graph(deps, checkpointer=checkpointer)
             result = await graph.ainvoke(state, config={"configurable": {"thread_id": run_id}})
             return dict(result)
+
+    def _role_registry_for_state(self, state: dict[str, Any]) -> RoleRegistry:
+        snapshot = state.get("agent_graph_snapshot") or {}
+        raw_roles = snapshot.get("roles", [])
+        if not isinstance(raw_roles, list) or not raw_roles:
+            return self.roles
+        specs = []
+        for role in raw_roles:
+            if not isinstance(role, dict):
+                continue
+            specs.append(
+                RoleSpec(
+                    name=str(role["name"]),
+                    mission=str(role["mission"]),
+                    non_goals=list(role.get("non_goals", [])),
+                    allowed_tools=list(role.get("allowed_tools", [])),
+                    requires_approval_for=list(role.get("requires_approval_for", [])),
+                    output_contract=str(role.get("output_contract", "")),
+                )
+            )
+        if not specs:
+            return self.roles
+        return RoleRegistry.from_specs(specs)
 
     @asynccontextmanager
     async def _checkpointer(self) -> AsyncIterator[Any]:
@@ -570,7 +970,9 @@ async def create_service(settings: Settings, include_mcp: bool = True) -> Orches
     models = ModelProviderRegistry(settings)
     observability = Observability(settings)
     tools = await build_tool_registry(settings, include_mcp=include_mcp)
-    return OrchestrationService(settings, database, roles, models, tools, observability)
+    service = OrchestrationService(settings, database, roles, models, tools, observability)
+    await service.ensure_default_configuration()
+    return service
 
 
 def _sum_token_usage(items: Any) -> TokenUsage:

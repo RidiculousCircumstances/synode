@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     ollama_base_url: str = "http://127.0.0.1:11434"
     ollama_model: str = "qwen2.5-coder:7b"
     model_timeout_seconds: float = 60.0
+    secrets_key: str | None = None
     workspace_allowlist: str = "/home/rd/proj,/tmp"
     mcp_config_path: Path = Path(".mcp.json")
     shell_timeout_seconds: float = 20.0

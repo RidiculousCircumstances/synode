@@ -9,6 +9,10 @@ class SynodeState(TypedDict, total=False):
     task: str
     workspace: str | None
     model_provider: str
+    default_model_profile_id: str | None
+    role_model_profile_ids: dict[str, str]
+    agent_graph_id: str | None
+    agent_graph_snapshot: dict[str, Any]
     mode: str
     observability_trace_id: str | None
     selected_roles: list[str]

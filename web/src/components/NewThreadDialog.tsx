@@ -1,11 +1,12 @@
 "use client";
 
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Play, RefreshCw, X } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { type FormEvent, useEffect, useState } from "react";
 
-import { createThread } from "@/lib/api";
+import { createThread, listAgentGraphs, listModelProfiles } from "@/lib/api";
+import { useBodyScrollLock } from "@/hooks/useBodyScrollLock";
 import type { RunMode } from "@/types";
 
 export default function NewThreadDialog({
@@ -20,8 +21,13 @@ export default function NewThreadDialog({
   const [message, setMessage] = useState("");
   const [title, setTitle] = useState("");
   const [workspace, setWorkspace] = useState("");
-  const [provider, setProvider] = useState("ollama");
+  const [profileId, setProfileId] = useState("");
+  const [graphId, setGraphId] = useState("");
   const [mode, setMode] = useState<RunMode>("general");
+  const profilesQuery = useQuery({ queryKey: ["model-profiles"], queryFn: listModelProfiles, enabled: open });
+  const graphsQuery = useQuery({ queryKey: ["agent-graphs"], queryFn: listAgentGraphs, enabled: open });
+  const profiles = profilesQuery.data ?? [];
+  const graphs = graphsQuery.data ?? [];
 
   const mutation = useMutation({
     mutationFn: createThread,
@@ -35,16 +41,19 @@ export default function NewThreadDialog({
     },
   });
 
+  useBodyScrollLock(open);
+
   useEffect(() => {
     if (!open) {
       return;
     }
-    const previous = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    return () => {
-      document.body.style.overflow = previous;
-    };
-  }, [open]);
+    if (!profileId && profiles.length) {
+      setProfileId(profiles.find((profile) => profile.enabled)?.id ?? profiles[0].id);
+    }
+    if (!graphId && graphs.length) {
+      setGraphId(graphs.find((graph) => graph.is_default)?.id ?? graphs[0].id);
+    }
+  }, [graphId, graphs, open, profileId, profiles]);
 
   const submit = (event: FormEvent) => {
     event.preventDefault();
@@ -55,7 +64,9 @@ export default function NewThreadDialog({
       message: message.trim(),
       title: title.trim() || null,
       workspace: workspace.trim() || null,
-      model_provider: provider.trim() || null,
+      model_provider: null,
+      default_model_profile_id: profileId || null,
+      agent_graph_id: graphId || null,
       mode,
     });
   };
@@ -98,10 +109,28 @@ export default function NewThreadDialog({
               </select>
             </label>
             <label className="field">
-              <span>Provider</span>
-              <input value={provider} onChange={(event) => setProvider(event.target.value)} />
+              <span>Model profile</span>
+              <select value={profileId} onChange={(event) => setProfileId(event.target.value)}>
+                <option value="">default</option>
+                {profiles.map((profile) => (
+                  <option key={profile.id} value={profile.id}>
+                    {profile.name}
+                  </option>
+                ))}
+              </select>
             </label>
           </div>
+          <label className="field">
+            <span>Agent graph</span>
+            <select value={graphId} onChange={(event) => setGraphId(event.target.value)}>
+              <option value="">default</option>
+              {graphs.map((graph) => (
+                <option key={graph.id} value={graph.id}>
+                  {graph.name}
+                </option>
+              ))}
+            </select>
+          </label>
           <label className="field">
             <span>Workspace</span>
             <input
@@ -110,6 +139,8 @@ export default function NewThreadDialog({
               placeholder="/workspace/project"
             />
           </label>
+          {profilesQuery.error ? <div className="error-line">{profilesQuery.error.message}</div> : null}
+          {graphsQuery.error ? <div className="error-line">{graphsQuery.error.message}</div> : null}
           {mutation.error ? <div className="error-line">{mutation.error.message}</div> : null}
           <footer className="modal-actions">
             <button type="button" className="secondary-button" onClick={onClose}>

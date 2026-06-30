@@ -11,16 +11,28 @@ from fastapi.responses import StreamingResponse
 from synode.config import Settings
 from synode.runtime.service import OrchestrationService, create_service
 from synode.schemas import (
+    AgentGraphCreateRequest,
+    AgentGraphResponse,
+    AgentGraphUpdateRequest,
+    AgentRoleCreateRequest,
+    AgentRoleResponse,
+    AgentRoleUpdateRequest,
     ApprovalDecision,
     ApprovalResponse,
     ApprovalStatus,
     ArtifactResponse,
+    ModelProfileCreateRequest,
+    ModelProfileResponse,
+    ModelProfileUpdateRequest,
     RunCreateRequest,
     RunEventResponse,
     RunMetricsResponse,
     RunMode,
     RunResponse,
     RunStatus,
+    SecretCreateRequest,
+    SecretResponse,
+    SecretUpdateRequest,
     SystemMetricsResponse,
     ThreadCreateRequest,
     ThreadDetailResponse,
@@ -67,13 +79,21 @@ def create_app() -> FastAPI:
     @app.post("/threads", response_model=ThreadDetailResponse)
     async def create_thread(payload: ThreadCreateRequest, request: Request) -> ThreadDetailResponse:
         service: OrchestrationService = request.app.state.service
-        detail = await service.create_thread(
-            message=payload.message,
-            title=payload.title,
-            workspace=payload.workspace,
-            model_provider=payload.model_provider,
-            mode=payload.mode,
-        )
+        try:
+            detail = await service.create_thread(
+                message=payload.message,
+                title=payload.title,
+                workspace=payload.workspace,
+                model_provider=payload.model_provider,
+                mode=payload.mode,
+                default_model_profile_id=payload.default_model_profile_id,
+                role_model_profile_ids=payload.role_model_profile_ids,
+                agent_graph_id=payload.agent_graph_id,
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         if detail.thread.latest_run_id is None:
             raise HTTPException(status_code=500, detail="thread was created without a run")
         _schedule_background(service.execute_run(detail.thread.latest_run_id))
@@ -136,6 +156,9 @@ def create_app() -> FastAPI:
                 workspace=payload.workspace,
                 model_provider=payload.model_provider,
                 mode=payload.mode,
+                default_model_profile_id=payload.default_model_profile_id,
+                role_model_profile_ids=payload.role_model_profile_ids,
+                agent_graph_id=payload.agent_graph_id,
             )
         except LookupError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -147,7 +170,20 @@ def create_app() -> FastAPI:
     @app.post("/runs", response_model=RunResponse)
     async def create_run(payload: RunCreateRequest, request: Request) -> RunResponse:
         service: OrchestrationService = request.app.state.service
-        run = await service.create_run(payload.task, payload.workspace, payload.model_provider, payload.mode)
+        try:
+            run = await service.create_run(
+                task=payload.task,
+                workspace=payload.workspace,
+                model_provider=payload.model_provider,
+                mode=payload.mode,
+                default_model_profile_id=payload.default_model_profile_id,
+                role_model_profile_ids=payload.role_model_profile_ids,
+                agent_graph_id=payload.agent_graph_id,
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         _schedule_background(service.execute_run(run.id))
         return run
 
@@ -248,10 +284,112 @@ def create_app() -> FastAPI:
         service: OrchestrationService = request.app.state.service
         return await service.list_approvals(status=status)
 
-    @app.get("/agents")
-    async def agents(request: Request) -> list[dict[str, object]]:
+    @app.get("/secrets", response_model=list[SecretResponse])
+    async def list_secrets(request: Request) -> list[SecretResponse]:
         service: OrchestrationService = request.app.state.service
-        return service.roles.as_public()
+        return await service.list_secrets()
+
+    @app.post("/secrets", response_model=SecretResponse)
+    async def create_secret(payload: SecretCreateRequest, request: Request) -> SecretResponse:
+        service: OrchestrationService = request.app.state.service
+        try:
+            return await service.create_secret(payload)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.patch("/secrets/{secret_id}", response_model=SecretResponse)
+    async def update_secret(
+        secret_id: str,
+        payload: SecretUpdateRequest,
+        request: Request,
+    ) -> SecretResponse:
+        service: OrchestrationService = request.app.state.service
+        try:
+            return await service.update_secret(secret_id, payload)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/model-profiles", response_model=list[ModelProfileResponse])
+    async def list_model_profiles(request: Request) -> list[ModelProfileResponse]:
+        service: OrchestrationService = request.app.state.service
+        return await service.list_model_profiles()
+
+    @app.post("/model-profiles", response_model=ModelProfileResponse)
+    async def create_model_profile(
+        payload: ModelProfileCreateRequest,
+        request: Request,
+    ) -> ModelProfileResponse:
+        service: OrchestrationService = request.app.state.service
+        try:
+            return await service.create_model_profile(payload)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.patch("/model-profiles/{profile_id}", response_model=ModelProfileResponse)
+    async def update_model_profile(
+        profile_id: str,
+        payload: ModelProfileUpdateRequest,
+        request: Request,
+    ) -> ModelProfileResponse:
+        service: OrchestrationService = request.app.state.service
+        try:
+            return await service.update_model_profile(profile_id, payload)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/agents", response_model=list[AgentRoleResponse])
+    async def agents(request: Request) -> list[AgentRoleResponse]:
+        service: OrchestrationService = request.app.state.service
+        return await service.list_agent_roles()
+
+    @app.post("/agents", response_model=AgentRoleResponse)
+    async def create_agent(payload: AgentRoleCreateRequest, request: Request) -> AgentRoleResponse:
+        service: OrchestrationService = request.app.state.service
+        return await service.create_agent_role(payload)
+
+    @app.patch("/agents/{role_id}", response_model=AgentRoleResponse)
+    async def update_agent(
+        role_id: str,
+        payload: AgentRoleUpdateRequest,
+        request: Request,
+    ) -> AgentRoleResponse:
+        service: OrchestrationService = request.app.state.service
+        try:
+            return await service.update_agent_role(role_id, payload)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/agent-graphs", response_model=list[AgentGraphResponse])
+    async def list_agent_graphs(request: Request) -> list[AgentGraphResponse]:
+        service: OrchestrationService = request.app.state.service
+        return await service.list_agent_graphs()
+
+    @app.post("/agent-graphs", response_model=AgentGraphResponse)
+    async def create_agent_graph(
+        payload: AgentGraphCreateRequest,
+        request: Request,
+    ) -> AgentGraphResponse:
+        service: OrchestrationService = request.app.state.service
+        try:
+            return await service.create_agent_graph(payload)
+        except (LookupError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.patch("/agent-graphs/{graph_id}", response_model=AgentGraphResponse)
+    async def update_agent_graph(
+        graph_id: str,
+        payload: AgentGraphUpdateRequest,
+        request: Request,
+    ) -> AgentGraphResponse:
+        service: OrchestrationService = request.app.state.service
+        try:
+            return await service.update_agent_graph(graph_id, payload)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.get("/tools")
     async def tools(request: Request) -> dict[str, list[str]]:

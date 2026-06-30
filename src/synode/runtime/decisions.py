@@ -5,14 +5,14 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
-from synode.schemas import RoleName, ToolCall
+from synode.schemas import ToolCall
 
 WORKER_ROLES = frozenset(
     {
-        RoleName.CODER,
-        RoleName.DATA_ANALYST,
-        RoleName.WEB_RESEARCHER,
-        RoleName.DB_AGENT,
+        "coder",
+        "data_analyst",
+        "web_researcher",
+        "db_agent",
     }
 )
 
@@ -31,13 +31,13 @@ class ReviewerVerdict(StrEnum):
 
 
 class WorkerPlanStep(BaseModel):
-    role: RoleName
+    role: str = Field(min_length=1)
     task: str = Field(min_length=1)
     tool_calls: list[ToolCall] = Field(default_factory=list)
 
 
 class SupervisorDecision(BaseModel):
-    selected_roles: list[RoleName] = Field(min_length=1)
+    selected_roles: list[str] = Field(min_length=1)
     plan: list[WorkerPlanStep] = Field(min_length=1)
     confidence: Literal["low", "medium", "high"]
     risk_level: RiskLevel
@@ -45,8 +45,8 @@ class SupervisorDecision(BaseModel):
 
     @field_validator("selected_roles")
     @classmethod
-    def selected_roles_must_be_workers(cls, roles: list[RoleName]) -> list[RoleName]:
-        system_roles = [role for role in roles if role not in WORKER_ROLES]
+    def selected_roles_must_be_workers(cls, roles: list[str]) -> list[str]:
+        system_roles = [role for role in roles if role in {"supervisor", "reviewer"}]
         if system_roles:
             raise ValueError(f"selected_roles must contain worker roles only; got system roles: {system_roles}")
         return roles

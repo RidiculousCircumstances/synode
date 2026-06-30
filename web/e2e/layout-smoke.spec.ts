@@ -58,10 +58,116 @@ test("artifacts and diff tests use full-size work panels", async ({ page }) => {
   }
 });
 
+test("thread chat renders technical run summary compactly", async ({ page }) => {
+  await page.goto(`/threads/${threadId}`, { waitUntil: "domcontentloaded" });
+  await expect(page.locator(".thread-chat-shell")).toBeVisible();
+  await expect(page.locator(".page-cockpit")).toHaveCount(0);
+  await expect(page.locator(".chat-code-block code", { hasText: "const stable = true;" })).toBeVisible();
+  await expect(page.locator(".run-summary-topline strong", { hasText: "Run summary" })).toBeVisible();
+  await expect(page.getByText("mode coding")).toBeVisible();
+  await expect(page.getByText("Tool and raw output")).toBeVisible();
+  await expect(page.locator(".thread-service-event")).toHaveCount(1);
+  await expect(page.locator(".thread-approval-event")).toHaveCount(1);
+  await expect(page.locator(".thread-service-event .thread-message-body")).toHaveCount(0);
+  await expect(page.locator(".thread-approval-event .thread-message-body")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Approve" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Reject" })).toBeVisible();
+  await expect(page.locator(".thread-composer-input")).toBeVisible();
+  await expect(page.locator(".thread-followup-form textarea")).toHaveCount(0);
+  await expect(page.locator(".thread-runs-panel")).toHaveCount(0);
+  await expect.poll(async () => {
+    const box = await page.locator(".thread-topbar").boundingBox();
+    return box?.height ?? 0;
+  }).toBeLessThan(55);
+  await expect.poll(async () => {
+    const approvalBox = await page.locator(".thread-approval-event").boundingBox();
+    const scrollBox = await page.locator(".thread-message-scroll").boundingBox();
+    if (!approvalBox || !scrollBox) {
+      return 999;
+    }
+    return approvalBox.x - scrollBox.x;
+  }).toBeLessThan(48);
+  await expect.poll(async () => {
+    const box = await page.locator(".thread-message-scroll").boundingBox();
+    return box?.height ?? 0;
+  }).toBeGreaterThan(300);
+  await expect.poll(async () =>
+    page.locator(".thread-message-scroll").evaluate((element) =>
+      Math.abs(element.scrollHeight - element.scrollTop - element.clientHeight),
+    ),
+  ).toBeLessThan(4);
+
+  await page.getByRole("button", { name: /runs/i }).first().click();
+  await expect(page.getByRole("dialog", { name: "Run history" })).toBeVisible();
+});
+
+test("overlays do not shift the page layout", async ({ page }) => {
+  await page.goto("/threads", { waitUntil: "domcontentloaded" });
+  await expect(page.locator("#main-content")).toBeVisible();
+  await expect(page.locator(".thread-list")).toBeVisible();
+  await forcePageScrollbar(page);
+
+  const beforeModal = await layoutBox(page);
+  await page.getByRole("button", { name: "New" }).click();
+  await expect(page.locator(".modal-layer")).toBeVisible();
+  expectLayoutStable(beforeModal, await layoutBox(page));
+  await page.locator(".modal-header .icon-button").click();
+  await expect(page.locator(".modal-layer")).toHaveCount(0);
+
+  const menuButton = page.getByRole("button", { name: "Open navigation" });
+  if (await menuButton.isVisible()) {
+    const beforeMenu = await layoutBox(page);
+    await menuButton.click();
+    await expect(page.getByRole("dialog")).toBeVisible();
+    expectLayoutStable(beforeMenu, await layoutBox(page));
+    await page.locator(".mobile-close-button").click();
+  }
+
+  await page.goto(`/threads/${threadId}`, { waitUntil: "domcontentloaded" });
+  await expect(page.locator(".thread-chat-shell")).toBeVisible();
+  await forcePageScrollbar(page);
+  const beforeDrawer = await layoutBox(page);
+  await page.getByRole("button", { name: /runs/i }).first().click();
+  await expect(page.getByRole("dialog", { name: "Run history" })).toBeVisible();
+  expectLayoutStable(beforeDrawer, await layoutBox(page));
+});
+
 test("browser API auto-resolution uses the current host", async ({ page }) => {
   await page.goto("/settings", { waitUntil: "domcontentloaded" });
   await expect(page.locator(".header-title code")).toHaveText("http://127.0.0.1:8787");
 });
+
+type LayoutBox = {
+  x: number;
+  y: number;
+  width: number;
+};
+
+async function layoutBox(page: Page): Promise<LayoutBox> {
+  return page.locator("#main-content").evaluate((element) => {
+    const rect = element.getBoundingClientRect();
+    return { x: rect.x, y: rect.y, width: rect.width };
+  });
+}
+
+async function forcePageScrollbar(page: Page) {
+  await page.addStyleTag({
+    content: `
+      body::after {
+        content: "";
+        display: block;
+        height: 1200px;
+        pointer-events: none;
+      }
+    `,
+  });
+}
+
+function expectLayoutStable(before: LayoutBox, after: LayoutBox) {
+  expect(Math.abs(after.x - before.x)).toBeLessThanOrEqual(1);
+  expect(Math.abs(after.y - before.y)).toBeLessThanOrEqual(1);
+  expect(Math.abs(after.width - before.width)).toBeLessThanOrEqual(1);
+}
 
 async function installApiRoutes(page: Page) {
   await page.route("http://127.0.0.1:8787/**", async (route) => {
@@ -84,6 +190,18 @@ async function installApiRoutes(page: Page) {
     }
     if (url.pathname === "/agents") {
       await fulfillJson(route, agentsFixture());
+      return;
+    }
+    if (url.pathname === "/agent-graphs") {
+      await fulfillJson(route, agentGraphsFixture());
+      return;
+    }
+    if (url.pathname === "/model-profiles") {
+      await fulfillJson(route, modelProfilesFixture());
+      return;
+    }
+    if (url.pathname === "/secrets") {
+      await fulfillJson(route, []);
       return;
     }
     if (url.pathname === "/models/health") {
@@ -147,11 +265,53 @@ function runFixture() {
     task: "Refactor the layout smoke fixture and verify the diff output stays readable",
     workspace: "/workspace/synode",
     model_provider: "ollama",
+    default_model_profile_id: "profile-ollama",
+    role_model_profile_ids: {},
+    agent_graph_id: "graph-default",
+    agent_graph_snapshot: {},
     observability_trace_id: "trace-layout-smoke",
     final_answer: "Implemented a focused layout fixture with full-size artifacts and diff panels.",
     created_at: now,
     updated_at: now,
   };
+}
+
+function modelProfilesFixture() {
+  return [
+    {
+      id: "profile-ollama",
+      name: "ollama default",
+      provider_type: "ollama",
+      base_url: "http://127.0.0.1:11434",
+      model: "qwen2.5-coder:7b",
+      options: {},
+      secret_id: null,
+      secret_set: false,
+      enabled: true,
+      created_at: now,
+      updated_at: now,
+    },
+  ];
+}
+
+function agentGraphsFixture() {
+  return [
+    {
+      id: "graph-default",
+      name: "default",
+      role_ids: ["role-supervisor", "role-coder", "role-reviewer"],
+      edges: [
+        { from_role: "role-supervisor", to_role: "role-coder" },
+        { from_role: "role-coder", to_role: "role-reviewer" },
+      ],
+      default_model_profile_id: "profile-ollama",
+      role_model_profile_ids: {},
+      is_default: true,
+      enabled: true,
+      created_at: now,
+      updated_at: now,
+    },
+  ];
 }
 
 function threadFixture() {
@@ -179,7 +339,8 @@ function threadDetailFixture() {
         author_type: "user",
         author_name: "user",
         message_type: "text",
-        content: "Refactor the layout smoke fixture and verify the diff output stays readable",
+        content:
+          "Refactor the layout smoke fixture and verify the diff output stays readable\n\n```ts\nconst stable = true;\n```\n\n- keep chat markdown readable",
         metadata: {},
         created_at: now,
       },
@@ -187,10 +348,47 @@ function threadDetailFixture() {
         id: 2,
         thread_id: threadId,
         run_id: runId,
+        author_type: "system",
+        author_name: "runtime",
+        message_type: "run_summary",
+        content: "Run started.",
+        metadata: { status: "running" },
+        created_at: now,
+      },
+      {
+        id: 3,
+        thread_id: threadId,
+        run_id: runId,
+        author_type: "system",
+        author_name: "approval",
+        message_type: "approval_request",
+        content: "Approval required for native.apply_patch: Patch requires human approval",
+        metadata: { approval_id: "approval-1", tool_name: "native.apply_patch" },
+        created_at: now,
+      },
+      ...Array.from({ length: 12 }, (_, index) => ({
+        id: 4 + index,
+        thread_id: threadId,
+        run_id: runId,
+        author_type: index % 2 === 0 ? "user" : "agent",
+        author_name: index % 2 === 0 ? "user" : "coder",
+        message_type: "text",
+        content:
+          index % 2 === 0
+            ? `Follow-up context ${index + 1}: keep the chat viewport pinned to relevant recent work.`
+            : `Intermediate model note ${index + 1}: the visible area should prioritize actual reasoning output over runtime noise.`,
+        metadata: {},
+        created_at: now,
+      })),
+      {
+        id: 16,
+        thread_id: threadId,
+        run_id: runId,
         author_type: "agent",
         author_name: "synode",
         message_type: "final",
-        content: "Implemented a focused layout fixture with full-size artifacts and diff panels.",
+        content:
+          "Synode run summary:\nMode: coding\n- coder: Inspect the UI and compact technical output\n\n[coder]\nImplemented a focused layout fixture with full-size artifacts and diff panels.\n- native.git_diff: ok {\"stdout\":\"diff --git a/web/src/app/globals.css b/web/src/app/globals.css\\n+ .thread-workbench { display: block; }\"}\n\n[verification]\n{\"ok\":true,\"commands\":[{\"command\":\"npm run test:e2e\",\"status\":\"passed\"}]}",
         metadata: { status: "completed" },
         created_at: now,
       },
@@ -334,8 +532,24 @@ function systemFixture() {
 
 function agentsFixture() {
   return [
-    { name: "supervisor", mission: "Route tasks and synthesize plans", allowed_tools: [] },
-    { name: "coder", mission: "Inspect repositories and propose patches", allowed_tools: ["native.git_diff"] },
-    { name: "reviewer", mission: "Review outputs and verification", allowed_tools: [] },
+    agentFixture("role-supervisor", "supervisor", "Route tasks and synthesize plans", []),
+    agentFixture("role-coder", "coder", "Inspect repositories and propose patches", ["native.git_diff"]),
+    agentFixture("role-reviewer", "reviewer", "Review outputs and verification", []),
   ];
+}
+
+function agentFixture(id: string, name: string, mission: string, allowedTools: string[]) {
+  return {
+    id,
+    name,
+    mission,
+    non_goals: [],
+    allowed_tools: allowedTools,
+    requires_approval_for: [],
+    output_contract: "",
+    builtin: true,
+    enabled: true,
+    created_at: now,
+    updated_at: now,
+  };
 }

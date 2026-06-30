@@ -7,7 +7,6 @@ from typing import Any
 
 from langgraph.constants import END, START
 from langgraph.graph import StateGraph
-from langgraph.types import Send
 from pydantic import BaseModel
 
 from synode.models.provider import ModelProviderRegistry, ModelRequest
@@ -16,7 +15,6 @@ from synode.persistence.database import Database
 from synode.persistence.repository import Repository
 from synode.registry import RoleRegistry
 from synode.runtime.decisions import (
-    WORKER_ROLES,
     CodingInspection,
     FilePatch,
     PatchProposal,
@@ -27,7 +25,17 @@ from synode.runtime.decisions import (
 )
 from synode.runtime.state import SynodeState
 from synode.schemas import AgentOutput, EventType, RoleName, RunMode, ToolCall, ToolResult
+from synode.security import SecretCipher
 from synode.tools.base import ToolExecutor
+
+
+@dataclass(frozen=True)
+class ResolvedModelProvider:
+    provider: Any
+    profile_id: str | None = None
+    profile_name: str | None = None
+    provider_type: str | None = None
+    model_options: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -37,13 +45,14 @@ class GraphDependencies:
     models: ModelProviderRegistry
     tool_executor: ToolExecutor
     observability: Observability
+    secret_cipher: SecretCipher | None = None
 
 
 def build_graph(deps: GraphDependencies, checkpointer: Any | None = None) -> Any:
     builder = StateGraph(SynodeState)
     builder.add_node("intake", _observed_node("intake", deps, _intake_node(deps)))
     builder.add_node("supervisor", _observed_node("supervisor", deps, _supervisor_node(deps)))
-    builder.add_node("worker", _observed_node("worker", deps, _worker_node(deps)))
+    builder.add_node("graph_workers", _observed_node("graph_workers", deps, _graph_workers_node(deps)))
     builder.add_node("coding_inspect", _observed_node("coding_inspect", deps, _coding_inspect_node(deps)))
     builder.add_node(
         "coding_patch_propose",
@@ -56,7 +65,7 @@ def build_graph(deps: GraphDependencies, checkpointer: Any | None = None) -> Any
     builder.add_edge(START, "intake")
     builder.add_edge("intake", "supervisor")
     builder.add_conditional_edges("supervisor", _route_after_supervisor)
-    builder.add_conditional_edges("worker", _after_worker, {"reviewer": "reviewer"})
+    builder.add_edge("graph_workers", "reviewer")
     builder.add_edge("coding_inspect", "coding_patch_propose")
     builder.add_edge("coding_patch_propose", "patch_apply")
     builder.add_edge("patch_apply", "verify")
@@ -111,8 +120,8 @@ def _observed_node(name: str, deps: GraphDependencies, handler: Any):
 def _node_role(name: str, state: SynodeState) -> str | None:
     if name == "supervisor":
         return RoleName.SUPERVISOR.value
-    if name == "worker":
-        return state.get("current_role")
+    if name == "graph_workers":
+        return None
     if name in {"coding_inspect", "coding_patch_propose", "patch_apply", "verify"}:
         return RoleName.CODER.value
     if name == "reviewer":
@@ -149,7 +158,7 @@ def _intake_node(deps: GraphDependencies):
 
 def _supervisor_node(deps: GraphDependencies):
     async def node(state: SynodeState) -> SynodeState:
-        provider = deps.models.get(state["model_provider"])
+        provider = await _provider_for_role(deps, state, RoleName.SUPERVISOR.value)
         decision = await _invoke_structured(
             deps,
             state,
@@ -160,15 +169,16 @@ def _supervisor_node(deps: GraphDependencies):
                 prompt=_supervisor_prompt(state, deps),
                 context={"mode": state["mode"], "task": state["task"]},
                 response_schema=SupervisorDecision,
+                model_options=provider.model_options or {},
             ),
         )
-        _validate_supervisor_decision(decision, deps)
+        _validate_supervisor_decision(decision, deps, state)
         role_tool_calls = {
-            step.role.value: [call.model_dump(mode="json") for call in step.tool_calls]
+            step.role: [call.model_dump(mode="json") for call in step.tool_calls]
             for step in decision.plan
         }
         plan = [
-            {"role": step.role.value, "task": step.task, "tool_calls": role_tool_calls[step.role.value]}
+            {"role": step.role, "task": step.task, "tool_calls": role_tool_calls[step.role]}
             for step in decision.plan
         ]
         async with deps.database.session() as session:
@@ -177,9 +187,9 @@ def _supervisor_node(deps: GraphDependencies):
                 state["run_id"], "supervisor_decision", decision.model_dump(mode="json")
             )
             for role in decision.selected_roles:
-                await repo.add_event(state["run_id"], EventType.ROLE_SELECTED.value, role.value, {"role": role.value})
+                await repo.add_event(state["run_id"], EventType.ROLE_SELECTED.value, role, {"role": role})
         return {
-            "selected_roles": [role.value for role in decision.selected_roles],
+            "selected_roles": decision.selected_roles,
             "plan": plan,
             "role_tool_calls": role_tool_calls,
         }
@@ -187,51 +197,65 @@ def _supervisor_node(deps: GraphDependencies):
     return node
 
 
-def _route_after_supervisor(state: SynodeState) -> list[Send] | str:
+def _route_after_supervisor(state: SynodeState) -> str:
     if state["mode"] == RunMode.CODING.value:
         return "coding_inspect"
-    return [
-        Send("worker", {**state, "current_role": role})
-        for role in state.get("selected_roles", [])
-    ]
+    return "graph_workers"
 
 
-def _after_worker(state: SynodeState) -> str:
-    return "reviewer"
-
-
-def _worker_node(deps: GraphDependencies):
+def _graph_workers_node(deps: GraphDependencies):
     async def node(state: SynodeState) -> SynodeState:
-        role = state["current_role"]
-        calls = [
-            ToolCall.model_validate(call)
-            for call in state.get("role_tool_calls", {}).get(role, [])
-        ]
-        results = []
-        for call in calls:
-            result = await deps.tool_executor.execute(state["run_id"], role, state.get("workspace"), call)
-            results.append(result)
-        provider = deps.models.get(state["model_provider"])
-        model_response = await _invoke_model(
-            deps,
-            state,
-            provider,
-            ModelRequest(
-                role=role,
-                prompt=f"Summarize work for task: {state['task']}",
-                context={"tool_results": [result.model_dump(mode="json") for result in results]},
-                tools=[call.name for call in calls],
+        outputs: list[dict[str, Any]] = []
+        for role in _topological_worker_order(state, state.get("selected_roles", [])):
+            await _record_event(
+                deps,
+                state,
+                EventType.NODE_STARTED.value,
+                role,
+                {"node": "graph_worker", "role": role},
             )
-        )
-        output = AgentOutput(
-            role=role,
-            summary=_summarize_role_output(role, model_response.content, results),
-            tool_results=results,
-            risks=[result.error for result in results if result.error],
-        )
-        return {"worker_outputs": [output.model_dump(mode="json")]}
+            output = await _run_worker_role(deps, {**state, "worker_outputs": outputs}, role)
+            outputs.append(output.model_dump(mode="json"))
+            await _record_event(
+                deps,
+                state,
+                EventType.NODE_COMPLETED.value,
+                role,
+                {"node": "graph_worker", "role": role, "ok": True},
+            )
+        return {"worker_outputs": outputs}
 
     return node
+
+
+async def _run_worker_role(deps: GraphDependencies, state: SynodeState, role: str) -> AgentOutput:
+    calls = [ToolCall.model_validate(call) for call in state.get("role_tool_calls", {}).get(role, [])]
+    results = []
+    for call in calls:
+        result = await deps.tool_executor.execute(state["run_id"], role, state.get("workspace"), call)
+        results.append(result)
+    provider = await _provider_for_role(deps, state, role)
+    model_response = await _invoke_model(
+        deps,
+        state,
+        provider,
+        ModelRequest(
+            role=role,
+            prompt=f"Summarize work for task: {state['task']}",
+            context={
+                "tool_results": [result.model_dump(mode="json") for result in results],
+                "previous_worker_outputs": state.get("worker_outputs", []),
+            },
+            tools=[call.name for call in calls],
+            model_options=provider.model_options or {},
+        ),
+    )
+    return AgentOutput(
+        role=role,
+        summary=_summarize_role_output(role, model_response.content, results),
+        tool_results=results,
+        risks=[result.error for result in results if result.error],
+    )
 
 
 def _coding_inspect_node(deps: GraphDependencies):
@@ -245,8 +269,15 @@ def _coding_inspect_node(deps: GraphDependencies):
         ]
         results: list[ToolResult] = []
         for call in seed_calls:
-            results.append(await deps.tool_executor.execute(state["run_id"], RoleName.CODER.value, state.get("workspace"), call))
-        provider = deps.models.get(state["model_provider"])
+            results.append(
+                await deps.tool_executor.execute(
+                    state["run_id"],
+                    RoleName.CODER.value,
+                    state.get("workspace"),
+                    call,
+                )
+            )
+        provider = await _provider_for_role(deps, state, RoleName.CODER.value)
         inspection = await _invoke_structured(
             deps,
             state,
@@ -257,6 +288,7 @@ def _coding_inspect_node(deps: GraphDependencies):
                 prompt="Inspect repository evidence and identify files/tests needed for the coding task.",
                 context={"task": state["task"], "tool_results": [result.model_dump(mode="json") for result in results]},
                 response_schema=CodingInspection,
+                model_options=provider.model_options or {},
             ),
         )
         async with deps.database.session() as session:
@@ -276,13 +308,13 @@ def _coding_patch_propose_node(deps: GraphDependencies):
                 return {"patch_proposal": existing.content}
 
         file_context = await _read_relevant_files(deps, state)
-        provider = deps.models.get(state["model_provider"])
+        provider = await _provider_for_role(deps, state, RoleName.CODER.value)
         context: dict[str, Any] = {
             "task": state["task"],
             "inspection": state.get("coding_inspection", {}),
             "files": file_context,
         }
-        if state["model_provider"] == "fake":
+        if state["model_provider"] == "fake" or provider.provider.name == "fake":
             context["fake_patch_proposal"] = _fake_patch_proposal(file_context)
         proposal = await _invoke_structured(
             deps,
@@ -294,6 +326,7 @@ def _coding_patch_propose_node(deps: GraphDependencies):
                 prompt="Propose a minimal patch for the coding task using the provided file contents.",
                 context=context,
                 response_schema=PatchProposal,
+                model_options=provider.model_options or {},
             ),
         )
         async with deps.database.session() as session:
@@ -319,7 +352,10 @@ def _patch_apply_node(deps: GraphDependencies):
         results = [result.model_dump(mode="json")]
         if result.ok:
             diff = await deps.tool_executor.execute(
-                state["run_id"], RoleName.CODER.value, state.get("workspace"), ToolCall(name="native.git_diff", arguments={})
+                state["run_id"],
+                RoleName.CODER.value,
+                state.get("workspace"),
+                ToolCall(name="native.git_diff", arguments={}),
             )
             results.append(diff.model_dump(mode="json"))
         return {"patch_results": results}
@@ -333,7 +369,7 @@ def _verify_node(deps: GraphDependencies):
         if not patch_results or not patch_results[0].ok:
             return {"verification_result": {"skipped": True, "reason": "patch did not apply"}}
         proposal = PatchProposal.model_validate(state["patch_proposal"])
-        provider = deps.models.get(state["model_provider"])
+        provider = await _provider_for_role(deps, state, RoleName.CODER.value)
         plan = await _invoke_structured(
             deps,
             state,
@@ -344,6 +380,7 @@ def _verify_node(deps: GraphDependencies):
                 prompt="Choose focused verification commands for the applied patch.",
                 context={"commands": proposal.verification_commands, "patch_proposal": proposal.model_dump(mode="json")},
                 response_schema=VerificationPlan,
+                model_options=provider.model_options or {},
             ),
         )
         result = await deps.tool_executor.execute(
@@ -367,7 +404,7 @@ def _verify_node(deps: GraphDependencies):
 def _reviewer_node(deps: GraphDependencies):
     async def node(state: SynodeState) -> SynodeState:
         blockers, advisory = _precheck_review_findings(state)
-        provider = deps.models.get(state["model_provider"])
+        provider = await _provider_for_role(deps, state, RoleName.REVIEWER.value)
         decision = await _invoke_structured(
             deps,
             state,
@@ -378,6 +415,7 @@ def _reviewer_node(deps: GraphDependencies):
                 prompt="Review worker outputs, patch results, verification, and policy signals.",
                 context={"blockers": blockers, "advisory": advisory, "state": _compact_state_for_review(state)},
                 response_schema=ReviewerDecision,
+                model_options=provider.model_options or {},
             ),
         )
         merged_blockers = [*blockers, *decision.blockers]
@@ -432,7 +470,7 @@ def _synthesizer_node(deps: GraphDependencies):
 async def _invoke_structured(
     deps: GraphDependencies,
     state: SynodeState,
-    provider: Any,
+    provider: ResolvedModelProvider,
     schema: type[BaseModel],
     request: ModelRequest,
 ) -> Any:
@@ -443,7 +481,7 @@ async def _invoke_structured(
 async def _invoke_model(
     deps: GraphDependencies,
     state: SynodeState,
-    provider: Any,
+    provider: ResolvedModelProvider,
     request: ModelRequest,
 ) -> Any:
     with deps.observability.observation(
@@ -459,14 +497,21 @@ async def _invoke_model(
         metadata={"run_id": state["run_id"], "response_schema": _schema_name(request.response_schema)},
     ):
         try:
-            response = await provider.invoke(request)
+            response = await provider.provider.invoke(request)
         except Exception as exc:
             await _record_event(
                 deps,
                 state,
                 EventType.MODEL_INVOKED.value,
                 request.role,
-                {"role": request.role, "ok": False, "error": str(exc)},
+                {
+                    "role": request.role,
+                    "ok": False,
+                    "profile_id": provider.profile_id,
+                    "profile_name": provider.profile_name,
+                    "provider_type": provider.provider_type,
+                    "error": str(exc),
+                },
             )
             deps.observability.update_current_generation(level="ERROR", status_message=str(exc))
             raise
@@ -479,6 +524,9 @@ async def _invoke_model(
             {
                 "role": request.role,
                 "ok": True,
+                "profile_id": provider.profile_id,
+                "profile_name": provider.profile_name,
+                "provider_type": provider.provider_type,
                 "provider": response.provider,
                 "model": response.model,
                 "usage": usage,
@@ -505,23 +553,36 @@ def _schema_name(schema: type[BaseModel] | None) -> str | None:
     return schema.__name__ if schema is not None else None
 
 
-def _validate_supervisor_decision(decision: SupervisorDecision, deps: GraphDependencies) -> None:
+def _validate_supervisor_decision(
+    decision: SupervisorDecision,
+    deps: GraphDependencies,
+    state: SynodeState,
+) -> None:
+    catalog = {role["name"] for role in _worker_role_catalog(deps, state)}
+    selected = set(decision.selected_roles)
+    planned = {step.role for step in decision.plan}
+    if selected != planned:
+        raise ValueError(f"plan roles must match selected_roles; missing={selected - planned}, extra={planned - selected}")
     for role in decision.selected_roles:
-        if role not in WORKER_ROLES:
-            raise ValueError(f"supervisor selected non-worker role: {role.value}")
-        deps.roles.get(role.value)
+        if role in {"supervisor", "reviewer"}:
+            raise ValueError(f"supervisor selected system role: {role}")
+        if role not in catalog:
+            raise ValueError(f"supervisor selected role outside active graph: {role}")
+        deps.roles.get(role)
     for step in decision.plan:
-        if step.role not in WORKER_ROLES:
-            raise ValueError(f"supervisor planned non-worker role: {step.role.value}")
-        deps.roles.get(step.role.value)
+        if step.role in {"supervisor", "reviewer"}:
+            raise ValueError(f"supervisor planned system role: {step.role}")
+        if step.role not in catalog:
+            raise ValueError(f"supervisor planned role outside active graph: {step.role}")
+        deps.roles.get(step.role)
         for call in step.tool_calls:
             deps.tool_executor.tools.get(call.name)
-            if not deps.roles.get(step.role.value).allows_tool(call.name):
-                raise PermissionError(f"role '{step.role.value}' is not allowed to use tool '{call.name}'")
+            if not deps.roles.get(step.role).allows_tool(call.name):
+                raise PermissionError(f"role '{step.role}' is not allowed to use tool '{call.name}'")
 
 
 def _supervisor_prompt(state: SynodeState, deps: GraphDependencies) -> str:
-    roles = _worker_role_catalog(deps)
+    roles = _worker_role_catalog(deps, state)
     return (
         "Create a strict executable plan for Synode.\n"
         f"Mode: {state['mode']}\n"
@@ -539,14 +600,17 @@ def _supervisor_prompt(state: SynodeState, deps: GraphDependencies) -> str:
     )
 
 
-def _worker_role_catalog(deps: GraphDependencies) -> list[dict[str, Any]]:
+def _worker_role_catalog(deps: GraphDependencies, state: SynodeState | dict[str, Any]) -> list[dict[str, Any]]:
     concrete_tools = deps.tool_executor.tools.list_names()
+    active_names = set(_graph_worker_names(state))
     roles = []
     for role in deps.roles.as_public():
-        role_name = RoleName(role["name"])
-        if role_name not in WORKER_ROLES:
+        role_name = str(role["name"])
+        if role_name in {"supervisor", "reviewer"}:
             continue
-        spec = deps.roles.get(role_name.value)
+        if active_names and role_name not in active_names:
+            continue
+        spec = deps.roles.get(role_name)
         roles.append(
             {
                 "name": role["name"],
@@ -555,6 +619,114 @@ def _worker_role_catalog(deps: GraphDependencies) -> list[dict[str, Any]]:
             }
         )
     return roles
+
+
+async def _provider_for_role(
+    deps: GraphDependencies,
+    state: SynodeState,
+    role: str,
+) -> ResolvedModelProvider:
+    role_profile_ids = state.get("role_model_profile_ids", {}) or {}
+    profile_id = role_profile_ids.get(role) or state.get("default_model_profile_id")
+    if not profile_id:
+        return ResolvedModelProvider(
+            provider=deps.models.get(state["model_provider"]),
+            provider_type=state["model_provider"],
+        )
+    async with deps.database.session() as session:
+        repo = Repository(session)
+        profile = await repo.get_model_profile(profile_id)
+        if profile is None:
+            raise LookupError(f"model profile not found: {profile_id}")
+        if not profile.enabled:
+            raise RuntimeError(f"model profile is disabled: {profile.name}")
+        api_key = None
+        if profile.secret_id:
+            if deps.secret_cipher is None:
+                raise RuntimeError("SYNODE_SECRETS_KEY is required for encrypted model profile secrets")
+            secret = await repo.get_secret(profile.secret_id)
+            if secret is None:
+                raise LookupError(f"secret not found: {profile.secret_id}")
+            api_key = deps.secret_cipher.decrypt(secret.encrypted_value)
+        provider = deps.models.for_profile(profile, api_key)
+        options = {
+            str(key): value
+            for key, value in (profile.options or {}).items()
+            if key != "timeout_seconds"
+        }
+        return ResolvedModelProvider(
+            provider=provider,
+            profile_id=profile.id,
+            profile_name=profile.name,
+            provider_type=profile.provider_type,
+            model_options=options,
+        )
+
+
+def _graph_worker_names(state: SynodeState | dict[str, Any]) -> list[str]:
+    snapshot = state.get("agent_graph_snapshot") or {}
+    roles = snapshot.get("roles", [])
+    if not isinstance(roles, list):
+        return []
+    names = []
+    for role in roles:
+        if not isinstance(role, dict):
+            continue
+        name = role.get("name")
+        if isinstance(name, str) and name not in {"supervisor", "reviewer"}:
+            names.append(name)
+    return names
+
+
+def _topological_worker_order(state: SynodeState, selected_roles: list[str]) -> list[str]:
+    selected = set(selected_roles)
+    if not selected:
+        return []
+    snapshot = state.get("agent_graph_snapshot") or {}
+    edges = snapshot.get("edges", [])
+    graph_roles = _graph_worker_names(state)
+    if not graph_roles:
+        return selected_roles
+    order = _topological_order(
+        [role for role in graph_roles if role in selected],
+        [
+            edge
+            for edge in edges
+            if isinstance(edge, dict)
+            and edge.get("from_role") in selected
+            and edge.get("to_role") in selected
+        ],
+    )
+    missing = [role for role in selected_roles if role not in order]
+    return [*order, *missing]
+
+
+def _topological_order(role_names: list[str], edges: list[dict[str, Any]]) -> list[str]:
+    remaining = set(role_names)
+    incoming: dict[str, set[str]] = {role: set() for role in role_names}
+    outgoing: dict[str, set[str]] = {role: set() for role in role_names}
+    for edge in edges:
+        source = str(edge.get("from_role"))
+        target = str(edge.get("to_role"))
+        if source in remaining and target in remaining:
+            incoming[target].add(source)
+            outgoing[source].add(target)
+    ordered: list[str] = []
+    ready = sorted(role for role, sources in incoming.items() if not sources)
+    while ready:
+        role = ready.pop(0)
+        if role not in remaining:
+            continue
+        remaining.remove(role)
+        ordered.append(role)
+        for target in sorted(outgoing[role]):
+            incoming[target].discard(role)
+            if not incoming[target]:
+                ready.append(target)
+        ready.sort()
+    if remaining:
+        raise ValueError(f"agent graph contains a cycle among selected roles: {sorted(remaining)}")
+    return ordered
 
 
 async def _read_relevant_files(deps: GraphDependencies, state: SynodeState) -> list[dict[str, Any]]:

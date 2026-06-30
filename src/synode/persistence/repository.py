@@ -7,21 +7,31 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from synode.persistence.models import (
+    AgentGraphRecord,
+    AgentRoleRecord,
     ApprovalRecord,
     ArtifactRecord,
+    ModelProfileRecord,
     RunEventRecord,
     RunRecord,
+    SecretRecord,
     ThreadMessageRecord,
     ThreadRecord,
     ToolAuditRecord,
     new_id,
 )
 from synode.schemas import (
+    AgentGraphEdge,
+    AgentGraphResponse,
+    AgentRoleResponse,
     ApprovalStatus,
     EventType,
+    ModelProfileResponse,
+    ModelProviderType,
     RunMode,
     RunResponse,
     RunStatus,
+    SecretResponse,
     ThreadMessageAuthorType,
     ThreadMessageResponse,
     ThreadMessageType,
@@ -44,6 +54,10 @@ class Repository:
         observability_trace_id: str | None = None,
         thread_id: str | None = None,
         record_user_message: bool = True,
+        default_model_profile_id: str | None = None,
+        role_model_profile_ids: dict[str, str] | None = None,
+        agent_graph_id: str | None = None,
+        agent_graph_snapshot: dict[str, Any] | None = None,
     ) -> RunRecord:
         thread = await self.get_thread(thread_id) if thread_id is not None else None
         if thread_id is not None and thread is None:
@@ -58,6 +72,10 @@ class Repository:
             workspace=workspace,
             mode=mode.value,
             observability_trace_id=observability_trace_id,
+            default_model_profile_id=default_model_profile_id,
+            role_model_profile_ids=role_model_profile_ids or {},
+            agent_graph_id=agent_graph_id,
+            agent_graph_snapshot=agent_graph_snapshot or {},
         )
         self.session.add(run)
         await self.session.flush()
@@ -366,6 +384,296 @@ class Repository:
         )
         return list(result.scalars().all())
 
+    async def create_secret(self, name: str, encrypted_value: str) -> SecretRecord:
+        record = SecretRecord(id=new_id(), name=name, encrypted_value=encrypted_value)
+        self.session.add(record)
+        await self.session.flush()
+        return record
+
+    async def get_secret(self, secret_id: str | None) -> SecretRecord | None:
+        if secret_id is None:
+            return None
+        return await self.session.get(SecretRecord, secret_id)
+
+    async def list_secrets(self) -> list[SecretRecord]:
+        result = await self.session.execute(select(SecretRecord).order_by(SecretRecord.name))
+        return list(result.scalars().all())
+
+    async def update_secret(self, secret_id: str, encrypted_value: str) -> SecretRecord:
+        record = await self.get_secret(secret_id)
+        if record is None:
+            raise LookupError(f"secret not found: {secret_id}")
+        record.encrypted_value = encrypted_value
+        record.updated_at = datetime.now(UTC)
+        await self.session.flush()
+        return record
+
+    async def create_model_profile(
+        self,
+        name: str,
+        provider_type: ModelProviderType,
+        model: str,
+        base_url: str | None = None,
+        options: dict[str, Any] | None = None,
+        secret_id: str | None = None,
+        enabled: bool = True,
+    ) -> ModelProfileRecord:
+        if secret_id is not None and await self.get_secret(secret_id) is None:
+            raise LookupError(f"secret not found: {secret_id}")
+        record = ModelProfileRecord(
+            id=new_id(),
+            name=name,
+            provider_type=provider_type.value,
+            base_url=base_url,
+            model=model,
+            options=options or {},
+            secret_id=secret_id,
+            enabled=enabled,
+        )
+        self.session.add(record)
+        await self.session.flush()
+        return record
+
+    async def get_model_profile(self, profile_id: str | None) -> ModelProfileRecord | None:
+        if profile_id is None:
+            return None
+        return await self.session.get(ModelProfileRecord, profile_id)
+
+    async def list_model_profiles(self, enabled_only: bool = False) -> list[ModelProfileRecord]:
+        query = select(ModelProfileRecord).order_by(ModelProfileRecord.name)
+        if enabled_only:
+            query = query.where(ModelProfileRecord.enabled.is_(True))
+        result = await self.session.execute(query)
+        return list(result.scalars().all())
+
+    async def update_model_profile(self, profile_id: str, values: dict[str, Any]) -> ModelProfileRecord:
+        record = await self.get_model_profile(profile_id)
+        if record is None:
+            raise LookupError(f"model profile not found: {profile_id}")
+        if "secret_id" in values and values["secret_id"] is not None and await self.get_secret(values["secret_id"]) is None:
+            raise LookupError(f"secret not found: {values['secret_id']}")
+        for key, value in values.items():
+            if value is not None or key in {"base_url", "secret_id"}:
+                if key == "provider_type" and isinstance(value, ModelProviderType):
+                    value = value.value
+                setattr(record, key, value)
+        record.updated_at = datetime.now(UTC)
+        await self.session.flush()
+        return record
+
+    async def create_agent_role(
+        self,
+        name: str,
+        mission: str,
+        non_goals: list[str] | None = None,
+        allowed_tools: list[str] | None = None,
+        requires_approval_for: list[str] | None = None,
+        output_contract: str = "",
+        builtin: bool = False,
+        enabled: bool = True,
+    ) -> AgentRoleRecord:
+        record = AgentRoleRecord(
+            id=new_id(),
+            name=name,
+            mission=mission,
+            non_goals=non_goals or [],
+            allowed_tools=allowed_tools or [],
+            requires_approval_for=requires_approval_for or [],
+            output_contract=output_contract,
+            builtin=builtin,
+            enabled=enabled,
+        )
+        self.session.add(record)
+        await self.session.flush()
+        return record
+
+    async def get_agent_role(self, role_id: str | None) -> AgentRoleRecord | None:
+        if role_id is None:
+            return None
+        return await self.session.get(AgentRoleRecord, role_id)
+
+    async def get_agent_role_by_name(self, name: str) -> AgentRoleRecord | None:
+        result = await self.session.execute(select(AgentRoleRecord).where(AgentRoleRecord.name == name))
+        return result.scalars().first()
+
+    async def list_agent_roles(self, enabled_only: bool = False) -> list[AgentRoleRecord]:
+        query = select(AgentRoleRecord).order_by(AgentRoleRecord.name)
+        if enabled_only:
+            query = query.where(AgentRoleRecord.enabled.is_(True))
+        result = await self.session.execute(query)
+        return list(result.scalars().all())
+
+    async def update_agent_role(self, role_id: str, values: dict[str, Any]) -> AgentRoleRecord:
+        record = await self.get_agent_role(role_id)
+        if record is None:
+            raise LookupError(f"agent role not found: {role_id}")
+        for key, value in values.items():
+            if value is not None:
+                setattr(record, key, value)
+        record.updated_at = datetime.now(UTC)
+        await self.session.flush()
+        return record
+
+    async def create_agent_graph(
+        self,
+        name: str,
+        role_ids: list[str],
+        edges: list[dict[str, str]],
+        default_model_profile_id: str | None = None,
+        role_model_profile_ids: dict[str, str] | None = None,
+        is_default: bool = False,
+        enabled: bool = True,
+    ) -> AgentGraphRecord:
+        await self._validate_graph_refs(role_ids, edges, default_model_profile_id, role_model_profile_ids or {})
+        if is_default:
+            await self._clear_default_graphs()
+        record = AgentGraphRecord(
+            id=new_id(),
+            name=name,
+            role_ids=role_ids,
+            edges=edges,
+            default_model_profile_id=default_model_profile_id,
+            role_model_profile_ids=role_model_profile_ids or {},
+            is_default=is_default,
+            enabled=enabled,
+        )
+        self.session.add(record)
+        await self.session.flush()
+        return record
+
+    async def get_agent_graph(self, graph_id: str | None) -> AgentGraphRecord | None:
+        if graph_id is None:
+            return None
+        return await self.session.get(AgentGraphRecord, graph_id)
+
+    async def get_default_agent_graph(self) -> AgentGraphRecord | None:
+        result = await self.session.execute(
+            select(AgentGraphRecord)
+            .where(AgentGraphRecord.enabled.is_(True), AgentGraphRecord.is_default.is_(True))
+            .order_by(AgentGraphRecord.name)
+        )
+        return result.scalars().first()
+
+    async def list_agent_graphs(self, enabled_only: bool = False) -> list[AgentGraphRecord]:
+        query = select(AgentGraphRecord).order_by(AgentGraphRecord.is_default.desc(), AgentGraphRecord.name)
+        if enabled_only:
+            query = query.where(AgentGraphRecord.enabled.is_(True))
+        result = await self.session.execute(query)
+        return list(result.scalars().all())
+
+    async def update_agent_graph(self, graph_id: str, values: dict[str, Any]) -> AgentGraphRecord:
+        record = await self.get_agent_graph(graph_id)
+        if record is None:
+            raise LookupError(f"agent graph not found: {graph_id}")
+        role_ids = values.get("role_ids", record.role_ids)
+        edges = [edge.model_dump(mode="json") if isinstance(edge, AgentGraphEdge) else edge for edge in values.get("edges", record.edges)]
+        default_model_profile_id = values.get("default_model_profile_id", record.default_model_profile_id)
+        role_model_profile_ids = values.get("role_model_profile_ids", record.role_model_profile_ids)
+        await self._validate_graph_refs(role_ids, edges, default_model_profile_id, role_model_profile_ids or {})
+        if values.get("is_default") is True:
+            await self._clear_default_graphs()
+        for key, value in values.items():
+            if value is not None or key in {"default_model_profile_id"}:
+                if key == "edges":
+                    value = edges
+                setattr(record, key, value)
+        record.updated_at = datetime.now(UTC)
+        await self.session.flush()
+        return record
+
+    async def ensure_default_configuration(
+        self,
+        builtin_roles: list[dict[str, Any]],
+        ollama_base_url: str,
+        ollama_model: str,
+    ) -> None:
+        profile = await self._ensure_model_profile(
+            name="ollama default",
+            provider_type=ModelProviderType.OLLAMA,
+            base_url=ollama_base_url,
+            model=ollama_model,
+        )
+        role_ids: list[str] = []
+        worker_ids: list[str] = []
+        for role in builtin_roles:
+            record = await self.get_agent_role_by_name(str(role["name"]))
+            if record is None:
+                record = await self.create_agent_role(
+                    name=str(role["name"]),
+                    mission=str(role["mission"]),
+                    non_goals=list(role.get("non_goals", [])),
+                    allowed_tools=list(role.get("allowed_tools", [])),
+                    requires_approval_for=list(role.get("requires_approval_for", [])),
+                    output_contract=str(role.get("output_contract", "")),
+                    builtin=True,
+                )
+            role_ids.append(record.id)
+            if record.name not in {"supervisor", "reviewer"}:
+                worker_ids.append(record.id)
+        if await self.get_default_agent_graph() is None:
+            by_name = {role.name: role for role in await self.list_agent_roles(enabled_only=True)}
+            edges: list[dict[str, str]] = []
+            supervisor = by_name.get("supervisor")
+            reviewer = by_name.get("reviewer")
+            if supervisor is not None and reviewer is not None:
+                for worker_id in worker_ids:
+                    edges.append({"from_role": supervisor.id, "to_role": worker_id})
+                    edges.append({"from_role": worker_id, "to_role": reviewer.id})
+            await self.create_agent_graph(
+                name="default",
+                role_ids=role_ids,
+                edges=edges,
+                default_model_profile_id=profile.id,
+                is_default=True,
+            )
+
+    async def _ensure_model_profile(
+        self,
+        name: str,
+        provider_type: ModelProviderType,
+        base_url: str | None,
+        model: str,
+    ) -> ModelProfileRecord:
+        result = await self.session.execute(select(ModelProfileRecord).where(ModelProfileRecord.name == name))
+        record = result.scalars().first()
+        if record is not None:
+            return record
+        return await self.create_model_profile(
+            name=name,
+            provider_type=provider_type,
+            base_url=base_url,
+            model=model,
+            enabled=True,
+        )
+
+    async def _clear_default_graphs(self) -> None:
+        for graph in await self.list_agent_graphs():
+            graph.is_default = False
+
+    async def _validate_graph_refs(
+        self,
+        role_ids: list[str],
+        edges: list[dict[str, str]],
+        default_model_profile_id: str | None,
+        role_model_profile_ids: dict[str, str],
+    ) -> None:
+        if default_model_profile_id and await self.get_model_profile(default_model_profile_id) is None:
+            raise LookupError(f"model profile not found: {default_model_profile_id}")
+        for profile_id in role_model_profile_ids.values():
+            if await self.get_model_profile(profile_id) is None:
+                raise LookupError(f"model profile not found: {profile_id}")
+        known_roles = set(role_ids)
+        for role_id in role_ids:
+            if await self.get_agent_role(role_id) is None:
+                raise LookupError(f"agent role not found: {role_id}")
+        for edge in edges:
+            source = edge.get("from_role")
+            target = edge.get("to_role")
+            if source not in known_roles or target not in known_roles:
+                raise ValueError("agent graph edges must reference role_ids")
+        if _has_cycle(role_ids, edges):
+            raise ValueError("agent graph must be acyclic")
+
 
 def to_run_response(run: RunRecord) -> RunResponse:
     return RunResponse(
@@ -376,10 +684,71 @@ def to_run_response(run: RunRecord) -> RunResponse:
         task=run.task,
         workspace=run.workspace,
         model_provider=run.model_provider,
+        default_model_profile_id=run.default_model_profile_id,
+        role_model_profile_ids={str(key): str(value) for key, value in (run.role_model_profile_ids or {}).items()},
+        agent_graph_id=run.agent_graph_id,
+        agent_graph_snapshot=run.agent_graph_snapshot or {},
         observability_trace_id=run.observability_trace_id,
         final_answer=run.final_answer,
         created_at=run.created_at,
         updated_at=run.updated_at,
+    )
+
+
+def to_secret_response(secret: SecretRecord) -> SecretResponse:
+    return SecretResponse(
+        id=secret.id,
+        name=secret.name,
+        secret_set=bool(secret.encrypted_value),
+        created_at=secret.created_at,
+        updated_at=secret.updated_at,
+    )
+
+
+def to_model_profile_response(profile: ModelProfileRecord) -> ModelProfileResponse:
+    return ModelProfileResponse(
+        id=profile.id,
+        name=profile.name,
+        provider_type=ModelProviderType(profile.provider_type),
+        base_url=profile.base_url,
+        model=profile.model,
+        options=profile.options or {},
+        secret_id=profile.secret_id,
+        secret_set=profile.secret_id is not None,
+        enabled=profile.enabled,
+        created_at=profile.created_at,
+        updated_at=profile.updated_at,
+    )
+
+
+def to_agent_role_response(role: AgentRoleRecord) -> AgentRoleResponse:
+    return AgentRoleResponse(
+        id=role.id,
+        name=role.name,
+        mission=role.mission,
+        non_goals=role.non_goals or [],
+        allowed_tools=role.allowed_tools or [],
+        requires_approval_for=role.requires_approval_for or [],
+        output_contract=role.output_contract,
+        builtin=role.builtin,
+        enabled=role.enabled,
+        created_at=role.created_at,
+        updated_at=role.updated_at,
+    )
+
+
+def to_agent_graph_response(graph: AgentGraphRecord) -> AgentGraphResponse:
+    return AgentGraphResponse(
+        id=graph.id,
+        name=graph.name,
+        role_ids=graph.role_ids or [],
+        edges=[AgentGraphEdge.model_validate(edge) for edge in (graph.edges or [])],
+        default_model_profile_id=graph.default_model_profile_id,
+        role_model_profile_ids={str(key): str(value) for key, value in (graph.role_model_profile_ids or {}).items()},
+        is_default=graph.is_default,
+        enabled=graph.enabled,
+        created_at=graph.created_at,
+        updated_at=graph.updated_at,
     )
 
 
@@ -419,3 +788,29 @@ def _thread_title(value: str) -> str:
     if not title:
         return "Untitled thread"
     return title[:120]
+
+
+def _has_cycle(role_ids: list[str], edges: list[dict[str, str]]) -> bool:
+    children: dict[str, list[str]] = {role_id: [] for role_id in role_ids}
+    for edge in edges:
+        source = edge.get("from_role")
+        target = edge.get("to_role")
+        if source in children and target in children:
+            children[source].append(target)
+    visiting: set[str] = set()
+    visited: set[str] = set()
+
+    def visit(role_id: str) -> bool:
+        if role_id in visiting:
+            return True
+        if role_id in visited:
+            return False
+        visiting.add(role_id)
+        for child in children.get(role_id, []):
+            if visit(child):
+                return True
+        visiting.remove(role_id)
+        visited.add(role_id)
+        return False
+
+    return any(visit(role_id) for role_id in role_ids)

@@ -1,12 +1,15 @@
 import type {
+  AgentGraph,
   AgentSpec,
   Approval,
   Artifact,
   ModelHealth,
+  ModelProfile,
   Run,
   RunEvent,
   RunMetrics,
   RunMode,
+  Secret,
   Thread,
   ThreadDetail,
   ThreadMessage,
@@ -128,6 +131,9 @@ export function createThread(payload: {
   title?: string | null;
   workspace?: string | null;
   model_provider?: string | null;
+  default_model_profile_id?: string | null;
+  role_model_profile_ids?: Record<string, string>;
+  agent_graph_id?: string | null;
   mode: RunMode;
 }): Promise<ThreadDetail> {
   return request<ThreadDetail>("/threads", {
@@ -157,6 +163,9 @@ export function createThreadRun(
     message: string;
     workspace?: string | null;
     model_provider?: string | null;
+    default_model_profile_id?: string | null;
+    role_model_profile_ids?: Record<string, string>;
+    agent_graph_id?: string | null;
     mode: RunMode;
   },
 ): Promise<Run> {
@@ -174,6 +183,9 @@ export function createRun(payload: {
   task: string;
   workspace?: string | null;
   model_provider?: string | null;
+  default_model_profile_id?: string | null;
+  role_model_profile_ids?: Record<string, string>;
+  agent_graph_id?: string | null;
   mode: RunMode;
 }): Promise<Run> {
   return request<Run>("/runs", {
@@ -219,6 +231,70 @@ export function getSystemMetrics(): Promise<SystemMetrics> {
 
 export function listAgents(): Promise<AgentSpec[]> {
   return request<AgentSpec[]>("/agents");
+}
+
+export function createAgent(payload: {
+  name: string;
+  mission: string;
+  non_goals?: string[];
+  allowed_tools?: string[];
+  requires_approval_for?: string[];
+  output_contract?: string;
+  enabled?: boolean;
+}): Promise<AgentSpec> {
+  return request<AgentSpec>("/agents", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function listAgentGraphs(): Promise<AgentGraph[]> {
+  return request<AgentGraph[]>("/agent-graphs");
+}
+
+export function createAgentGraph(payload: {
+  name: string;
+  role_ids: string[];
+  edges?: Array<{ from_role: string; to_role: string }>;
+  default_model_profile_id?: string | null;
+  role_model_profile_ids?: Record<string, string>;
+  is_default?: boolean;
+  enabled?: boolean;
+}): Promise<AgentGraph> {
+  return request<AgentGraph>("/agent-graphs", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function listSecrets(): Promise<Secret[]> {
+  return request<Secret[]>("/secrets");
+}
+
+export function createSecret(payload: { name: string; value: string }): Promise<Secret> {
+  return request<Secret>("/secrets", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function listModelProfiles(): Promise<ModelProfile[]> {
+  return request<ModelProfile[]>("/model-profiles");
+}
+
+export function createModelProfile(payload: {
+  name: string;
+  provider_type: string;
+  base_url?: string | null;
+  model: string;
+  options?: Record<string, unknown>;
+  secret_id?: string | null;
+  enabled?: boolean;
+}): Promise<ModelProfile> {
+  return request<ModelProfile>("/model-profiles", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
 }
 
 export function getModelHealth(): Promise<ModelHealth[]> {

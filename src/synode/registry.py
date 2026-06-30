@@ -49,6 +49,10 @@ class RoleRegistry:
             roles[role.name] = role
         return cls(roles)
 
+    @classmethod
+    def from_specs(cls, specs: list[RoleSpec]) -> "RoleRegistry":
+        return cls({spec.name: spec for spec in specs})
+
     def get(self, name: str) -> RoleSpec:
         try:
             return self._roles[name]
@@ -63,8 +67,10 @@ class RoleRegistry:
             {
                 "name": role.name,
                 "mission": role.mission,
+                "non_goals": role.non_goals,
                 "allowed_tools": role.allowed_tools,
                 "requires_approval_for": role.requires_approval_for,
+                "output_contract": role.output_contract,
             }
             for role in self.list()
         ]
