@@ -17,6 +17,15 @@ roles. A run stores a snapshot of the selected graph plus the selected default
 model profile and per-role profile overrides, so later role/graph edits do not
 rewrite historical runs.
 
+Agent graphs can bind worker roles to execution backends. The default backend
+is `native_langgraph`, which preserves Synode's strict graph execution. The
+optional `openhands` backend delegates that worker node to an external
+OpenHands Agent Server while Synode keeps ownership of run state, approvals,
+audit records, artifacts, and final review. Supervisor and reviewer remain
+native control-plane nodes. If a workflow selects OpenHands while
+`SYNODE_OPENHANDS_ENABLED=false` or the endpoint is unavailable, the run fails
+explicitly instead of falling back to native execution.
+
 ## Quick Start
 
 ### Docker Compose
@@ -68,6 +77,21 @@ captured stdout/stderr.
 If you store API keys in Synode DB secrets, set `SYNODE_SECRETS_KEY` before
 starting the API. Without it, secret creation and secret-backed profiles fail
 explicitly. Ollama-only local use does not require this key.
+
+To use OpenHands for a worker role in a workflow, run OpenHands separately and set:
+
+```bash
+SYNODE_OPENHANDS_ENABLED=true
+SYNODE_OPENHANDS_BASE_URL=http://127.0.0.1:3000
+SYNODE_OPENHANDS_API_MODE=agent_server
+# SYNODE_OPENHANDS_API_KEY=...
+```
+
+Synode uses OpenHands confirmation as a pause signal only. The operator still
+approves or rejects the action in Synode, and Synode records the decision in
+the normal approval/audit stream. `agent_server` targets the local OpenHands
+Agent Server API; use `cloud_v1` only when intentionally targeting the
+OpenHands Cloud V1 API.
 
 ### Observability
 

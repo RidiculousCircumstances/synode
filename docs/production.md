@@ -44,6 +44,35 @@ If a worker crashes, stale `running` runs are requeued after
 `SYNODE_WORKER_STALE_AFTER_SECONDS`. Runs in `cancelling` are finalized as
 `cancelled` after the same stale window.
 
+## Execution Backends
+
+Synode is the orchestration control plane. Agent graph worker roles execute
+through a node backend selected in the graph config. `native_langgraph` is the
+default and is the only backend that executes Synode's native role/tool loop
+directly. `openhands` delegates the selected worker node to an external
+OpenHands Agent Server and normalizes the result back into Synode
+events/artifacts. Supervisor and reviewer are native control-plane nodes and
+cannot be delegated to an external backend in this phase.
+
+Relevant settings:
+
+```bash
+SYNODE_OPENHANDS_ENABLED=false
+SYNODE_OPENHANDS_BASE_URL=http://127.0.0.1:3000
+SYNODE_OPENHANDS_API_KEY=
+SYNODE_OPENHANDS_API_MODE=agent_server
+SYNODE_OPENHANDS_TIMEOUT_SECONDS=120
+SYNODE_OPENHANDS_POLL_INTERVAL_SECONDS=1
+```
+
+OpenHands is intentionally external to the default Compose stack. If a workflow
+requires OpenHands while it is disabled or unreachable, the run fails explicitly.
+`agent_server` is the default mode for a local OpenHands Agent Server. Use
+`cloud_v1` only for the hosted OpenHands Cloud API.
+Do not rely on OpenHands' own UI confirmation as the source of authority:
+OpenHands pending actions are bridged into Synode approvals, and Synode approval
+records remain the audit source of truth.
+
 ## Sandbox
 
 Risky native tools require an explicit sandbox backend even after approval.

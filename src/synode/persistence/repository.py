@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -33,6 +34,7 @@ from synode.schemas import (
     RunMode,
     RunResponse,
     RunStatus,
+    RuntimeBackend,
     SecretResponse,
     ThreadMessageAuthorType,
     ThreadMessageResponse,
@@ -550,6 +552,9 @@ class Repository:
         await self.session.flush()
         return approval
 
+    async def get_approval(self, approval_id: str) -> ApprovalRecord | None:
+        return await self.session.get(ApprovalRecord, approval_id)
+
     async def reject_pending_approvals(self, run_id: str, decision_reason: str | None = None) -> list[ApprovalRecord]:
         result = await self.session.execute(
             select(ApprovalRecord)
@@ -921,10 +926,18 @@ class Repository:
         edges: list[dict[str, str]],
         default_model_profile_id: str | None = None,
         role_model_profile_ids: dict[str, str] | None = None,
+        role_runtime_bindings: Mapping[str, str | RuntimeBackend] | None = None,
         is_default: bool = False,
         enabled: bool = True,
     ) -> AgentGraphRecord:
-        await self._validate_graph_refs(role_ids, edges, default_model_profile_id, role_model_profile_ids or {})
+        runtime_bindings = _runtime_bindings_as_values(role_runtime_bindings or {})
+        await self._validate_graph_refs(
+            role_ids,
+            edges,
+            default_model_profile_id,
+            role_model_profile_ids or {},
+            runtime_bindings,
+        )
         if is_default:
             await self._clear_default_graphs()
         record = AgentGraphRecord(
@@ -934,6 +947,7 @@ class Repository:
             edges=edges,
             default_model_profile_id=default_model_profile_id,
             role_model_profile_ids=role_model_profile_ids or {},
+            role_runtime_bindings=runtime_bindings,
             is_default=is_default,
             enabled=enabled,
         )
@@ -974,13 +988,24 @@ class Repository:
         edges = [edge.model_dump(mode="json") if isinstance(edge, AgentGraphEdge) else edge for edge in values.get("edges", record.edges)]
         default_model_profile_id = values.get("default_model_profile_id", record.default_model_profile_id)
         role_model_profile_ids = values.get("role_model_profile_ids", record.role_model_profile_ids)
-        await self._validate_graph_refs(role_ids, edges, default_model_profile_id, role_model_profile_ids or {})
+        role_runtime_bindings = _runtime_bindings_as_values(
+            values.get("role_runtime_bindings", record.role_runtime_bindings) or {}
+        )
+        await self._validate_graph_refs(
+            role_ids,
+            edges,
+            default_model_profile_id,
+            role_model_profile_ids or {},
+            role_runtime_bindings,
+        )
         if values.get("is_default") is True:
             await self._clear_default_graphs()
         for key, value in values.items():
             if value is not None or key in {"default_model_profile_id"}:
                 if key == "edges":
                     value = edges
+                elif key == "role_runtime_bindings":
+                    value = role_runtime_bindings
                 setattr(record, key, value)
         record.updated_at = datetime.now(UTC)
         await self.session.flush()
@@ -1061,6 +1086,7 @@ class Repository:
         edges: list[dict[str, str]],
         default_model_profile_id: str | None,
         role_model_profile_ids: dict[str, str],
+        role_runtime_bindings: dict[str, str] | None = None,
     ) -> None:
         if default_model_profile_id and await self.get_model_profile(default_model_profile_id) is None:
             raise LookupError(f"model profile not found: {default_model_profile_id}")
@@ -1068,14 +1094,26 @@ class Repository:
             if await self.get_model_profile(profile_id) is None:
                 raise LookupError(f"model profile not found: {profile_id}")
         known_roles = set(role_ids)
+        role_names: set[str] = set()
         for role_id in role_ids:
-            if await self.get_agent_role(role_id) is None:
+            role = await self.get_agent_role(role_id)
+            if role is None:
                 raise LookupError(f"agent role not found: {role_id}")
+            role_names.add(role.name)
         for edge in edges:
             source = edge.get("from_role")
             target = edge.get("to_role")
             if source not in known_roles or target not in known_roles:
                 raise ValueError("agent graph edges must reference role_ids")
+        roles_by_key = {role.id: role for role in await self.list_agent_roles(enabled_only=False, limit=1000)}
+        roles_by_key.update({role.name: role for role in roles_by_key.values()})
+        for role_key, backend in (role_runtime_bindings or {}).items():
+            role = roles_by_key.get(role_key)
+            if role is None or (role_key not in known_roles and role_key not in role_names):
+                raise LookupError(f"agent role not found in selected graph: {role_key}")
+            runtime_backend = RuntimeBackend(backend)
+            if role.name in {"supervisor", "reviewer"} and runtime_backend != RuntimeBackend.NATIVE_LANGGRAPH:
+                raise ValueError("supervisor and reviewer runtime backends must be native_langgraph")
         if _has_cycle(role_ids, edges):
             raise ValueError("agent graph must be acyclic")
 
@@ -1156,6 +1194,9 @@ def to_agent_graph_response(graph: AgentGraphRecord) -> AgentGraphResponse:
         edges=[AgentGraphEdge.model_validate(edge) for edge in (graph.edges or [])],
         default_model_profile_id=graph.default_model_profile_id,
         role_model_profile_ids={str(key): str(value) for key, value in (graph.role_model_profile_ids or {}).items()},
+        role_runtime_bindings={
+            str(key): RuntimeBackend(value) for key, value in (graph.role_runtime_bindings or {}).items()
+        },
         is_default=graph.is_default,
         enabled=graph.enabled,
         created_at=graph.created_at,
@@ -1225,6 +1266,10 @@ def _has_cycle(role_ids: list[str], edges: list[dict[str, str]]) -> bool:
         return False
 
     return any(visit(role_id) for role_id in role_ids)
+
+
+def _runtime_bindings_as_values(bindings: Mapping[str, str | RuntimeBackend]) -> dict[str, str]:
+    return {str(role): RuntimeBackend(backend).value for role, backend in bindings.items() if backend}
 
 
 def _truncate_json_payload(payload: dict[str, Any], max_bytes: int) -> dict[str, Any]:

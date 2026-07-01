@@ -11,6 +11,8 @@ export type RunStatus =
 
 export type RunMode = "general" | "coding";
 
+export type RuntimeBackend = "native_langgraph" | "openhands";
+
 export type ModelProviderType = "fake" | "ollama" | "openai_compatible";
 
 export type ApprovalStatus = "pending" | "approved" | "rejected";
@@ -192,6 +194,12 @@ export interface QueueStatus {
   failed_jobs: number | null;
 }
 
+export interface ExecutionBackendStatus {
+  backend: RuntimeBackend;
+  available: boolean;
+  detail: string | null;
+}
+
 export interface RuntimeStatus {
   queue_depth: number;
   running_count: number;
@@ -200,6 +208,7 @@ export interface RuntimeStatus {
   worker_concurrency: number;
   secrets_configured: boolean;
   queue: QueueStatus;
+  execution_backends: Partial<Record<RuntimeBackend, ExecutionBackendStatus>>;
   workers: WorkerHeartbeat[];
   sandbox: SandboxStatus;
 }
@@ -282,6 +291,7 @@ export interface AgentGraph {
   edges: AgentGraphEdge[];
   default_model_profile_id: string | null;
   role_model_profile_ids: Record<string, string>;
+  role_runtime_bindings: Record<string, RuntimeBackend>;
   is_default: boolean;
   enabled: boolean;
   created_at: string;

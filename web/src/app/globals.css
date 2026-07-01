@@ -2773,6 +2773,15 @@ a {
   color: var(--muted-foreground);
 }
 
+.agent-node em {
+  display: block;
+  margin-top: 0.35rem;
+  color: var(--info);
+  font-size: 0.7rem;
+  font-style: normal;
+  text-transform: uppercase;
+}
+
 .agent-node.running {
   border-color: color-mix(in srgb, var(--info) 44%, var(--border));
   box-shadow: 0 0 0 3px var(--info-soft);

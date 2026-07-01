@@ -27,6 +27,7 @@ from synode.persistence.repository import (
     to_thread_response,
 )
 from synode.registry import RoleRegistry, RoleSpec
+from synode.runtime.execution import ExecutionBackendRegistry, build_execution_backend_registry
 from synode.runtime.graph import GraphDependencies, build_graph
 from synode.runtime.queue import (
     MissingRunQueueTransport,
@@ -44,6 +45,7 @@ from synode.schemas import (
     ApprovalStatus,
     ArtifactResponse,
     EventType,
+    ExecutionBackendStatusResponse,
     GpuMetrics,
     ModelProfileCreateRequest,
     ModelProfileResponse,
@@ -61,6 +63,7 @@ from synode.schemas import (
     RunMode,
     RunResponse,
     RunStatus,
+    RuntimeBackend,
     RuntimeStatusResponse,
     SandboxStatusResponse,
     SecretCreateRequest,
@@ -119,6 +122,7 @@ class OrchestrationService:
         tools: ToolRegistry,
         observability: Observability | None = None,
         run_queue: RunQueueTransport | None = None,
+        execution_backends: ExecutionBackendRegistry | None = None,
     ):
         self.settings = settings
         self.database = database
@@ -127,6 +131,7 @@ class OrchestrationService:
         self.tools = tools
         self.observability = observability or Observability(settings)
         self.run_queue: RunQueueTransport = run_queue or MissingRunQueueTransport()
+        self.execution_backends = execution_backends or build_execution_backend_registry(settings, database)
         self.secret_cipher = SecretCipher(settings) if settings.secrets_key else None
         self.tool_executor = ToolExecutor(database, roles, tools, settings, self.observability)
         self._run_tasks: dict[str, asyncio.Task[None]] = {}
@@ -738,9 +743,11 @@ class OrchestrationService:
         return list(reversed(selected))
 
     async def reject(self, approval_id: str, reason: str | None = None) -> None:
+        rejected_payload: dict[str, Any] = {}
         async with self.database.session() as session:
             repo = Repository(session)
             approval = await repo.decide_approval(approval_id, ApprovalStatus.REJECTED, reason)
+            rejected_payload = approval.payload or {}
             run = await repo.get_run(approval.run_id)
             if run is not None:
                 await repo.add_thread_message(
@@ -752,6 +759,19 @@ class OrchestrationService:
                     run_id=run.id,
                     metadata={"approval_id": approval.id, "status": ApprovalStatus.REJECTED.value},
                 )
+        try:
+            await self.execution_backends.reject_approval(
+                rejected_payload,
+                reason or f"Approval rejected: {approval_id}",
+            )
+        except Exception as exc:
+            log_event(
+                logger,
+                "external_runtime_reject_failed",
+                approval_id=approval_id,
+                error_class=exc.__class__.__name__,
+                error=str(exc),
+            )
         await self._mark_run_cancelled(approval.run_id, f"Approval rejected for {approval.tool_name}.")
 
     async def resume_run(self, run_id: str) -> None:
@@ -789,6 +809,7 @@ class OrchestrationService:
         return await self.get_run(run_id)
 
     async def _mark_run_cancelled(self, run_id: str, reason: str) -> None:
+        should_cancel_external = False
         async with self.database.session() as session:
             repo = Repository(session)
             run = await repo.get_run(run_id)
@@ -796,6 +817,7 @@ class OrchestrationService:
                 raise LookupError(f"run not found: {run_id}")
             if run.status in TERMINAL_RUN_STATUSES:
                 return
+            should_cancel_external = True
             await repo.reject_pending_approvals(run_id, reason)
             await repo.set_run_status(run_id, RunStatus.CANCELLED, final_answer=reason, error=reason)
             await repo.add_event(run_id, EventType.RUN_CANCELLED.value, None, {"reason": reason})
@@ -816,6 +838,9 @@ class OrchestrationService:
                 run_id=run_id,
                 metadata={"status": RunStatus.CANCELLED.value},
             )
+        if should_cancel_external:
+            with suppress(Exception):
+                await self.execution_backends.cancel_run(run_id)
 
     async def _cancellation_reason(self, run_id: str) -> str:
         reason = self._stop_reasons.pop(run_id, None)
@@ -891,6 +916,7 @@ class OrchestrationService:
             cancelling_count = await repo.count_runs(RunStatus.CANCELLING)
             stale_running_count = await repo.count_stale_running_runs(stale_before)
         queue = await self.run_queue.status()
+        execution_backends = await self.execution_backends.statuses()
         return RuntimeStatusResponse(
             queue_depth=queue_depth,
             running_count=running_count,
@@ -907,6 +933,14 @@ class OrchestrationService:
                 running_jobs=queue.running_jobs,
                 failed_jobs=queue.failed_jobs,
             ),
+            execution_backends={
+                backend: ExecutionBackendStatusResponse(
+                    backend=status.backend,
+                    available=status.available,
+                    detail=status.detail,
+                )
+                for backend, status in execution_backends.items()
+            },
             workers=[
                 WorkerHeartbeatResponse(
                     worker_id=heartbeat.worker_id,
@@ -1200,6 +1234,7 @@ class OrchestrationService:
                 edges=[edge.model_dump(mode="json") for edge in payload.edges],
                 default_model_profile_id=payload.default_model_profile_id,
                 role_model_profile_ids=payload.role_model_profile_ids,
+                role_runtime_bindings=payload.role_runtime_bindings,
                 is_default=payload.is_default,
                 enabled=payload.enabled,
             )
@@ -1316,6 +1351,14 @@ class OrchestrationService:
                 **role_model_profile_ids,
             },
         )
+        runtime_bindings = self._resolve_role_runtime_bindings(
+            roles_by_id,
+            roles_by_name,
+            graph.role_runtime_bindings or {},
+        )
+        snapshot["role_runtime_bindings"] = runtime_bindings
+        if RuntimeBackend.OPENHANDS.value in runtime_bindings.values() and not self.settings.openhands_enabled:
+            raise ValueError("agent graph requires OpenHands but SYNODE_OPENHANDS_ENABLED is false")
         profile_id = None
         if default_model_profile_id is not None:
             profile_id = default_model_profile_id
@@ -1413,6 +1456,23 @@ class OrchestrationService:
             resolved[role.name] = profile.id
         return resolved
 
+    def _resolve_role_runtime_bindings(
+        self,
+        roles_by_id: dict[str, Any],
+        roles_by_name: dict[str, Any],
+        bindings: dict[str, Any],
+    ) -> dict[str, str]:
+        resolved = {role.name: RuntimeBackend.NATIVE_LANGGRAPH.value for role in roles_by_name.values()}
+        for key, backend in bindings.items():
+            role = roles_by_id.get(key) or roles_by_name.get(key)
+            if role is None:
+                raise LookupError(f"agent role not found in selected graph: {key}")
+            runtime_backend = RuntimeBackend(backend)
+            if role.name in {RoleName.SUPERVISOR.value, RoleName.REVIEWER.value} and runtime_backend != RuntimeBackend.NATIVE_LANGGRAPH:
+                raise ValueError("supervisor and reviewer runtime backends must be native_langgraph")
+            resolved[role.name] = runtime_backend.value
+        return resolved
+
     async def _provider_for_profile(self, repo: Repository, profile: Any) -> Any:
         api_key = None
         if profile.secret_id:
@@ -1443,6 +1503,7 @@ class OrchestrationService:
             tool_executor=tool_executor,
             observability=self.observability,
             secret_cipher=self.secret_cipher,
+            execution_backends=self.execution_backends,
         )
         async with self._checkpointer() as checkpointer:
             graph = build_graph(deps, checkpointer=checkpointer)

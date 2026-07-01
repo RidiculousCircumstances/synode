@@ -70,8 +70,16 @@ export default function ObservabilityPage() {
             <MetricTile label="Cancelling" value={runtime?.cancelling_count ?? 0} />
             <MetricTile label="Stale" value={runtime?.stale_running_count ?? 0} tone={(runtime?.stale_running_count ?? 0) > 0 ? "danger" : "normal"} />
             <MetricTile label="Concurrency" value={runtime?.worker_concurrency ?? 1} />
+            <MetricTile
+              label="OpenHands"
+              value={<StatusBadge value={runtime?.execution_backends.openhands?.available ? "ready" : "disabled"} />}
+              tone={runtime?.execution_backends.openhands?.available === false ? "danger" : "normal"}
+            />
           </div>
           {runtime?.queue.detail ? <div className="muted">{runtime.queue.detail}</div> : null}
+          {runtime?.execution_backends.openhands?.detail ? (
+            <div className="muted">{runtime.execution_backends.openhands.detail}</div>
+          ) : null}
           <CompactList>
             {(runtime?.workers ?? []).map((worker) => (
               <CompactRow key={worker.worker_id} className="provider-row">

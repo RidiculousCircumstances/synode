@@ -45,6 +45,12 @@ class Settings(BaseSettings):
     run_queue_transport: Literal["procrastinate"] = "procrastinate"
     queue_database_url: str | None = None
     queue_name: str = "synode_runs"
+    openhands_enabled: bool = False
+    openhands_base_url: str | None = None
+    openhands_api_key: str | None = None
+    openhands_api_mode: Literal["agent_server", "cloud_v1"] = "agent_server"
+    openhands_timeout_seconds: float = 120.0
+    openhands_poll_interval_seconds: float = 1.0
     run_event_retention_days: int = 30
     model_delta_retention_days: int = 7
     tool_audit_retention_days: int = 30
@@ -94,6 +100,13 @@ class Settings(BaseSettings):
             raise RuntimeError("SYNODE_QUEUE_DATABASE_URL must use PostgreSQL for Procrastinate")
         if not self.queue_name.strip():
             raise RuntimeError("SYNODE_QUEUE_NAME must not be blank")
+        if self.openhands_enabled:
+            if not self.openhands_base_url or not self.openhands_base_url.strip():
+                raise RuntimeError("SYNODE_OPENHANDS_BASE_URL is required when OpenHands is enabled")
+            if self.openhands_timeout_seconds <= 0:
+                raise RuntimeError("SYNODE_OPENHANDS_TIMEOUT_SECONDS must be greater than zero")
+            if self.openhands_poll_interval_seconds <= 0:
+                raise RuntimeError("SYNODE_OPENHANDS_POLL_INTERVAL_SECONDS must be greater than zero")
         if not self.workspace_allowlist_paths:
             raise RuntimeError("SYNODE_WORKSPACE_ALLOWLIST must include at least one path")
         if self.shell_timeout_seconds <= 0:

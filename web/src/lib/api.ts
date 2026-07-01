@@ -300,6 +300,7 @@ export function createAgentGraph(payload: {
   edges?: Array<{ from_role: string; to_role: string }>;
   default_model_profile_id?: string | null;
   role_model_profile_ids?: Record<string, string>;
+  role_runtime_bindings?: Record<string, "native_langgraph" | "openhands">;
   is_default?: boolean;
   enabled?: boolean;
 }): Promise<AgentGraph> {
@@ -317,6 +318,7 @@ export function updateAgentGraph(
     edges?: Array<{ from_role: string; to_role: string }>;
     default_model_profile_id?: string | null;
     role_model_profile_ids?: Record<string, string>;
+    role_runtime_bindings?: Record<string, "native_langgraph" | "openhands">;
     is_default?: boolean;
     enabled?: boolean;
   },

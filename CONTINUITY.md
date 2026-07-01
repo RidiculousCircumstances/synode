@@ -147,6 +147,9 @@
 - Run execution dispatch now uses a Procrastinate-backed queue adapter. API
   requests enqueue `run_id` jobs after marking runs queued, workers exact-claim
   the dispatched run, and `synode db upgrade` applies the queue schema.
+- Agent graph runtime bindings are implemented so worker roles can execute
+  through `native_langgraph` or an optional external OpenHands backend while
+  Synode keeps run state, approvals, audit, artifacts, and reviewer authority.
 
 ### Now:
 - MVP backend and operator UI include DB-backed runtime configuration screens
@@ -161,6 +164,11 @@
   local operator overlay that mounts `/var/run/docker.sock`.
 - Runtime diagnostics expose worker concurrency, queue backend/status, and
   whether `SYNODE_SECRETS_KEY` is configured.
+- OpenHands remains disabled by default and external to Compose. Workflows that
+  bind a worker role to OpenHands require `SYNODE_OPENHANDS_ENABLED=true` and an
+  OpenHands base URL; otherwise run creation fails explicitly. The default HTTP
+  mode targets local OpenHands Agent Server, with hosted Cloud V1 available only
+  by explicit `SYNODE_OPENHANDS_API_MODE`.
 - Fabricator is available through `synode fabricator ...` and remains advisory:
   it creates planning/review artifacts but does not commit, push, or bypass
   Synode runtime tool policy.

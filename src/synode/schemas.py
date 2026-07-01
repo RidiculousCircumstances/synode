@@ -28,6 +28,11 @@ class RunMode(StrEnum):
     CODING = "coding"
 
 
+class RuntimeBackend(StrEnum):
+    NATIVE_LANGGRAPH = "native_langgraph"
+    OPENHANDS = "openhands"
+
+
 class ModelProviderType(StrEnum):
     FAKE = "fake"
     OLLAMA = "ollama"
@@ -267,6 +272,7 @@ class AgentGraphCreateRequest(BaseModel):
     edges: list[AgentGraphEdge] = Field(default_factory=list)
     default_model_profile_id: str | None = None
     role_model_profile_ids: dict[str, str] = Field(default_factory=dict)
+    role_runtime_bindings: dict[str, RuntimeBackend] = Field(default_factory=dict)
     is_default: bool = False
     enabled: bool = True
 
@@ -282,6 +288,7 @@ class AgentGraphUpdateRequest(BaseModel):
     edges: list[AgentGraphEdge] | None = None
     default_model_profile_id: str | None = None
     role_model_profile_ids: dict[str, str] | None = None
+    role_runtime_bindings: dict[str, RuntimeBackend] | None = None
     is_default: bool | None = None
     enabled: bool | None = None
 
@@ -293,6 +300,7 @@ class AgentGraphResponse(BaseModel):
     edges: list[AgentGraphEdge] = Field(default_factory=list)
     default_model_profile_id: str | None = None
     role_model_profile_ids: dict[str, str] = Field(default_factory=dict)
+    role_runtime_bindings: dict[str, RuntimeBackend] = Field(default_factory=dict)
     is_default: bool
     enabled: bool
     created_at: datetime
@@ -537,6 +545,12 @@ class QueueStatusResponse(BaseModel):
     failed_jobs: int | None = None
 
 
+class ExecutionBackendStatusResponse(BaseModel):
+    backend: RuntimeBackend
+    available: bool
+    detail: str | None = None
+
+
 class RuntimeStatusResponse(BaseModel):
     queue_depth: int
     running_count: int
@@ -545,6 +559,7 @@ class RuntimeStatusResponse(BaseModel):
     worker_concurrency: int
     secrets_configured: bool
     queue: QueueStatusResponse
+    execution_backends: dict[RuntimeBackend, ExecutionBackendStatusResponse] = Field(default_factory=dict)
     workers: list[WorkerHeartbeatResponse] = Field(default_factory=list)
     sandbox: SandboxStatusResponse
 

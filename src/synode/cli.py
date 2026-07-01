@@ -16,7 +16,7 @@ from synode.persistence.urls import to_sync_database_url
 from synode.runtime.queue import build_run_queue_transport
 from synode.runtime.service import create_service
 from synode.runtime.worker import RunWorker
-from synode.schemas import RunMode
+from synode.schemas import RunMode, RuntimeBackend
 
 app = typer.Typer(no_args_is_help=True)
 db_app = typer.Typer(help="Database commands")
@@ -255,6 +255,9 @@ def runtime_status(check: bool = typer.Option(False, "--check")) -> None:
             if check and not status.workers:
                 raise typer.Exit(1)
             if check and not status.queue.available:
+                raise typer.Exit(1)
+            openhands = status.execution_backends.get(RuntimeBackend.OPENHANDS)
+            if check and service.settings.openhands_enabled and (openhands is None or not openhands.available):
                 raise typer.Exit(1)
             console.print_json(data=status.model_dump(mode="json"))
         finally:

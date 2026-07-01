@@ -24,8 +24,17 @@ from synode.runtime.decisions import (
     SupervisorDecision,
     VerificationPlan,
 )
+from synode.runtime.execution import ExecutionBackendRegistry, NodeExecutionInput
 from synode.runtime.state import SynodeState
-from synode.schemas import AgentOutput, EventType, RoleName, RunMode, ToolCall, ToolResult
+from synode.schemas import (
+    AgentOutput,
+    EventType,
+    RoleName,
+    RunMode,
+    RuntimeBackend,
+    ToolCall,
+    ToolResult,
+)
 from synode.security import SecretCipher
 from synode.tools.base import ToolExecutor
 
@@ -47,6 +56,7 @@ class GraphDependencies:
     tool_executor: ToolExecutor
     observability: Observability
     secret_cipher: SecretCipher | None = None
+    execution_backends: ExecutionBackendRegistry | None = None
 
 
 def build_graph(deps: GraphDependencies, checkpointer: Any | None = None) -> Any:
@@ -55,6 +65,7 @@ def build_graph(deps: GraphDependencies, checkpointer: Any | None = None) -> Any
     builder.add_node("supervisor", _observed_node("supervisor", deps, _supervisor_node(deps)))
     builder.add_node("graph_workers", _observed_node("graph_workers", deps, _graph_workers_node(deps)))
     builder.add_node("coding_inspect", _observed_node("coding_inspect", deps, _coding_inspect_node(deps)))
+    builder.add_node("external_coder", _observed_node("external_coder", deps, _external_coder_node(deps)))
     builder.add_node(
         "coding_patch_propose",
         _observed_node("coding_patch_propose", deps, _coding_patch_propose_node(deps)),
@@ -67,6 +78,7 @@ def build_graph(deps: GraphDependencies, checkpointer: Any | None = None) -> Any
     builder.add_edge("intake", "supervisor")
     builder.add_conditional_edges("supervisor", _route_after_supervisor)
     builder.add_edge("graph_workers", "reviewer")
+    builder.add_edge("external_coder", "reviewer")
     builder.add_edge("coding_inspect", "coding_patch_propose")
     builder.add_edge("coding_patch_propose", "patch_apply")
     builder.add_edge("patch_apply", "verify")
@@ -123,7 +135,7 @@ def _node_role(name: str, state: SynodeState) -> str | None:
         return RoleName.SUPERVISOR.value
     if name == "graph_workers":
         return None
-    if name in {"coding_inspect", "coding_patch_propose", "patch_apply", "verify"}:
+    if name in {"coding_inspect", "coding_patch_propose", "patch_apply", "verify", "external_coder"}:
         return RoleName.CODER.value
     if name == "reviewer":
         return RoleName.REVIEWER.value
@@ -204,6 +216,8 @@ def _supervisor_node(deps: GraphDependencies):
 
 def _route_after_supervisor(state: SynodeState) -> str:
     if state["mode"] == RunMode.CODING.value:
+        if _role_runtime_backend(state, RoleName.CODER.value) != RuntimeBackend.NATIVE_LANGGRAPH:
+            return "external_coder"
         return "coding_inspect"
     return "graph_workers"
 
@@ -234,6 +248,20 @@ def _graph_workers_node(deps: GraphDependencies):
 
 
 async def _run_worker_role(deps: GraphDependencies, state: SynodeState, role: str) -> AgentOutput:
+    backend = _role_runtime_backend(state, role)
+    if backend != RuntimeBackend.NATIVE_LANGGRAPH:
+        if deps.execution_backends is None:
+            raise RuntimeError("execution backend registry is not configured")
+        output = await deps.execution_backends.execute(
+            backend,
+            _node_execution_input(state, role),
+        )
+        return AgentOutput(
+            role=output.role,
+            summary=output.summary,
+            tool_results=output.tool_results,
+            risks=output.risks,
+        )
     calls = [ToolCall.model_validate(call) for call in state.get("role_tool_calls", {}).get(role, [])]
     results = []
     for call in calls:
@@ -263,6 +291,24 @@ async def _run_worker_role(deps: GraphDependencies, state: SynodeState, role: st
         tool_results=results,
         risks=[result.error for result in results if result.error],
     )
+
+
+def _external_coder_node(deps: GraphDependencies):
+    async def node(state: SynodeState) -> SynodeState:
+        output = await _run_worker_role(deps, state, RoleName.CODER.value)
+        artifact = {
+            "role": output.role,
+            "summary": output.summary,
+            "tool_results": [result.model_dump(mode="json") for result in output.tool_results],
+            "risks": output.risks,
+            "runtime_backend": _role_runtime_backend(state, RoleName.CODER.value).value,
+        }
+        async with deps.database.session() as session:
+            repo = Repository(session)
+            await repo.add_artifact(state["run_id"], "external_coder_output", artifact)
+        return {"worker_outputs": [output.model_dump(mode="json")]}
+
+    return node
 
 
 def _coding_inspect_node(deps: GraphDependencies):
@@ -739,6 +785,32 @@ def _worker_role_catalog(deps: GraphDependencies, state: SynodeState | dict[str,
             }
         )
     return roles
+
+
+def _role_runtime_backend(state: SynodeState | dict[str, Any], role: str) -> RuntimeBackend:
+    snapshot = state.get("agent_graph_snapshot") or {}
+    bindings = snapshot.get("role_runtime_bindings", {})
+    if not isinstance(bindings, dict):
+        return RuntimeBackend.NATIVE_LANGGRAPH
+    return RuntimeBackend(str(bindings.get(role) or RuntimeBackend.NATIVE_LANGGRAPH.value))
+
+
+def _node_execution_input(state: SynodeState, role: str) -> NodeExecutionInput:
+    return NodeExecutionInput(
+        run_id=state["run_id"],
+        thread_id=state["thread_id"],
+        role=role,
+        task=state["task"],
+        workspace=state.get("workspace"),
+        mode=state["mode"],
+        conversation_context=state.get("conversation_context", []),
+        previous_worker_outputs=state.get("worker_outputs", []),
+        agent_graph_snapshot=state.get("agent_graph_snapshot", {}),
+        model_provider=state.get("model_provider"),
+        default_model_profile_id=state.get("default_model_profile_id"),
+        role_model_profile_ids=state.get("role_model_profile_ids", {}),
+        observability_trace_id=state.get("observability_trace_id"),
+    )
 
 
 async def _provider_for_role(

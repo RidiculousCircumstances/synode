@@ -27,7 +27,7 @@ import {
   updateAgent,
   updateAgentGraph,
 } from "@/lib/api";
-import type { AgentGraph as AgentGraphConfig, AgentSpec } from "@/types";
+import type { AgentGraph as AgentGraphConfig, AgentSpec, RuntimeBackend } from "@/types";
 
 type RoleFormMode = "create" | "edit";
 type GraphFormMode = "create" | "edit" | "clone";
@@ -53,6 +53,7 @@ type GraphFormState = {
   workerOrder: string[];
   defaultProfileId: string;
   roleProfileIds: Record<string, string>;
+  roleRuntimeBindings: Record<string, RuntimeBackend>;
   isDefault: boolean;
   enabled: boolean;
 };
@@ -76,6 +77,7 @@ const EMPTY_GRAPH_FORM: GraphFormState = {
   workerOrder: [],
   defaultProfileId: "",
   roleProfileIds: {},
+  roleRuntimeBindings: {},
   isDefault: false,
   enabled: true,
 };
@@ -120,6 +122,7 @@ export default function WorkflowConfigPage() {
   const graphValidation = validateGraphForm(graphForm, agents);
   const graphEdges = buildGraphEdges(graphForm, agents);
   const graphRoleModelBindings = compactBindings(graphForm.roleProfileIds);
+  const graphRoleRuntimeBindings = compactRuntimeBindings(graphForm.roleRuntimeBindings, graphForm.workerOrder);
 
   const closeRoleDialog = () => {
     setRoleDialogOpen(false);
@@ -212,6 +215,7 @@ export default function WorkflowConfigPage() {
         edges: graphEdges,
         default_model_profile_id: graphForm.defaultProfileId || null,
         role_model_profile_ids: graphRoleModelBindings,
+        role_runtime_bindings: graphRoleRuntimeBindings,
         is_default: graphForm.isDefault,
         enabled: graphForm.enabled,
       };
@@ -287,12 +291,13 @@ export default function WorkflowConfigPage() {
           <CompactTableShell minWidth="68rem" maxHeight="64vh">
             <CompactTable>
               <colgroup>
-                <col style={{ width: "22%" }} />
+                <col style={{ width: "20%" }} />
                 <col style={{ width: "10%" }} />
-                <col style={{ width: "24%" }} />
+                <col style={{ width: "22%" }} />
                 <col style={{ width: "14%" }} />
                 <col style={{ width: "10%" }} />
-                <col style={{ width: "20%" }} />
+                <col style={{ width: "10%" }} />
+                <col style={{ width: "14%" }} />
               </colgroup>
               <thead>
                 <tr>
@@ -301,6 +306,7 @@ export default function WorkflowConfigPage() {
                   <th>Path</th>
                   <th>Profile</th>
                   <th>Overrides</th>
+                  <th>Runtime</th>
                   <th>Actions</th>
                 </tr>
               </thead>
@@ -329,6 +335,9 @@ export default function WorkflowConfigPage() {
                       </span>
                     </td>
                     <td>{Object.keys(graph.role_model_profile_ids).length}</td>
+                    <td>
+                      <span className="table-truncate">{runtimeSummary(graph.role_runtime_bindings)}</span>
+                    </td>
                     <td>
                       <div className="row-actions">
                         <button type="button" className="secondary-button compact-control" onClick={() => openEditGraphDialog(graph)}>
@@ -602,7 +611,7 @@ export default function WorkflowConfigPage() {
               <div className="graph-binding-grid">
                 {graphForm.roleIds.map((roleId) => (
                   <label className="field" key={roleId}>
-                    <span>{roleNameById.get(roleId) ?? roleId.slice(0, 8)}</span>
+                    <span>{roleNameById.get(roleId) ?? roleId.slice(0, 8)} model</span>
                     <select
                       value={graphForm.roleProfileIds[roleId] ?? ""}
                       onChange={(event) =>
@@ -621,6 +630,28 @@ export default function WorkflowConfigPage() {
                           {profile.name}
                         </option>
                       ))}
+                    </select>
+                  </label>
+                ))}
+              </div>
+              <div className="graph-binding-grid">
+                {graphForm.workerOrder.map((roleId) => (
+                  <label className="field" key={`${roleId}-runtime`}>
+                    <span>{roleNameById.get(roleId) ?? roleId.slice(0, 8)} runtime</span>
+                    <select
+                      value={graphForm.roleRuntimeBindings[roleId] ?? "native_langgraph"}
+                      onChange={(event) =>
+                        setGraphForm({
+                          ...graphForm,
+                          roleRuntimeBindings: {
+                            ...graphForm.roleRuntimeBindings,
+                            [roleId]: event.target.value as RuntimeBackend,
+                          },
+                        })
+                      }
+                    >
+                      <option value="native_langgraph">native LangGraph</option>
+                      <option value="openhands">OpenHands</option>
                     </select>
                   </label>
                 ))}
@@ -684,6 +715,7 @@ function applyTemplate(form: GraphFormState, templateId: GraphTemplateId, agents
     roleIds,
     workerOrder,
     roleProfileIds: retainBindings(form.roleProfileIds, roleIds),
+    roleRuntimeBindings: retainRuntimeBindings(form.roleRuntimeBindings, workerOrder),
   };
 }
 
@@ -701,6 +733,7 @@ function graphToForm(graph: AgentGraphConfig, agents: AgentSpec[], mode: "edit" 
     workerOrder,
     defaultProfileId: graph.default_model_profile_id ?? "",
     roleProfileIds: graph.role_model_profile_ids,
+    roleRuntimeBindings: retainRuntimeBindings(runtimeBindingsToRoleIds(graph.role_runtime_bindings, agents), workerOrder),
     isDefault: mode === "edit" ? graph.is_default : false,
     enabled: graph.enabled,
   };
@@ -718,6 +751,7 @@ function updateWorkers(form: GraphFormState, select: HTMLSelectElement, agents: 
     roleIds,
     workerOrder,
     roleProfileIds: retainBindings(form.roleProfileIds, roleIds),
+    roleRuntimeBindings: retainRuntimeBindings(form.roleRuntimeBindings, workerOrder),
   };
 }
 
@@ -754,9 +788,37 @@ function compactBindings(bindings: Record<string, string>) {
   return Object.fromEntries(Object.entries(bindings).filter(([, profileId]) => Boolean(profileId)));
 }
 
+function compactRuntimeBindings(bindings: Record<string, RuntimeBackend>, allowedRoleIds: string[]) {
+  const allowed = new Set(allowedRoleIds);
+  return Object.fromEntries(
+    Object.entries(bindings).filter(([roleId, backend]) => allowed.has(roleId) && backend && backend !== "native_langgraph"),
+  );
+}
+
 function retainBindings(bindings: Record<string, string>, roleIds: string[]) {
   const allowed = new Set(roleIds);
   return Object.fromEntries(Object.entries(bindings).filter(([roleId]) => allowed.has(roleId)));
+}
+
+function retainRuntimeBindings(bindings: Record<string, RuntimeBackend>, roleIds: string[]) {
+  const allowed = new Set(roleIds);
+  return Object.fromEntries(Object.entries(bindings).filter(([roleId]) => allowed.has(roleId)));
+}
+
+function runtimeBindingsToRoleIds(bindings: Record<string, RuntimeBackend>, agents: AgentSpec[]) {
+  const roleByName = new Map(agents.map((agent) => [agent.name, agent.id]));
+  const roleIds = new Set(agents.map((agent) => agent.id));
+  return Object.fromEntries(
+    Object.entries(bindings).flatMap(([roleKey, backend]) => {
+      const roleId = roleIds.has(roleKey) ? roleKey : roleByName.get(roleKey);
+      return roleId ? [[roleId, backend]] : [];
+    }),
+  );
+}
+
+function runtimeSummary(bindings: Record<string, RuntimeBackend>) {
+  const external = Object.values(bindings).filter((backend) => backend !== "native_langgraph").length;
+  return external ? `${external} external` : "native";
 }
 
 function splitComma(value: string) {

@@ -59,6 +59,7 @@ function buildGraphModel(
   const selected = new Set<string>();
   const statuses = new Map<string, string>();
   const labels = new Map(agents.map((agent) => [agent.name, agent.mission]));
+  const runtimeBindings = runtimeBindingsForRun(run);
   if (run) {
     selected.add("supervisor");
     selected.add("reviewer");
@@ -92,6 +93,7 @@ function buildGraphModel(
         <div>
           <strong>{role}</strong>
           <span>{labels.get(role) ?? "system role"}</span>
+          <em>{runtimeBindings[role] === "openhands" ? "OpenHands" : "native"}</em>
         </div>
       ),
     },
@@ -104,4 +106,15 @@ function buildGraphModel(
     }
   }
   return { nodes, edges };
+}
+
+function runtimeBindingsForRun(run: Run | null): Record<string, string> {
+  const snapshot = run?.agent_graph_snapshot ?? {};
+  const bindings = snapshot["role_runtime_bindings"];
+  if (!bindings || typeof bindings !== "object" || Array.isArray(bindings)) {
+    return {};
+  }
+  return Object.fromEntries(
+    Object.entries(bindings).filter(([, value]) => typeof value === "string"),
+  ) as Record<string, string>;
 }

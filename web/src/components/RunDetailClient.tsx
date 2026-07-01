@@ -586,6 +586,11 @@ function MetricsTab({
           <MetricTile label="Running" value={runtime?.running_count ?? 0} />
           <MetricTile label="Cancelling" value={runtime?.cancelling_count ?? 0} />
           <MetricTile label="Stale" value={runtime?.stale_running_count ?? 0} tone={(runtime?.stale_running_count ?? 0) > 0 ? "danger" : "normal"} />
+          <MetricTile
+            label="OpenHands"
+            value={<StatusBadge value={runtime?.execution_backends.openhands?.available ? "ready" : "disabled"} />}
+            tone={runtime?.execution_backends.openhands?.available === false ? "danger" : "normal"}
+          />
         </div>
         <CompactList>
           {(runtime?.workers ?? []).map((worker) => (

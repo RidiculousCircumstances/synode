@@ -612,6 +612,7 @@ function agentGraphsFixture() {
       ],
       default_model_profile_id: "profile-ollama",
       role_model_profile_ids: {},
+      role_runtime_bindings: {},
       is_default: true,
       enabled: true,
       created_at: now,
@@ -927,6 +928,18 @@ function runtimeFixture() {
       pending_jobs: 1,
       running_jobs: 1,
       failed_jobs: 0,
+    },
+    execution_backends: {
+      native_langgraph: {
+        backend: "native_langgraph",
+        available: true,
+        detail: "native LangGraph backend is available",
+      },
+      openhands: {
+        backend: "openhands",
+        available: false,
+        detail: "OpenHands backend is disabled",
+      },
     },
     workers: [
       {

@@ -251,6 +251,9 @@ class AgentGraphRecord(Base):
     role_model_profile_ids: Mapped[dict[str, str]] = mapped_column(
         JsonType().with_variant(JSONB, "postgresql"), default=dict
     )
+    role_runtime_bindings: Mapped[dict[str, str]] = mapped_column(
+        JsonType().with_variant(JSONB, "postgresql"), default=dict
+    )
     is_default: Mapped[bool] = mapped_column(Boolean(), default=False, nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean(), default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

@@ -149,6 +149,8 @@ async def test_api_queues_runs_and_exposes_runtime_status(
     assert runtime["queue_depth"] == 1
     assert runtime["queue"]["backend"] == "in_memory"
     assert runtime["queue"]["available"] is True
+    assert runtime["execution_backends"]["native_langgraph"]["available"] is True
+    assert runtime["execution_backends"]["openhands"]["available"] is False
     assert runtime["worker_concurrency"] == service.settings.worker_concurrency
     assert runtime["secrets_configured"] is False
     assert runtime["sandbox"]["available"] is True
