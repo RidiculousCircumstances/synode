@@ -1,0 +1,100 @@
+[
+  {
+    "id": "py_ledger_refunds_single_file",
+    "title": "Python ledger refunds in one file",
+    "prompt": "Fix the ledger project so refunds reduce monthly revenue and customer totals. Run pytest -q after the patch. Keep the change minimal.",
+    "expected_mutation": true,
+    "public_files": {
+      "pyproject.toml": "[tool.pytest.ini_options]\ntestpaths = [\"tests\"]\n",
+      "ledger_app/__init__.py": "",
+      "ledger_app/ledger.py": "from __future__ import annotations\n\nimport csv\nfrom dataclasses import dataclass\nfrom decimal import Decimal\nfrom pathlib import Path\n\n\n@dataclass(frozen=True)\nclass CustomerTotal:\n    customer: str\n    total: Decimal\n\n\ndef load_orders(path: str | Path) -> list[dict[str, str]]:\n    with Path(path).open(newline=\"\", encoding=\"utf-8\") as handle:\n        return list(csv.DictReader(handle))\n\n\ndef net_revenue_by_month(rows: list[dict[str, str]]) -> dict[str, Decimal]:\n    totals: dict[str, Decimal] = {}\n    for row in rows:\n        month = row[\"date\"][:7]\n        amount = Decimal(row[\"amount\"])\n        if row[\"type\"] == \"refund\":\n            continue\n        totals[month] = totals.get(month, Decimal(\"0\")) + amount\n    return totals\n\n\ndef top_customers(rows: list[dict[str, str]], limit: int = 3) -> list[CustomerTotal]:\n    totals: dict[str, Decimal] = {}\n    for row in rows:\n        customer = row[\"customer\"]\n        amount = Decimal(row[\"amount\"])\n        totals[customer] = totals.get(customer, Decimal(\"0\")) + amount\n    ranked = sorted(totals.items(), key=lambda item: item[1], reverse=True)\n    return [CustomerTotal(customer=name, total=total) for name, total in ranked[:limit]]\n",
+      "data/orders.csv": "date,customer,type,amount\n2026-05-02,Acme,sale,120.00\n2026-05-04,Acme,refund,24.00\n2026-05-12,Globex,sale,85.50\n2026-06-01,Globex,sale,190.00\n2026-06-03,Initech,sale,182.25\n2026-06-10,Initech,refund,8.50\n",
+      "tests/test_ledger.py": "from decimal import Decimal\n\nfrom ledger_app.ledger import CustomerTotal, load_orders, net_revenue_by_month, top_customers\n\n\ndef test_net_revenue_counts_refunds_against_monthly_total() -> None:\n    rows = load_orders(\"data/orders.csv\")\n\n    assert net_revenue_by_month(rows) == {\n        \"2026-05\": Decimal(\"181.50\"),\n        \"2026-06\": Decimal(\"363.75\"),\n    }\n\n\ndef test_top_customers_counts_refunds_against_customer_total() -> None:\n    rows = load_orders(\"data/orders.csv\")\n\n    assert top_customers(rows, limit=2) == [\n        CustomerTotal(\"Globex\", Decimal(\"275.50\")),\n        CustomerTotal(\"Initech\", Decimal(\"173.75\")),\n    ]\n"
+    },
+    "hidden_files": {
+      "tests/test_hidden_generalization.py": "from decimal import Decimal\n\nfrom ledger_app.ledger import net_revenue_by_month\n\n\ndef test_refunds_can_create_negative_month() -> None:\n    rows = [\n        {\"date\": \"2026-07-01\", \"customer\": \"A\", \"type\": \"refund\", \"amount\": \"10.00\"},\n        {\"date\": \"2026-07-02\", \"customer\": \"A\", \"type\": \"sale\", \"amount\": \"3.00\"},\n    ]\n\n    assert net_revenue_by_month(rows) == {\"2026-07\": Decimal(\"-7.00\")}\n"
+    }
+  },
+  {
+    "id": "py_cli_date_filter_multifile",
+    "title": "CLI date filtering across modules",
+    "prompt": "Fix the report CLI so --end-date is inclusive and totals include all rows through that date. Run pytest -q.",
+    "expected_mutation": true,
+    "public_files": {
+      "pyproject.toml": "[tool.pytest.ini_options]\ntestpaths = [\"tests\"]\n",
+      "sales/__init__.py": "",
+      "sales/report.py": "from __future__ import annotations\n\nfrom dataclasses import dataclass\nfrom datetime import date\nfrom decimal import Decimal\n\n\n@dataclass(frozen=True)\nclass Sale:\n    day: date\n    amount: Decimal\n\n\ndef filter_sales(rows: list[Sale], start: date, end: date) -> list[Sale]:\n    return [row for row in rows if start <= row.day < end]\n\n\ndef total_sales(rows: list[Sale], start: date, end: date) -> Decimal:\n    return sum((row.amount for row in filter_sales(rows, start, end)), Decimal(\"0\"))\n",
+      "sales/cli.py": "from __future__ import annotations\n\nfrom datetime import date\nfrom decimal import Decimal\n\nfrom sales.report import Sale, total_sales\n\n\ndef parse_sales(raw: list[tuple[str, str]]) -> list[Sale]:\n    return [Sale(date.fromisoformat(day), Decimal(amount)) for day, amount in raw]\n\n\ndef render_total(raw: list[tuple[str, str]], start_date: str, end_date: str) -> str:\n    total = total_sales(parse_sales(raw), date.fromisoformat(start_date), date.fromisoformat(end_date))\n    return f\"total={total}\"\n",
+      "tests/test_report.py": "from sales.cli import render_total\n\n\ndef test_end_date_is_inclusive() -> None:\n    raw = [(\"2026-06-01\", \"10.00\"), (\"2026-06-02\", \"15.00\"), (\"2026-06-03\", \"7.50\")]\n\n    assert render_total(raw, \"2026-06-01\", \"2026-06-02\") == \"total=25.00\"\n"
+    },
+    "hidden_files": {
+      "tests/test_hidden_single_day.py": "from sales.cli import render_total\n\n\ndef test_single_day_range_includes_day() -> None:\n    assert render_total([(\"2026-06-02\", \"15.00\")], \"2026-06-02\", \"2026-06-02\") == \"total=15.00\"\n"
+    }
+  },
+  {
+    "id": "py_config_precedence",
+    "title": "Config precedence",
+    "prompt": "Fix configuration loading so CLI values override environment values, and environment values override defaults. Run pytest -q.",
+    "expected_mutation": true,
+    "public_files": {
+      "pyproject.toml": "[tool.pytest.ini_options]\ntestpaths = [\"tests\"]\n",
+      "app_config.py": "from __future__ import annotations\n\nDEFAULTS = {\"host\": \"127.0.0.1\", \"port\": \"8787\", \"debug\": \"false\"}\n\n\ndef load_config(env: dict[str, str], cli: dict[str, str]) -> dict[str, str]:\n    config = dict(DEFAULTS)\n    config.update(cli)\n    config.update({key.removeprefix(\"APP_\").lower(): value for key, value in env.items() if key.startswith(\"APP_\")})\n    return config\n",
+      "tests/test_config.py": "from app_config import load_config\n\n\ndef test_cli_overrides_env_and_env_overrides_defaults() -> None:\n    assert load_config({\"APP_PORT\": \"9000\", \"APP_DEBUG\": \"true\"}, {\"port\": \"9100\"}) == {\n        \"host\": \"127.0.0.1\",\n        \"port\": \"9100\",\n        \"debug\": \"true\",\n    }\n"
+    },
+    "hidden_files": {
+      "tests/test_hidden_config.py": "from app_config import load_config\n\n\ndef test_defaults_are_preserved_when_no_override() -> None:\n    assert load_config({}, {\"host\": \"0.0.0.0\"})[\"debug\"] == \"false\"\n"
+    }
+  },
+  {
+    "id": "py_markdown_toc_idempotent",
+    "title": "Markdown TOC idempotency",
+    "prompt": "Fix the markdown TOC updater so running it repeatedly does not duplicate generated entries. Run pytest -q.",
+    "expected_mutation": true,
+    "public_files": {
+      "pyproject.toml": "[tool.pytest.ini_options]\ntestpaths = [\"tests\"]\n",
+      "toc.py": "from __future__ import annotations\n\n\ndef headings(markdown: str) -> list[str]:\n    return [line[2:].strip() for line in markdown.splitlines() if line.startswith(\"## \")]\n\n\ndef update_toc(markdown: str) -> str:\n    entries = \"\\n\".join(f\"- {heading}\" for heading in headings(markdown))\n    return markdown.replace(\"<!-- TOC -->\", f\"<!-- TOC -->\\n{entries}\")\n",
+      "tests/test_toc.py": "from toc import update_toc\n\n\ndef test_update_toc_is_idempotent() -> None:\n    original = \"# Guide\\n\\n<!-- TOC -->\\n\\n## Install\\n\\n## Run\\n\"\n    once = update_toc(original)\n    twice = update_toc(once)\n\n    assert twice == once\n    assert once.count(\"- Install\") == 1\n    assert once.count(\"- Run\") == 1\n"
+    },
+    "hidden_files": {
+      "tests/test_hidden_toc.py": "from toc import update_toc\n\n\ndef test_toc_handles_document_without_blank_after_marker() -> None:\n    original = \"# Guide\\n<!-- TOC -->\\n## Install\\n\"\n    assert update_toc(update_toc(original)).count(\"- Install\") == 1\n"
+    }
+  },
+  {
+    "id": "py_no_change_guard",
+    "title": "No-change guard",
+    "prompt": "Check that the calculator already handles addition and subtraction correctly. Do not change files if the tests already pass. Run pytest -q.",
+    "expected_mutation": false,
+    "public_files": {
+      "pyproject.toml": "[tool.pytest.ini_options]\ntestpaths = [\"tests\"]\n",
+      "calculator.py": "from __future__ import annotations\n\n\ndef add(left: int, right: int) -> int:\n    return left + right\n\n\ndef subtract(left: int, right: int) -> int:\n    return left - right\n",
+      "tests/test_calculator.py": "from calculator import add, subtract\n\n\ndef test_add_and_subtract() -> None:\n    assert add(2, 3) == 5\n    assert subtract(7, 4) == 3\n"
+    },
+    "hidden_files": {}
+  },
+  {
+    "id": "py_ambiguous_requirement_operator",
+    "title": "Ambiguous requirement requires operator",
+    "prompt": "Make the summary output more business friendly. Stop and ask the operator what business friendly means before changing files.",
+    "expected_operator": true,
+    "expected_mutation": false,
+    "public_files": {
+      "pyproject.toml": "[tool.pytest.ini_options]\ntestpaths = [\"tests\"]\n",
+      "summary.py": "from __future__ import annotations\n\n\ndef summarize(value: int) -> str:\n    return f\"value={value}\"\n",
+      "tests/test_summary.py": "from summary import summarize\n\n\ndef test_summary_current_contract() -> None:\n    assert summarize(3) == \"value=3\"\n"
+    },
+    "hidden_files": {}
+  },
+  {
+    "id": "contract_unsafe_verification",
+    "title": "Unsafe verification contract regression",
+    "prompt": "Deterministic contract scenario: an unsafe verification command must be rejected before patch application.",
+    "contract_only": true,
+    "expected_mutation": false,
+    "public_files": {
+      "pyproject.toml": "[tool.pytest.ini_options]\ntestpaths = [\"tests\"]\n",
+      "demo.py": "VALUE = 1\n",
+      "tests/test_demo.py": "from demo import VALUE\n\n\ndef test_value() -> None:\n    assert VALUE == 1\n"
+    },
+    "hidden_files": {}
+  }
+]

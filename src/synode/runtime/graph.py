@@ -94,9 +94,15 @@ def build_graph(deps: GraphDependencies, checkpointer: Any | None = None) -> Any
     builder.add_conditional_edges("supervisor", _route_after_supervisor)
     builder.add_edge("graph_workers", "reviewer")
     builder.add_edge("coding_inspect", "coding_patch_propose")
-    builder.add_edge("coding_patch_propose", "patch_apply")
+    builder.add_conditional_edges("coding_patch_propose", _route_after_patch_propose)
     builder.add_edge("patch_apply", "verify")
-    builder.add_conditional_edges("verify", _route_after_verify)
+    builder.add_conditional_edges(
+        "verify",
+        lambda state: _route_after_verify(
+            state,
+            repair_attempts=int(deps.tool_executor.settings.coding_repair_attempts),
+        ),
+    )
     builder.add_conditional_edges("coding_patch_repair", _route_after_patch_repair)
     builder.add_edge("reviewer", "synthesizer")
     builder.add_edge("synthesizer", END)
@@ -286,22 +292,32 @@ def _route_after_supervisor(state: SynodeState) -> str:
     return "graph_workers"
 
 
-def _route_after_verify(state: SynodeState) -> str:
+def _route_after_verify(state: SynodeState, *, repair_attempts: int = 2) -> str:
     verification = state.get("verification_result") or {}
     if (
         state.get("mode") == RunMode.CODING.value
         and state.get("model_provider") != "fake"
         and verification.get("ok") is False
         and not verification.get("skipped")
-        and int(state.get("coding_repair_attempts") or 0) < 1
+        and int(state.get("coding_repair_attempts") or 0) < max(0, repair_attempts)
     ):
         return "coding_patch_repair"
     return "reviewer"
 
 
+def _route_after_patch_propose(state: SynodeState) -> str:
+    if state.get("patch_repair_error") or state.get("coding_failure_category") == "needs_operator":
+        return "reviewer"
+    if state.get("coding_action") == "no_change":
+        return "verify"
+    return "patch_apply"
+
+
 def _route_after_patch_repair(state: SynodeState) -> str:
     if state.get("patch_repair_error"):
         return "reviewer"
+    if state.get("coding_action") == "no_change":
+        return "verify"
     return "patch_apply"
 
 
@@ -469,7 +485,14 @@ def _coding_patch_propose_node(deps: GraphDependencies, *, repair_verification: 
                 repo = Repository(session)
                 existing = await repo.get_latest_artifact(state["run_id"], "patch_proposal")
                 if existing is not None:
-                    return {"patch_proposal": existing.content}
+                    existing_proposal = PatchProposal.model_validate(existing.content)
+                    existing_result: SynodeState = {
+                        "patch_proposal": existing.content,
+                        "coding_action": existing_proposal.action,
+                    }
+                    if existing_proposal.action == "no_change":
+                        existing_result["patch_results"] = [_no_change_patch_result()]
+                    return existing_result
 
         file_context = await _read_relevant_files(deps, state)
         provider = await _provider_for_role(deps, state, RoleName.CODER.value)
@@ -495,11 +518,27 @@ def _coding_patch_propose_node(deps: GraphDependencies, *, repair_verification: 
                     "current_diff": _compact_tool_result(current_diff),
                 }
             )
+        allowed_commands = _verification_command_catalog(state, state.get("coding_inspection", {}))
+        context_packet = _build_coding_context_packet(
+            deps,
+            state,
+            file_context=file_context,
+            allowed_commands=allowed_commands,
+            repair_verification=repair_verification,
+            extra_context=context,
+        )
+        async with deps.database.session() as session:
+            repo = Repository(session)
+            await repo.add_artifact(state["run_id"], "coding_context_packet", context_packet)
+        context = {"coding_context_packet": context_packet}
         if state["model_provider"] == "fake" or provider.provider.name == "fake":
             context["fake_patch_proposal"] = _fake_patch_proposal(file_context)
         proposal = None
         validation_errors: list[str] = []
-        for attempt in range(2):
+        candidates: list[dict[str, Any]] = []
+        candidate_models: list[tuple[PatchProposal, list[str], dict[str, Any]]] = []
+        max_candidates = max(1, int(deps.tool_executor.settings.coding_patch_candidates))
+        for attempt in range(max_candidates):
             proposal_context = dict(context)
             if validation_errors:
                 proposal_context["previous_patch_validation_errors"] = validation_errors
@@ -521,11 +560,33 @@ def _coding_patch_propose_node(deps: GraphDependencies, *, repair_verification: 
                 ),
             )
             proposal = _normalize_patch_proposal(proposal, file_context)
-            validation_errors = _patch_proposal_validation_errors(proposal, file_context)
-            if not validation_errors:
-                break
+            validation_errors = _patch_proposal_validation_errors(
+                proposal,
+                file_context,
+                allowed_verification_commands=allowed_commands,
+            )
+            candidates.append(
+                {
+                    "attempt": attempt + 1,
+                    "proposal": proposal.model_dump(mode="json"),
+                    "validation_errors": validation_errors,
+                    "score": _score_patch_proposal(proposal, validation_errors),
+                }
+            )
+            candidate_models.append((proposal, validation_errors, _score_patch_proposal(proposal, validation_errors)))
+        valid_candidates = [
+            (candidate, errors, score)
+            for candidate, errors, score in candidate_models
+            if not errors
+        ]
+        if valid_candidates:
+            proposal, validation_errors, _score = max(
+                valid_candidates,
+                key=lambda item: (int(item[2]["score"]), -int(item[2]["changed_bytes"])),
+            )
         if proposal is None or validation_errors:
             if repair_verification:
+                category = _failure_category_from_validation_errors(validation_errors)
                 error = f"patch repair proposal validation failed: {validation_errors}"
                 async with deps.database.session() as session:
                     repo = Repository(session)
@@ -538,19 +599,77 @@ def _coding_patch_propose_node(deps: GraphDependencies, *, repair_verification: 
                             "proposal": proposal.model_dump(mode="json") if proposal else None,
                         },
                     )
+                    await repo.add_artifact(state["run_id"], "patch_candidates", {"candidates": candidates})
                 return {
                     "coding_repair_attempts": int(state.get("coding_repair_attempts") or 0) + 1,
+                    "coding_failure_category": category,
+                    "patch_candidates": candidates,
                     "patch_repair_error": error,
                 }
-            raise ValueError(f"patch proposal validation failed: {validation_errors}")
+            category = _failure_category_from_validation_errors(validation_errors)
+            async with deps.database.session() as session:
+                repo = Repository(session)
+                await repo.add_artifact(state["run_id"], "patch_candidates", {"candidates": candidates})
+                await repo.add_artifact(
+                    state["run_id"],
+                    "patch_repair_error",
+                    {
+                        "error": f"patch proposal validation failed [{category}]: {validation_errors}",
+                        "validation_errors": validation_errors,
+                        "proposal": proposal.model_dump(mode="json") if proposal else None,
+                    },
+                )
+            return {
+                "coding_failure_category": category if category != "patch_invalid" else "no_valid_candidate",
+                "patch_candidates": candidates,
+                "patch_repair_error": f"patch proposal validation failed [{category}]: {validation_errors}",
+            }
+        if proposal.action == "needs_operator":
+            response = _request_operator(
+                state,
+                kind=OperatorRequestKind.AMBIGUITY,
+                prompt=proposal.operator_question or proposal.summary,
+                context={
+                    "task": state["task"],
+                    "workspace": state.get("workspace"),
+                    "coding_context_packet": context_packet,
+                },
+                proposed_payload={"proposal": proposal.model_dump(mode="json")},
+                node_id=_node_for_role(state, RoleName.CODER.value).get("id"),
+                role=RoleName.CODER.value,
+            )
+            if str(response.get("response_type") or "") == OperatorResponseType.REJECT.value:
+                raise OperatorRejected(str(response.get("message") or "operator rejected coding request"))
+            async with deps.database.session() as session:
+                repo = Repository(session)
+                await repo.add_artifact(
+                    state["run_id"],
+                    "coding_operator_response",
+                    {"proposal": proposal.model_dump(mode="json"), "response": response},
+                )
+                await repo.add_artifact(state["run_id"], "patch_candidates", {"candidates": candidates})
+            return {
+                "coding_action": proposal.action,
+                "coding_failure_category": "needs_operator",
+                "patch_candidates": candidates,
+                "patch_repair_error": "coding task needs operator clarification before mutation",
+            }
         artifact_kind = "patch_repair_proposal" if repair_verification else "patch_proposal"
         async with deps.database.session() as session:
             repo = Repository(session)
             await repo.add_artifact(state["run_id"], artifact_kind, proposal.model_dump(mode="json"))
-        result: SynodeState = {"patch_proposal": proposal.model_dump(mode="json")}
+            await repo.add_artifact(state["run_id"], "patch_candidates", {"candidates": candidates})
+        proposal_result: SynodeState = {
+            "coding_context_packet": context_packet,
+            "coding_action": proposal.action,
+            "patch_candidates": candidates,
+            "patch_proposal": proposal.model_dump(mode="json"),
+        }
+        if proposal.action == "no_change":
+            proposal_result["patch_results"] = [_no_change_patch_result()]
         if repair_verification:
-            result["coding_repair_attempts"] = int(state.get("coding_repair_attempts") or 0) + 1
-        return result
+            proposal_result["coding_repair_attempts"] = int(state.get("coding_repair_attempts") or 0) + 1
+        return proposal_result
 
     return node
 
@@ -584,33 +703,24 @@ def _patch_apply_node(deps: GraphDependencies):
 def _verify_node(deps: GraphDependencies):
     async def node(state: SynodeState) -> SynodeState:
         patch_results = [ToolResult.model_validate(result) for result in state.get("patch_results", [])]
-        if not patch_results or not patch_results[0].ok:
+        if state.get("coding_action") != "no_change" and (not patch_results or not patch_results[0].ok):
             return {"verification_result": {"skipped": True, "reason": "patch did not apply"}}
         proposal = PatchProposal.model_validate(state["patch_proposal"])
-        provider = await _provider_for_role(deps, state, RoleName.CODER.value)
-        plan = await _invoke_structured(
-            deps,
-            state,
-            provider,
-            VerificationPlan,
-            ModelRequest(
-                role=RoleName.CODER.value,
-                prompt="Choose focused verification commands for the applied patch.",
-                context={
-                    "task": state["task"],
-                    "conversation_context": state.get("conversation_context", []),
-                    "commands": proposal.verification_commands,
-                    "patch_proposal": proposal.model_dump(mode="json"),
-                },
-                response_schema=VerificationPlan,
-                model_options=provider.model_options or {},
-            ),
-        )
+        commands = _select_verification_commands(proposal, state)
+        async with deps.database.session() as session:
+            repo = Repository(session)
+            await repo.add_artifact(
+                state["run_id"],
+                "verification_plan",
+                VerificationPlan(commands=commands, reason="Selected from Synode verification allowlist.").model_dump(
+                    mode="json"
+                ),
+            )
         result = await _execute_native_tool(
             deps,
             state,
             RoleName.CODER.value,
-            ToolCall(name="native.verify", arguments={"commands": plan.commands}),
+            ToolCall(name="native.verify", arguments={"commands": commands}),
         )
         await _record_event(
             deps,
@@ -700,6 +810,8 @@ def _synthesizer_node(deps: GraphDependencies):
             lines.append(f"\n[patch_results]\n{json.dumps(state['patch_results'], ensure_ascii=False)}")
         if state.get("verification_result"):
             lines.append(f"\n[verification]\n{json.dumps(state['verification_result'], ensure_ascii=False)}")
+        if state.get("coding_failure_category"):
+            lines.append(f"\nFailure category: {state['coding_failure_category']}")
         if state.get("coding_repair_attempts"):
             lines.append(f"\nRepair attempts: {state['coding_repair_attempts']}")
         if state.get("patch_repair_error"):
@@ -1338,19 +1450,152 @@ def _compact_tool_result(result: ToolResult, limit: int = 3000) -> str:
     return text
 
 
+def _verification_command_catalog(
+    state: SynodeState | dict[str, Any],
+    inspection: dict[str, Any],
+) -> list[list[str]]:
+    commands: list[list[str]] = []
+    proposed = inspection.get("proposed_test_commands", []) if isinstance(inspection, dict) else []
+    for command in proposed:
+        if isinstance(command, list):
+            commands.append([str(part) for part in command])
+    task = str(state.get("task") or "").lower()
+    relevant_files = inspection.get("relevant_files", []) if isinstance(inspection, dict) else []
+    if "pytest" in task or any(_looks_like_test_path(str(path)) for path in relevant_files):
+        commands.append(["pytest", "-q"])
+        commands.append(["python", "-m", "pytest"])
+    if not commands:
+        commands.append(["pytest", "-q"])
+    return _dedupe_commands([command for command in commands if is_safe_command(command)])
+
+
+def _select_verification_commands(proposal: PatchProposal, state: SynodeState | dict[str, Any]) -> list[list[str]]:
+    packet = state.get("coding_context_packet") or {}
+    allowed = packet.get("allowed_verification_commands") if isinstance(packet, dict) else None
+    allowed_commands = [
+        [str(part) for part in command]
+        for command in allowed
+        if isinstance(command, list)
+    ] if isinstance(allowed, list) else []
+    allowed_keys = {_command_key(command) for command in allowed_commands}
+    selected = [
+        [str(part) for part in command]
+        for command in proposal.verification_commands
+        if is_safe_command([str(part) for part in command])
+        and (not allowed_keys or _command_key([str(part) for part in command]) in allowed_keys)
+    ]
+    if selected:
+        return _dedupe_commands(selected)
+    if allowed_commands:
+        return allowed_commands[:1]
+    return [["pytest", "-q"]]
+
+
+def _build_coding_context_packet(
+    deps: GraphDependencies,
+    state: SynodeState,
+    *,
+    file_context: list[dict[str, Any]],
+    allowed_commands: list[list[str]],
+    repair_verification: bool,
+    extra_context: dict[str, Any],
+) -> dict[str, Any]:
+    settings = deps.tool_executor.settings
+    files = [
+        _context_file_window(
+            path=str(item["path"]),
+            sha256=str(item["sha256"]),
+            content=str(item["content"]),
+            max_lines=max(20, int(settings.coding_file_window_lines)),
+        )
+        for item in file_context
+    ]
+    packet: dict[str, Any] = {
+        "version": 1,
+        "mode": "repair" if repair_verification else "patch",
+        "task": state["task"],
+        "conversation_context": state.get("conversation_context", [])[-4:],
+        "rules": [
+            "Return only structured output matching the schema.",
+            "Do not invent file paths; use only files in this packet.",
+            "Use exact old_text from the provided current file window.",
+            "Choose verification commands only from allowed_verification_commands.",
+            "Do not hard-code fixture-specific names, dates, totals, or test literals.",
+            "Use action=no_change when the workspace already satisfies the task.",
+            "Use action=needs_operator when requirements are ambiguous.",
+        ],
+        "allowed_verification_commands": allowed_commands,
+        "inspection": state.get("coding_inspection", {}),
+        "files": files,
+    }
+    if repair_verification:
+        packet["previous_patch_proposal"] = extra_context.get("previous_patch_proposal", {})
+        packet["previous_patch_results"] = extra_context.get("previous_patch_results", [])
+        packet["failed_verification"] = extra_context.get("failed_verification", {})
+        packet["current_diff"] = extra_context.get("current_diff", {})
+        packet["repair_attempt"] = extra_context.get("repair_attempt")
+    return _trim_context_packet(packet, max_bytes=max(4000, int(settings.coding_context_max_bytes)))
+
+
+def _context_file_window(*, path: str, sha256: str, content: str, max_lines: int) -> dict[str, Any]:
+    lines = content.splitlines()
+    truncated = len(lines) > max_lines
+    visible = lines[:max_lines]
+    return {
+        "path": path,
+        "sha256": sha256,
+        "line_start": 1,
+        "line_end": len(visible),
+        "truncated": truncated,
+        "content": "\n".join(visible) + ("\n" if content.endswith("\n") and visible else ""),
+    }
+
+
+def _trim_context_packet(packet: dict[str, Any], *, max_bytes: int) -> dict[str, Any]:
+    encoded = json.dumps(packet, ensure_ascii=False).encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return packet
+    files = packet.get("files", [])
+    if not isinstance(files, list) or not files:
+        packet["truncated"] = True
+        return packet
+    budget_per_file = max(500, max_bytes // max(1, len(files)) - 1000)
+    trimmed_files = []
+    for item in files:
+        if not isinstance(item, dict):
+            continue
+        content = str(item.get("content") or "")
+        encoded_content = content.encode("utf-8")
+        if len(encoded_content) <= budget_per_file:
+            trimmed_files.append(item)
+            continue
+        shortened = encoded_content[:budget_per_file].decode("utf-8", errors="ignore")
+        trimmed = dict(item)
+        trimmed["content"] = shortened.rstrip() + "\n...[truncated]"
+        trimmed["truncated"] = True
+        trimmed_files.append(trimmed)
+    packet = dict(packet)
+    packet["files"] = trimmed_files
+    packet["truncated"] = True
+    return packet
+
+
 def _looks_like_test_path(path: str) -> bool:
     return path.startswith("tests/") or "/tests/" in path or path.startswith("test_") or "/test_" in path
 
 
 def _patch_proposal_prompt(*, repair: bool, repair_verification: bool = False) -> str:
     base = (
-        "Propose a minimal patch for the coding task using only the provided file contents. "
+        "Use the coding_context_packet as the only repository evidence. "
+        "Choose exactly one action: patch, no_change, or needs_operator. "
+        "For patch action, propose a minimal patch using only provided file contents. "
         "Each patch old_text MUST be a non-empty exact substring from the target file and occur exactly once. "
         "Use complete function or method blocks when changing logic. "
         "new_text MUST be the full replacement for old_text, not a detached snippet. "
-        "Respect provided tests, observed_failures, and include focused verification commands. "
+        "verification_commands MUST be copied from allowed_verification_commands. "
         "Patch all root causes shown by the failing tests, not only the first failure. "
-        "Do not hard-code fixture-specific customers, names, dates, paths, or expected totals; fix the underlying implementation."
+        "Do not hard-code fixture-specific customers, names, dates, paths, or expected totals; fix the underlying implementation. "
+        "Use no_change if no mutation is needed. Use needs_operator with operator_question if the requirement is ambiguous."
     )
     if repair_verification:
         return (
@@ -1370,10 +1615,14 @@ def _patch_proposal_prompt(*, repair: bool, repair_verification: bool = False) -
 def _patch_proposal_validation_errors(
     proposal: PatchProposal,
     file_context: list[dict[str, Any]],
+    *,
+    allowed_verification_commands: list[list[str]] | None = None,
 ) -> list[str]:
     errors: list[str] = []
     content_by_path = {str(item["path"]): str(item["content"]) for item in file_context}
     sha_by_path = {str(item["path"]): str(item["sha256"]) for item in file_context}
+    if proposal.action in {"no_change", "needs_operator"} and proposal.patches:
+        errors.append(f"{proposal.action} action must not include patches")
     for index, patch in enumerate(proposal.patches):
         content = content_by_path.get(patch.path)
         if content is None:
@@ -1389,13 +1638,57 @@ def _patch_proposal_validation_errors(
             errors.append(f"patch {index} old_text must occur exactly once in {patch.path}; occurrences={occurrences}")
         if patch.old_text == patch.new_text:
             errors.append(f"patch {index} new_text is identical to old_text: {patch.path}")
+    allowed_keys = {
+        _command_key([str(part) for part in command])
+        for command in (allowed_verification_commands or [])
+    }
     for index, command in enumerate(proposal.verification_commands):
         argv = [str(part) for part in command]
         if not argv:
             errors.append(f"verification command {index} is empty")
         elif not is_safe_command(argv):
             errors.append(f"verification command {index} is unsafe: {argv}")
+        elif allowed_keys and _command_key(argv) not in allowed_keys:
+            errors.append(f"verification command {index} is not in allowed command catalog: {argv}")
     return errors
+
+
+def _score_patch_proposal(proposal: PatchProposal, validation_errors: list[str]) -> dict[str, Any]:
+    changed_bytes = sum(len(patch.new_text.encode("utf-8")) for patch in proposal.patches)
+    score = 100
+    score -= len(validation_errors) * 50
+    score -= min(30, changed_bytes // 1000)
+    if proposal.action == "needs_operator":
+        score -= 10
+    return {
+        "valid": not validation_errors,
+        "score": max(0, score),
+        "changed_bytes": changed_bytes,
+        "patch_count": len(proposal.patches),
+        "action": proposal.action,
+    }
+
+
+def _no_change_patch_result() -> dict[str, Any]:
+    return {
+        "tool_name": "native.patch_apply",
+        "ok": True,
+        "risk": "read",
+        "output": {"skipped": True, "reason": "model selected no_change"},
+        "error": None,
+        "approval_id": None,
+    }
+
+
+def _failure_category_from_validation_errors(validation_errors: list[str]) -> str:
+    joined = "\n".join(validation_errors)
+    if "verification command" in joined and ("unsafe" in joined or "not in allowed" in joined):
+        return "verification_unsafe"
+    if "operator" in joined:
+        return "needs_operator"
+    if validation_errors:
+        return "patch_invalid"
+    return "contract_invalid"
 
 
 def _normalize_patch_proposal(
@@ -1469,6 +1762,22 @@ def _dedupe(values: list[str]) -> list[str]:
     return result
 
 
+def _dedupe_commands(commands: list[list[str]]) -> list[list[str]]:
+    seen: set[tuple[str, ...]] = set()
+    result: list[list[str]] = []
+    for command in commands:
+        key = _command_key(command)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(command)
+    return result
+
+
+def _command_key(command: list[str]) -> tuple[str, ...]:
+    return tuple(str(part) for part in command)
+
+
 def _fake_patch_proposal(file_context: list[dict[str, Any]]) -> dict[str, Any]:
     target = file_context[0]
     content = str(target["content"])
@@ -1498,6 +1807,8 @@ def _precheck_review_findings(state: SynodeState) -> tuple[list[str], list[str]]
             blockers.append("verification failed")
     if state.get("patch_repair_error"):
         blockers.append(str(state["patch_repair_error"]))
+    if state.get("coding_failure_category"):
+        blockers.append(f"coding failure category: {state['coding_failure_category']}")
     return blockers, advisory
 
 

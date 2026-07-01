@@ -11,10 +11,14 @@ from synode.persistence.models import ApprovalRecord
 from synode.persistence.repository import Repository
 from synode.runtime.decisions import FilePatch, PatchProposal
 from synode.runtime.graph import (
+    _build_coding_context_packet,
     _normalize_patch_proposal,
     _patch_proposal_validation_errors,
+    _route_after_patch_propose,
     _route_after_patch_repair,
     _route_after_verify,
+    _select_verification_commands,
+    _verification_command_catalog,
 )
 from synode.runtime.worker import RunWorker
 from synode.schemas import (
@@ -66,6 +70,17 @@ def test_route_after_verify_allows_one_real_model_repair_pass() -> None:
         _route_after_verify(
             {
                 "mode": RunMode.CODING.value,
+                "model_provider": "ollama",
+                "verification_result": {"ok": False},
+                "coding_repair_attempts": 1,
+            }
+        )
+        == "coding_patch_repair"
+    )
+    assert (
+        _route_after_verify(
+            {
+                "mode": RunMode.CODING.value,
                 "model_provider": "fake",
                 "verification_result": {"ok": False},
                 "coding_repair_attempts": 0,
@@ -79,7 +94,7 @@ def test_route_after_verify_allows_one_real_model_repair_pass() -> None:
                 "mode": RunMode.CODING.value,
                 "model_provider": "ollama",
                 "verification_result": {"ok": False},
-                "coding_repair_attempts": 1,
+                "coding_repair_attempts": 2,
             }
         )
         == "reviewer"
@@ -88,7 +103,15 @@ def test_route_after_verify_allows_one_real_model_repair_pass() -> None:
 
 def test_route_after_patch_repair_falls_back_to_review_on_repair_error() -> None:
     assert _route_after_patch_repair({"patch_repair_error": "invalid repair proposal"}) == "reviewer"
+    assert _route_after_patch_repair({"coding_action": "no_change"}) == "verify"
     assert _route_after_patch_repair({"patch_proposal": {"patches": []}}) == "patch_apply"
+
+
+def test_route_after_patch_propose_handles_action_states() -> None:
+    assert _route_after_patch_propose({"coding_action": "patch"}) == "patch_apply"
+    assert _route_after_patch_propose({"coding_action": "no_change"}) == "verify"
+    assert _route_after_patch_propose({"coding_failure_category": "needs_operator"}) == "reviewer"
+    assert _route_after_patch_propose({"patch_repair_error": "invalid"}) == "reviewer"
 
 
 def test_patch_proposal_normalizer_aligns_unique_indented_old_text() -> None:
@@ -136,6 +159,84 @@ def test_patch_proposal_validation_rejects_unsafe_verification_command() -> None
     )
 
     assert "verification command 0 is unsafe: ['git', 'add', '.']" in errors
+
+
+def test_patch_proposal_validation_rejects_commands_outside_catalog() -> None:
+    content = "def total(rows):\n    return sum(row.amount for row in rows)\n"
+    proposal = PatchProposal(
+        summary="Patch total.",
+        patches=[
+            FilePatch(
+                path="ledger.py",
+                expected_sha256="1" * 64,
+                old_text="return sum(row.amount for row in rows)",
+                new_text="return sum(row.net_amount for row in rows)",
+            )
+        ],
+        verification_commands=[["python", "-m", "pytest"]],
+    )
+
+    errors = _patch_proposal_validation_errors(
+        proposal,
+        [{"path": "ledger.py", "sha256": "1" * 64, "content": content}],
+        allowed_verification_commands=[["pytest", "-q"]],
+    )
+
+    assert "verification command 0 is not in allowed command catalog: ['python', '-m', 'pytest']" in errors
+
+
+def test_no_change_patch_proposal_uses_verification_without_patches() -> None:
+    proposal = PatchProposal(
+        action="no_change",
+        summary="Already correct.",
+        verification_commands=[["pytest", "-q"]],
+    )
+
+    assert proposal.patches == []
+    assert _select_verification_commands(
+        proposal,
+        {"coding_context_packet": {"allowed_verification_commands": [["pytest", "-q"]]}},
+    ) == [["pytest", "-q"]]
+
+
+def test_verification_catalog_and_context_packet_are_compact(settings) -> None:
+    catalog = _verification_command_catalog(
+        {"task": "Run pytest after the fix."},
+        {"relevant_files": ["tests/test_demo.py"], "proposed_test_commands": [["git", "add", "."]]},
+    )
+
+    assert catalog == [["pytest", "-q"], ["python", "-m", "pytest"]]
+
+    class FakeToolExecutor:
+        def __init__(self) -> None:
+            self.settings = settings
+
+    class FakeDeps:
+        def __init__(self) -> None:
+            self.tool_executor = FakeToolExecutor()
+
+    packet = _build_coding_context_packet(
+        FakeDeps(),
+        {
+            "run_id": "run",
+            "thread_id": "thread",
+            "task": "Fix demo.",
+            "coding_inspection": {"observed_failures": ["failed"]},
+        },
+        file_context=[
+            {
+                "path": "demo.py",
+                "sha256": "1" * 64,
+                "content": "def demo():\n    return 1\n",
+            }
+        ],
+        allowed_commands=catalog,
+        repair_verification=False,
+        extra_context={},
+    )
+
+    assert packet["allowed_verification_commands"] == catalog
+    assert packet["files"][0]["path"] == "demo.py"
 
 
 async def test_run_task_completes_with_fake_data_agent(service, tmp_path: pathlib.Path) -> None:

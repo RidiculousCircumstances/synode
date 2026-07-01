@@ -22,6 +22,7 @@ make ui-lint
 make ui-build
 make ui-test
 make smoke
+make eval-coding
 make docker-smoke
 ```
 
@@ -35,6 +36,11 @@ explicit `--model-provider ollama` run.
 - Ollama is running outside Docker and reachable from the API container through
   host networking at `http://127.0.0.1:11434`.
 - `qwen2.5-coder:7b` is installed in Ollama.
+
+`make eval-coding` runs the API-driven small-model coding benchmark through
+`synode eval coding`. It expects the API/worker stack and Ollama to be running.
+Use `uv run synode eval coding --dry-run` to materialize fixtures without
+calling the API.
 
 Docker config checks:
 

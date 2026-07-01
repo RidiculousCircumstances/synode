@@ -3,7 +3,7 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from synode.schemas import ToolCall
 
@@ -89,9 +89,24 @@ class FilePatch(BaseModel):
 
 
 class PatchProposal(BaseModel):
+    action: Literal["patch", "no_change", "needs_operator"] = "patch"
     summary: str = Field(min_length=1)
-    patches: list[FilePatch] = Field(min_length=1)
-    verification_commands: list[list[str]] = Field(min_length=1)
+    patches: list[FilePatch] = Field(default_factory=list)
+    verification_commands: list[list[str]] = Field(default_factory=list)
+    operator_question: str | None = None
+
+    @model_validator(mode="after")
+    def validate_action_payload(self) -> "PatchProposal":
+        if self.action == "patch":
+            if not self.patches:
+                raise ValueError("patch action requires at least one patch")
+            if not self.verification_commands:
+                raise ValueError("patch action requires at least one verification command")
+        elif self.action == "no_change" and not self.verification_commands:
+            raise ValueError("no_change action requires at least one verification command")
+        elif self.action == "needs_operator" and not (self.operator_question or "").strip():
+            raise ValueError("needs_operator action requires operator_question")
+        return self
 
 
 class VerificationPlan(BaseModel):

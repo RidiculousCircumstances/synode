@@ -28,6 +28,7 @@ worker_app = typer.Typer(help="Worker commands")
 queue_app = typer.Typer(help="Run queue commands")
 runtime_app = typer.Typer(help="Runtime diagnostics")
 maintenance_app = typer.Typer(help="Maintenance commands")
+eval_app = typer.Typer(help="Evaluation commands")
 app.add_typer(db_app, name="db")
 app.add_typer(agents_app, name="agents")
 app.add_typer(tools_app, name="tools")
@@ -37,6 +38,7 @@ app.add_typer(worker_app, name="worker")
 app.add_typer(queue_app, name="queue")
 app.add_typer(runtime_app, name="runtime")
 app.add_typer(maintenance_app, name="maintenance")
+app.add_typer(eval_app, name="eval")
 console = Console()
 
 
@@ -292,6 +294,49 @@ def maintenance_cleanup() -> None:
             await service.close()
 
     asyncio.run(_run())
+
+
+@eval_app.command("coding")
+def eval_coding(
+    api_url: str = typer.Option("http://127.0.0.1:8787", "--api-url"),
+    model: str = typer.Option("llama3.1:8b", "--model"),
+    output_dir: Path = typer.Option(Path("var/evals/coding"), "--output-dir"),
+    tasks: str | None = typer.Option(None, "--tasks", help="Comma-separated task ids"),
+    ollama_base_url: str = typer.Option("http://127.0.0.1:11434", "--ollama-base-url"),
+    timeout_seconds: float = typer.Option(1200.0, "--timeout-seconds"),
+    list_tasks: bool = typer.Option(False, "--list-tasks"),
+    dry_run: bool = typer.Option(False, "--dry-run"),
+) -> None:
+    from synode.evals.coding import load_tasks, materialize_task, run_coding_eval
+
+    available = load_tasks()
+    selected_ids = [item.strip() for item in tasks.split(",") if item.strip()] if tasks else None
+    if list_tasks:
+        for task in available:
+            console.print(f"{task.id}\t{task.title}")
+        return
+    if dry_run:
+        root = output_dir / "dry-run"
+        selected = available if selected_ids is None else [task for task in available if task.id in selected_ids]
+        for task in selected:
+            workspace = materialize_task(task, root)
+            console.print(f"{task.id}: {workspace}")
+        return
+    report = run_coding_eval(
+        api_url=api_url,
+        model=model,
+        output_root=output_dir / datetime_stamp(),
+        task_ids=selected_ids,
+        ollama_base_url=ollama_base_url,
+        timeout_seconds=timeout_seconds,
+    )
+    console.print_json(data=report)
+
+
+def datetime_stamp() -> str:
+    from datetime import datetime
+
+    return datetime.now().strftime("%Y%m%d-%H%M%S")
 
 
 def main() -> None:

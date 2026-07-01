@@ -24,6 +24,10 @@ class SynodeState(TypedDict, total=False):
     current_role: str
     worker_outputs: Annotated[list[dict[str, Any]], operator.add]
     coding_inspection: dict[str, Any]
+    coding_context_packet: dict[str, Any]
+    coding_action: str
+    coding_failure_category: str
+    patch_candidates: list[dict[str, Any]]
     patch_proposal: dict[str, Any]
     patch_results: list[dict[str, Any]]
     verification_result: dict[str, Any]

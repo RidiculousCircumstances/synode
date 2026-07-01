@@ -2,7 +2,7 @@ PYTHON ?= python3
 UV ?= uv
 PYTEST ?= $(UV) run pytest
 
-.PHONY: dev-install test lint typecheck guardrails smoke smoke-ollama fabricator-validate fabricator-smoke db-upgrade queue-upgrade serve worker runtime-status cleanup backup restore ui-dev ui-build ui-lint ui-test docker-up docker-down docker-logs docker-smoke docker-sandbox-build docker-sandbox-up docker-observability-up docker-observability-down
+.PHONY: dev-install test lint typecheck guardrails smoke smoke-ollama eval-coding fabricator-validate fabricator-smoke db-upgrade queue-upgrade serve worker runtime-status cleanup backup restore ui-dev ui-build ui-lint ui-test docker-up docker-down docker-logs docker-smoke docker-sandbox-build docker-sandbox-up docker-observability-up docker-observability-down
 
 dev-install:
 	$(UV) sync --extra dev
@@ -31,6 +31,9 @@ smoke:
 smoke-ollama:
 	$(UV) run synode models health
 	$(UV) run synode run "Analyze sample data and summarize findings" --workspace samples --model-provider ollama
+
+eval-coding:
+	$(UV) run synode eval coding --model llama3.1:8b
 
 fabricator-validate:
 	$(UV) run synode fabricator validate

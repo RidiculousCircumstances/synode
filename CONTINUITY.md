@@ -186,6 +186,15 @@
   old-text normalization, pre-patch verification evidence, one-pass repair
   routing, unsafe verification command validation, clearer provider timeout
   errors, DB `pool_pre_ping`, and positive model-timeout config validation.
+- Native coding now uses a small-model pipeline: each patch/repair step receives
+  a compact `coding_context_packet`, patch proposals choose `patch`,
+  `no_change`, or `needs_operator`, verification commands are selected from a
+  Synode-generated allowlist, invalid candidates become typed failure
+  categories, and repair attempts are bounded by runtime settings.
+- API-driven coding eval tooling is available through `synode eval coding` and
+  `make eval-coding`. Tracked task templates live in
+  `src/synode/evals/coding_tasks.json`; runtime workspaces/reports remain under
+  ignored `var/evals`.
 
 ### Now:
 - MVP backend and operator UI include DB-backed runtime configuration screens
@@ -221,11 +230,15 @@
 - Additional local model `llama3.1:8b` is installed in Ollama for real evals.
 - The real eval fixture remains in ignored `var/workspaces/synode-real-eval`
   and is reset to its intentionally failing baseline after coding runs.
+- Small-model coding benchmark tasks cover refund accounting, inclusive date
+  filtering, config precedence, markdown TOC idempotency, no-change behavior,
+  operator ambiguity handling, and unsafe verification contract behavior.
 
 ### Next:
-- Tune real-model prompts against broader local workloads.
-- Improve native coding verification-command selection, or route coding work to
-  a stronger backend such as OpenHands/Codex/Claude Code for production use.
+- Run `synode eval coding` against `llama3.1:8b` and `qwen2.5-coder:7b`, compare
+  functional/safety/contract pass rates, and tune small-model prompts/settings.
+- Route harder coding work to OpenHands/Codex/Claude Code if local native
+  coding remains below the 5/7 functional benchmark target.
 - Add production auth before exposing UI/API outside localhost.
 - Add Prometheus/Grafana metrics if host-level dashboards are required.
 

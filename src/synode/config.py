@@ -23,6 +23,10 @@ class Settings(BaseSettings):
     mcp_proxy_base_url: str = "http://127.0.0.1:8787"
     mcp_proxy_session_ttl_seconds: int = 3600
     shell_timeout_seconds: float = 20.0
+    coding_patch_candidates: int = 3
+    coding_repair_attempts: int = 2
+    coding_context_max_bytes: int = 24000
+    coding_file_window_lines: int = 120
     sandbox_backend: Literal["process", "docker", "none"] = "process"
     sandbox_cpu_seconds: int = 30
     sandbox_memory_mb: int = 512
@@ -120,6 +124,10 @@ class Settings(BaseSettings):
             raise RuntimeError("SYNODE_WORKER_CONCURRENCY must be at least 1")
         positive_limits = {
             "SYNODE_MODEL_TIMEOUT_SECONDS": self.model_timeout_seconds,
+            "SYNODE_CODING_PATCH_CANDIDATES": self.coding_patch_candidates,
+            "SYNODE_CODING_REPAIR_ATTEMPTS": self.coding_repair_attempts,
+            "SYNODE_CODING_CONTEXT_MAX_BYTES": self.coding_context_max_bytes,
+            "SYNODE_CODING_FILE_WINDOW_LINES": self.coding_file_window_lines,
             "SYNODE_SANDBOX_CPU_SECONDS": self.sandbox_cpu_seconds,
             "SYNODE_SANDBOX_MEMORY_MB": self.sandbox_memory_mb,
             "SYNODE_SANDBOX_DISK_MB": self.sandbox_disk_mb,
