@@ -12,6 +12,7 @@ from typing import Any, AsyncIterator
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import Command
 
+from synode.application.reports import build_run_report
 from synode.config import Settings
 from synode.logging import log_event
 from synode.models.provider import ModelProviderRegistry, ModelRequest
@@ -81,6 +82,7 @@ from synode.schemas import (
     RunEventResponse,
     RunMetricsResponse,
     RunMode,
+    RunReportResponse,
     RunResponse,
     RunStatus,
     RuntimeBackend,
@@ -130,6 +132,7 @@ CONVERSATION_CONTEXT_CHAR_LIMIT = 12_000
 CONVERSATION_CONTEXT_MESSAGE_TYPES = {
     ThreadMessageType.TEXT.value,
     ThreadMessageType.FINAL.value,
+    ThreadMessageType.RUN_REPORT.value,
     ThreadMessageType.APPROVAL_DECISION.value,
     ThreadMessageType.OPERATOR_DECISION.value,
 }
@@ -480,6 +483,32 @@ class OrchestrationService:
                 for artifact in artifacts
             ]
 
+    async def get_run_report(self, run_id: str) -> RunReportResponse:
+        async with self.database.session() as session:
+            repo = Repository(session)
+            artifact = await repo.get_latest_artifact(run_id, "run_report")
+            if artifact is not None:
+                return RunReportResponse.model_validate(
+                    {
+                        **artifact.content,
+                        "artifact_id": artifact.id,
+                        "created_at": artifact.created_at,
+                    }
+                )
+            run = await repo.get_run(run_id)
+            if run is None:
+                raise LookupError(f"run not found: {run_id}")
+            report = build_run_report(
+                {
+                    "run_id": run.id,
+                    "thread_id": run.thread_id,
+                    "mode": run.mode,
+                    "review": {"blockers": [run.error]} if run.error else {},
+                },
+                status=run.status,
+            )
+            return RunReportResponse.model_validate(report.to_artifact())
+
     async def list_tool_audit(self, run_id: str, limit: int = 200, offset: int = 0) -> list[ToolAuditResponse]:
         async with self.database.session() as session:
             repo = Repository(session)
@@ -674,15 +703,6 @@ class OrchestrationService:
                 mode=mode,
             )
             conversation_context = await self._conversation_context(repo, thread_id, run_id)
-            await repo.add_thread_message(
-                thread_id,
-                author_type=ThreadMessageAuthorType.SYSTEM,
-                author_name="runtime",
-                message_type=ThreadMessageType.RUN_SUMMARY,
-                content="Run started.",
-                run_id=run_id,
-                metadata={"status": RunStatus.RUNNING.value},
-            )
 
         try:
             state: dict[str, Any] = {
@@ -740,6 +760,7 @@ class OrchestrationService:
                 return
             review = final_state.get("review", {})
             final_answer = final_state.get("final_answer", "")
+            run_report = final_state.get("run_report") if isinstance(final_state.get("run_report"), dict) else None
             async with self.database.session() as session:
                 repo = Repository(session)
                 pending_approvals = await repo.count_approvals(run_id, status=ApprovalStatus.PENDING)
@@ -759,12 +780,19 @@ class OrchestrationService:
                         thread_id,
                         author_type=ThreadMessageAuthorType.SYSTEM,
                         author_name="runtime",
-                        message_type=ThreadMessageType.RUN_SUMMARY,
+                        message_type=ThreadMessageType.RUN_REPORT,
                         content="Run is waiting for approval.",
                         run_id=run_id,
-                        metadata={"status": RunStatus.WAITING_APPROVAL.value},
+                        metadata={"status": RunStatus.WAITING_APPROVAL.value, "run_report": run_report or {}},
                     )
                 elif mode == RunMode.CODING.value and not plan_only and not review.get("can_proceed", False):
+                    report = build_run_report(
+                        {**final_state, "review": review},
+                        status=RunStatus.FAILED_VERIFICATION.value,
+                    )
+                    report_artifact = await repo.add_artifact(run_id, "run_report", report.to_artifact())
+                    run_report = {**report.to_artifact(), "artifact_id": report_artifact.id}
+                    final_answer = report.chat_text()
                     await repo.set_run_status(run_id, RunStatus.FAILED_VERIFICATION, final_answer=final_answer)
                     log_event(
                         logger,
@@ -778,12 +806,16 @@ class OrchestrationService:
                         thread_id,
                         author_type=ThreadMessageAuthorType.AGENT,
                         author_name="reviewer",
-                        message_type=ThreadMessageType.FINAL,
+                        message_type=ThreadMessageType.RUN_REPORT,
                         content=final_answer or "Run failed verification.",
                         run_id=run_id,
-                        metadata={"status": RunStatus.FAILED_VERIFICATION.value},
+                        metadata={"status": RunStatus.FAILED_VERIFICATION.value, "run_report": run_report},
                     )
                 else:
+                    run_report = run_report or build_run_report(
+                        final_state,
+                        status=RunStatus.COMPLETED.value,
+                    ).to_artifact()
                     await repo.set_run_status(run_id, RunStatus.COMPLETED, final_answer=final_answer)
                     await repo.add_event(run_id, EventType.RUN_COMPLETED.value, None, {})
                     log_event(
@@ -798,10 +830,10 @@ class OrchestrationService:
                         thread_id,
                         author_type=ThreadMessageAuthorType.AGENT,
                         author_name="synode",
-                        message_type=ThreadMessageType.FINAL,
+                        message_type=ThreadMessageType.RUN_REPORT,
                         content=final_answer or "Run completed.",
                         run_id=run_id,
-                        metadata={"status": RunStatus.COMPLETED.value},
+                        metadata={"status": RunStatus.COMPLETED.value, "run_report": run_report},
                     )
         except asyncio.CancelledError:
             await self._mark_run_cancelled(run_id, await self._cancellation_reason(run_id))
@@ -846,10 +878,21 @@ class OrchestrationService:
                         run.thread_id,
                         author_type=ThreadMessageAuthorType.SYSTEM,
                         author_name="runtime",
-                        message_type=ThreadMessageType.RUN_SUMMARY,
+                        message_type=ThreadMessageType.RUN_REPORT,
                         content=f"Run failed: {exc}",
                         run_id=run_id,
-                        metadata={"status": RunStatus.FAILED.value},
+                        metadata={
+                            "status": RunStatus.FAILED.value,
+                            "run_report": build_run_report(
+                                {
+                                    "run_id": run_id,
+                                    "thread_id": run.thread_id,
+                                    "mode": run.mode,
+                                    "review": {"blockers": [str(exc)]},
+                                },
+                                status=RunStatus.FAILED.value,
+                            ).to_artifact(),
+                        },
                     )
             raise
 
@@ -1037,10 +1080,21 @@ class OrchestrationService:
                 run.thread_id,
                 author_type=ThreadMessageAuthorType.SYSTEM,
                 author_name="runtime",
-                message_type=ThreadMessageType.RUN_SUMMARY,
+                message_type=ThreadMessageType.RUN_REPORT,
                 content=f"Run cancelled: {reason}",
                 run_id=run_id,
-                metadata={"status": RunStatus.CANCELLED.value},
+                metadata={
+                    "status": RunStatus.CANCELLED.value,
+                    "run_report": build_run_report(
+                        {
+                            "run_id": run_id,
+                            "thread_id": run.thread_id,
+                            "mode": run.mode,
+                            "review": {"blockers": [reason]},
+                        },
+                        status=RunStatus.CANCELLED.value,
+                    ).to_artifact(),
+                },
             )
         if should_cancel_external:
             with suppress(Exception):

@@ -18,6 +18,7 @@ import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 
 import AgentGraph from "@/components/AgentGraph";
+import { RunReportView } from "@/components/reports/RunReportView";
 import {
   CodeBlock,
   CompactList,
@@ -33,6 +34,7 @@ import {
   decideApproval,
   getRun,
   getRunMetrics,
+  getRunReport,
   getRuntimeStatus,
   getSystemMetrics,
   listAgents,
@@ -54,7 +56,7 @@ import {
   shortId,
 } from "@/lib/format";
 import { useRunEvents } from "@/hooks/useRunEvents";
-import type { Approval, Artifact, OperatorRequest, Run, RunEvent, RunMetrics, RuntimeStatus, SystemMetrics, ToolAudit } from "@/types";
+import type { Approval, Artifact, OperatorRequest, Run, RunEvent, RunMetrics, RunReport, RuntimeStatus, SystemMetrics, ToolAudit } from "@/types";
 
 type RunTab = "overview" | "agents" | "timeline" | "artifacts" | "diff-tests" | "operator" | "approvals" | "metrics";
 
@@ -114,6 +116,11 @@ export default function RunDetailClient({ runId }: { runId: string }) {
     queryFn: () => getRunMetrics(runId),
     refetchInterval: 4000,
   });
+  const reportQuery = useQuery({
+    queryKey: ["run-report", runId],
+    queryFn: () => getRunReport(runId),
+    refetchInterval: 4000,
+  });
   const agentsQuery = useQuery({
     queryKey: ["agents"],
     queryFn: listAgents,
@@ -142,6 +149,7 @@ export default function RunDetailClient({ runId }: { runId: string }) {
   const approvals = approvalsQuery.data ?? [];
   const operatorRequests = operatorRequestsQuery.data ?? [];
   const metrics = metricsQuery.data ?? null;
+  const report = reportQuery.data ?? null;
   const system = systemMetricsQuery.data ?? null;
   const runtime = runtimeStatusQuery.data ?? null;
   const stopMutation = useMutation({
@@ -199,7 +207,7 @@ export default function RunDetailClient({ runId }: { runId: string }) {
       {stopMutation.error ? <div className="error-line">{stopMutation.error.message}</div> : null}
       <PageTabs active={activeTab} items={tabItems} onChange={setTab} ariaLabel="Run detail tabs" />
       {activeTab === "overview" ? (
-        <OverviewTab run={run} events={events} artifacts={artifacts} approvals={approvals} metrics={metrics} runtime={runtime} />
+        <OverviewTab run={run} report={report} events={events} artifacts={artifacts} approvals={approvals} metrics={metrics} runtime={runtime} />
       ) : null}
       {activeTab === "agents" ? (
         <Panel title="Agent graph" className="full-height-panel">
@@ -253,6 +261,7 @@ function RunSummary({
 
 function OverviewTab({
   run,
+  report,
   events,
   artifacts,
   approvals,
@@ -260,6 +269,7 @@ function OverviewTab({
   runtime,
 }: {
   run: Run;
+  report: RunReport | null;
   events: RunEvent[];
   artifacts: Artifact[];
   approvals: Approval[];
@@ -273,7 +283,13 @@ function OverviewTab({
   return (
     <div className="overview-grid">
       <Panel title="Final synthesis" className="overview-main">
-        {run.final_answer ? <CodeBlock value={run.final_answer} className="answer-block" /> : <EmptyState title="No final answer yet" />}
+        {report ? (
+          <RunReportView report={report} />
+        ) : run.final_answer ? (
+          <div className="final-answer-text">{run.final_answer}</div>
+        ) : (
+          <EmptyState title="No final answer yet" />
+        )}
       </Panel>
       <Panel title="Run pulse">
         <div className="metric-list">

@@ -6,6 +6,7 @@ from subprocess import run
 import pytest
 from sqlalchemy import select
 
+from synode.models.errors import StructuredOutputValidationError
 from synode.models.provider import (
     FakeModelProvider,
     ModelProviderRegistry,
@@ -15,8 +16,9 @@ from synode.models.provider import (
 from synode.observability import Observability
 from synode.persistence.models import ApprovalRecord
 from synode.persistence.repository import Repository
+from synode.registry import RoleRegistry
 from synode.runtime.contracts import WORKER_AGENT_OUTPUT_CONTRACT
-from synode.runtime.decisions import NativeLoopAction, PatchProposal
+from synode.runtime.decisions import NativeLoopAction, PatchProposal, SupervisorDecision
 from synode.runtime.graph import (
     GraphDependencies,
     ResolvedModelProvider,
@@ -24,13 +26,16 @@ from synode.runtime.graph import (
     _fallback_coding_inspection_from_loop_error,
     _invalid_operator_request_reason,
     _invoke_model,
+    _invoke_structured,
     _patch_proposal_prompt,
     _route_after_coding_inspect,
     _route_after_patch_propose,
     _route_after_patch_repair,
     _route_after_verify,
     _run_native_loop,
+    _sanitize_supervisor_decision,
     _select_verification_commands,
+    _validate_supervisor_decision,
     _verification_command_catalog,
 )
 from synode.runtime.operator import ApprovalRequired
@@ -46,6 +51,7 @@ from synode.schemas import (
     RoleName,
     RunMode,
     RunStatus,
+    ToolCall,
     ToolResult,
 )
 
@@ -95,6 +101,22 @@ class ScriptedLoopProvider(FakeModelProvider):
             total_tokens=0,
             latency_ms=0.0,
         )
+
+
+class StructuredRetryFakeProvider(FakeModelProvider):
+    name = "structured_retry_fake"
+    supports_streaming = False
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.prompts: list[str] = []
+
+    async def invoke(self, request: ModelRequest) -> ModelResponse:
+        self.calls += 1
+        self.prompts.append(request.prompt)
+        if self.calls == 1:
+            raise StructuredOutputValidationError("model returned invalid JSON: truncated")
+        return await super().invoke(request)
 
 
 def test_route_after_verify_allows_one_real_model_repair_pass() -> None:
@@ -465,6 +487,50 @@ async def test_run_task_completes_with_fake_data_agent(service, tmp_path: pathli
     )
 
 
+async def test_supervisor_plan_sanitizer_drops_disallowed_tool_hints(
+    settings,
+    database,
+    tool_executor,
+) -> None:
+    roles = RoleRegistry.load_builtin()
+    deps = GraphDependencies(
+        database=database,
+        roles=roles,
+        models=ModelProviderRegistry(),
+        tool_executor=tool_executor,
+        observability=Observability(settings),
+    )
+    decision = SupervisorDecision(
+        selected_roles=["coder"],
+        plan=[
+            {
+                "role": "coder",
+                "task": "Inspect and patch the repository.",
+                "tool_calls": [
+                    ToolCall(name="native.data_profile", arguments={}),
+                    ToolCall(name="native.fs_list", arguments={}),
+                ],
+            }
+        ],
+        confidence="medium",
+        risk_level="small-code",
+        reasoning_summary="Scripted invalid tool hint.",
+    )
+
+    sanitized, dropped = _sanitize_supervisor_decision(decision, deps, {"run_id": "run-1"})
+
+    assert [call.name for call in sanitized.plan[0].tool_calls] == ["native.fs_list"]
+    assert dropped == [
+        {
+            "role": "coder",
+            "tool_name": "native.data_profile",
+            "reason": "role_not_allowed",
+            "task": "Inspect and patch the repository.",
+        }
+    ]
+    _validate_supervisor_decision(sanitized, deps, {"run_id": "run-1"})
+
+
 async def test_native_worker_loop_rejects_disallowed_tool_without_execution(
     settings,
     database,
@@ -807,10 +873,11 @@ async def test_coding_workflow_requires_approval_then_applies_patch(service, dat
     assert second.status == RunStatus.COMPLETED
     assert "Synode coding workflow smoke." in (tmp_path / "README.md").read_text(encoding="utf-8")
     assert second.final_answer is not None
-    assert "[verification]" in second.final_answer
+    assert "Verification: passed" in second.final_answer
     async with database.session() as session:
         artifacts = await Repository(session).list_artifacts(first.id)
     assert len([artifact for artifact in artifacts if artifact.kind == "supervisor_decision"]) == 1
+    assert len([artifact for artifact in artifacts if artifact.kind == "run_report"]) >= 1
 
 
 async def test_coding_workflow_failed_tests_set_failed_verification(
@@ -917,7 +984,7 @@ async def test_follow_up_run_receives_thread_conversation_context(
     assert isinstance(context, list)
     assert captured_state["thread_id"] == first.thread_id
     assert any(item["author_type"] == "user" and item["content"] == "First question about the dataset" for item in context)
-    assert any(item["message_type"] == "final" for item in context)
+    assert any(item["message_type"] == "run_report" for item in context)
     assert not any(item["message_type"] == "run_summary" for item in context)
     assert not any(item["author_type"] == "user" and item["content"] == "Use that context for a follow-up" for item in context)
 
@@ -987,6 +1054,7 @@ async def test_plan_only_finishes_without_worker_tools(service, tmp_path: pathli
 
     assert result.status == RunStatus.COMPLETED
     assert result.final_answer is not None
+    assert "Plan:" in result.final_answer
     assert "- data_analyst:" in result.final_answer
     assert audit == []
 
@@ -1039,6 +1107,54 @@ async def test_streaming_provider_emits_model_stream_events(service, tmp_path: p
         and event.payload["provider"] == "streaming_fake"
         for event in events
     )
+
+
+async def test_structured_model_call_retries_invalid_json_once(service, tmp_path: pathlib.Path) -> None:
+    provider = StructuredRetryFakeProvider()
+    service.models.register(provider)
+    async with service.database.session() as session:
+        run_record = await Repository(session).create_run(
+            "Plan a coding task",
+            model_provider="structured_retry_fake",
+            workspace=str(tmp_path),
+        )
+    deps = GraphDependencies(
+        database=service.database,
+        roles=service.roles,
+        models=service.models,
+        tool_executor=service.tool_executor,
+        observability=service.observability,
+    )
+
+    decision = await _invoke_structured(
+        deps,
+        {
+            "run_id": run_record.id,
+            "thread_id": run_record.thread_id,
+            "task": "Fix the ledger project",
+            "mode": RunMode.CODING.value,
+            "model_provider": "structured_retry_fake",
+            "workspace": str(tmp_path),
+        },
+        ResolvedModelProvider(
+            provider=provider,
+            provider_type="structured_retry_fake",
+        ),
+        SupervisorDecision,
+        ModelRequest(
+            role=RoleName.SUPERVISOR.value,
+            prompt="Create a strict executable plan.",
+            context={"task": "Fix the ledger project", "mode": RunMode.CODING.value},
+            response_schema=SupervisorDecision,
+        ),
+    )
+    events = await service.list_event_responses(run_record.id, limit=500)
+    model_events = [event for event in events if event.event_type == EventType.MODEL_INVOKED.value]
+
+    assert decision.selected_roles == [RoleName.CODER.value]
+    assert provider.calls == 2
+    assert "previous structured response was rejected" in provider.prompts[1]
+    assert [event.payload["ok"] for event in model_events] == [False, True]
 
 
 async def test_stop_created_run_cancels_and_unblocks_thread(service, tmp_path: pathlib.Path) -> None:

@@ -15,7 +15,7 @@ from synode.persistence.database import Database
 from synode.persistence.models import ApprovalRecord
 from synode.persistence.repository import Repository
 from synode.registry import RoleRegistry
-from synode.schemas import ApprovalStatus, ToolCall, ToolResult, ToolRisk
+from synode.schemas import ApprovalStatus, EventType, ToolCall, ToolResult, ToolRisk
 from synode.tools.catalog import tool_catalog_entry, tool_catalog_for, tool_input_schema
 from synode.tools.sandbox import SandboxRunner, SandboxUnavailable
 from synode.tools.workspace import WorkspacePolicy
@@ -346,6 +346,23 @@ class ToolGateway:
                     return result
 
             try:
+                async with self.database.session() as session:
+                    repo = Repository(session)
+                    await repo.add_event(
+                        run_id,
+                        EventType.TOOL_STARTED.value,
+                        role_name,
+                        {
+                            "tool_name": call.name,
+                            "risk": risk.value,
+                            "display": {
+                                "title": f"{call.name} started",
+                                "status": "running",
+                                "tone": "info",
+                                "target": _tool_call_target(call.arguments),
+                            },
+                        },
+                    )
                 result = await tool.run(context, call.arguments)
             except Exception as exc:
                 result = ToolResult(
@@ -428,3 +445,12 @@ def _json_rpc_error_code(exc: Exception) -> int:
     if isinstance(exc, LookupError):
         return -32601
     return -32000
+
+
+def _tool_call_target(arguments: dict[str, Any]) -> str | None:
+    for key in ("path", "file", "command", "query", "url"):
+        value = arguments.get(key)
+        if value:
+            text = " ".join(str(value).split())
+            return text if len(text) <= 180 else text[:177].rstrip() + "..."
+    return None

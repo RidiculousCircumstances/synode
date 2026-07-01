@@ -61,27 +61,18 @@ test("artifacts and diff tests use full-size work panels", async ({ page }) => {
   }
 });
 
-test("thread chat renders technical run summary compactly", async ({ page }) => {
+test("thread chat renders structured run report compactly", async ({ page }) => {
   await page.goto(`/threads/${threadId}`, { waitUntil: "domcontentloaded" });
   await expect(page.locator(".thread-chat-shell")).toBeVisible();
   await expect(page.locator(".page-cockpit")).toHaveCount(0);
   await expect(page.locator(".chat-code-block code", { hasText: "const stable = true;" })).toBeVisible();
-  await expect(page.locator(".run-summary-topline strong", { hasText: "Run summary" })).toBeVisible();
-  await expect(page.getByText("mode coding")).toBeVisible();
-  await expect(page.getByText("Tool and raw output")).toBeVisible();
-  await expect(page.locator(".thread-service-event")).toHaveCount(1);
+  await expect(page.locator(".run-report-head strong", { hasText: "Changes applied and verified" })).toBeVisible();
+  await expect(page.locator(".run-report-tile", { hasText: "Patch" })).toBeVisible();
+  await expect(page.locator(".run-report-tile", { hasText: "Verification" })).toBeVisible();
+  await expect(page.getByText("Synode run summary:")).toHaveCount(0);
+  await expect(page.locator(".thread-service-event")).toHaveCount(0);
   await expect(page.locator(".thread-approval-event")).toHaveCount(1);
-  await expect(page.locator(".thread-service-event .thread-message-body")).toHaveCount(0);
   await expect(page.locator(".thread-approval-event .thread-message-body")).toHaveCount(0);
-  await expect(page.locator(".thread-service-copy details summary", { hasText: "details" })).toBeVisible();
-  await expect.poll(async () => {
-    const detailsBox = await page.locator(".thread-service-copy details summary").boundingBox();
-    const serviceBox = await page.locator(".thread-service-copy").boundingBox();
-    if (!detailsBox || !serviceBox) {
-      return 999;
-    }
-    return detailsBox.x - serviceBox.x;
-  }).toBeLessThan(24);
   await expect(page.getByRole("button", { name: "Approve" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Reject" })).toBeVisible();
   await expect(page.locator(".thread-composer-input")).toBeVisible();
@@ -109,13 +100,8 @@ test("thread chat renders technical run summary compactly", async ({ page }) => 
     ),
   ).toBeLessThan(4);
 
-  await page.locator(".technical-details.compact summary", { hasText: "Plan" }).click();
-  await expect(page.locator(".summary-plan-role .status-badge[title='data_analyst']")).toHaveCount(1);
-  const dataAnalystPlanGroup = page.locator(".summary-plan-group").filter({
-    has: page.locator(".status-badge[title='data_analyst']"),
-  });
-  await expect(dataAnalystPlanGroup.locator("li")).toHaveCount(2);
-  await expect(page.locator(".summary-plan-row .status-badge[title='data_analyst']")).toHaveCount(0);
+  await expect(page.locator(".run-report-plan .status-badge[title='data_analyst']")).toHaveCount(2);
+  await expect(page.locator(".run-report-plan .status-badge[title='coder']")).toHaveCount(1);
 
   await page.getByRole("button", { name: /runs/i }).first().click();
   await expect(page.getByRole("dialog", { name: "Run history" })).toBeVisible();
@@ -226,7 +212,7 @@ test("entity creation opens modal dialogs from list actions", async ({ page }) =
   await expect(page.locator(".modal-layer")).toHaveCount(0);
 
   const newGraphButton = page.getByRole("button", { name: "New graph" });
-  await page.getByRole("button", { name: /^Workflows/ }).click();
+  await page.getByRole("button", { name: /^Graphs/ }).click();
   await newGraphButton.scrollIntoViewIfNeeded();
   const beforeGraph = await layoutBox(page);
   await newGraphButton.click();
@@ -269,7 +255,7 @@ test("configuration screens edit profiles roles and graph templates", async ({ p
   const graphCreatePromise = page.waitForRequest(
     (request) => request.method() === "POST" && request.url().endsWith("/agent-graphs"),
   );
-  await page.getByRole("button", { name: /^Workflows/ }).click();
+  await page.getByRole("button", { name: /^Graphs/ }).click();
   await page.getByRole("button", { name: "New graph" }).click();
   await expect(page.getByRole("dialog", { name: "New graph" })).toBeVisible();
   await page.getByRole("button", { name: "Create graph" }).click();
@@ -467,6 +453,10 @@ async function installApiRoutes(page: Page) {
     }
     if (url.pathname === `/runs/${runId}/events`) {
       await fulfillJson(route, eventsFixture());
+      return;
+    }
+    if (url.pathname === `/runs/${runId}/report`) {
+      await fulfillJson(route, runReportFixture());
       return;
     }
     if (url.pathname === `/runs/${streamRunId}/events`) {
@@ -683,17 +673,6 @@ function threadDetailFixture() {
         created_at: now,
       },
       {
-        id: 2,
-        thread_id: threadId,
-        run_id: runId,
-        author_type: "system",
-        author_name: "runtime",
-        message_type: "run_summary",
-        content: "Run started.",
-        metadata: { status: "running" },
-        created_at: now,
-      },
-      {
         id: 3,
         thread_id: threadId,
         run_id: runId,
@@ -724,10 +703,9 @@ function threadDetailFixture() {
         run_id: runId,
         author_type: "agent",
         author_name: "synode",
-        message_type: "final",
-        content:
-          "Synode run summary:\nMode: coding\n- data_analyst: Profile the sample metrics\n- data_analyst: Compare trend changes\n- coder: Inspect the UI and compact technical output\n\n[coder]\nImplemented a focused layout fixture with full-size artifacts and diff panels.\n- native.git_diff: ok {\"stdout\":\"diff --git a/web/src/app/globals.css b/web/src/app/globals.css\\n+ .thread-workbench { display: block; }\"}\n\n[verification]\n{\"ok\":true,\"commands\":[{\"command\":\"npm run test:e2e\",\"status\":\"passed\"}]}",
-        metadata: { status: "completed" },
+        message_type: "run_report",
+        content: "Changes applied and verified\nVerification: passed\nPatch: ok (1 file)",
+        metadata: { status: "completed", run_report: runReportFixture() },
         created_at: now,
       },
     ],
@@ -750,17 +728,6 @@ function streamThreadDetailFixture() {
         metadata: {},
         created_at: now,
       },
-      {
-        id: 2,
-        thread_id: streamThreadId,
-        run_id: streamRunId,
-        author_type: "system",
-        author_name: "runtime",
-        message_type: "run_summary",
-        content: "Run started.",
-        metadata: { status: "running" },
-        created_at: now,
-      },
     ],
   };
 }
@@ -770,10 +737,72 @@ function eventsFixture() {
     { id: 1, run_id: runId, event_type: "run_started", role: null, payload: {}, created_at: now },
     { id: 2, run_id: runId, event_type: "role_selected", role: "supervisor", payload: { confidence: 0.91 }, created_at: now },
     { id: 3, run_id: runId, event_type: "node_started", role: "coder", payload: {}, created_at: now },
-    { id: 4, run_id: runId, event_type: "tool_called", role: "coder", payload: { tool: "native.git_diff" }, created_at: now },
-    { id: 5, run_id: runId, event_type: "node_completed", role: "coder", payload: { ok: true }, created_at: now },
-    { id: 6, run_id: runId, event_type: "run_completed", role: "reviewer", payload: { ok: true }, created_at: now },
+    { id: 4, run_id: runId, event_type: "tool_started", role: "coder", payload: { tool_name: "native.git_diff", display: { title: "native.git_diff started", status: "running", tone: "info" } }, created_at: now },
+    { id: 5, run_id: runId, event_type: "tool_completed", role: "coder", payload: { tool_name: "native.git_diff", status: "ok", display: { title: "native.git_diff completed", status: "ok", tone: "success" } }, created_at: now },
+    { id: 6, run_id: runId, event_type: "node_completed", role: "coder", payload: { ok: true }, created_at: now },
+    { id: 7, run_id: runId, event_type: "run_completed", role: "reviewer", payload: { ok: true }, created_at: now },
   ];
+}
+
+function runReportFixture() {
+  return {
+    version: 1,
+    run_id: runId,
+    thread_id: threadId,
+    mode: "coding",
+    status: "completed",
+    headline: "Changes applied and verified",
+    summary: "Implemented a focused layout fixture with full-size artifacts and diff panels.",
+    plan: [
+      { role: "data_analyst", task: "Profile the sample metrics", status: "planned", tool_count: 0 },
+      { role: "data_analyst", task: "Compare trend changes", status: "planned", tool_count: 0 },
+      { role: "coder", task: "Inspect the UI and compact technical output", status: "planned", tool_count: 1 },
+    ],
+    role_outputs: [
+      {
+        role: "coder",
+        summary: "Implemented a focused layout fixture with full-size artifacts and diff panels.",
+        tool_count: 1,
+        failed_tool_count: 0,
+        risks: [],
+      },
+    ],
+    patch_results: {
+      status: "ok",
+      raw_count: 1,
+      files: [
+        {
+          path: "web/src/app/globals.css",
+          operation: "modified",
+          status: "ok",
+          summary: "Thread workbench stays compact.",
+          error: null,
+        },
+      ],
+    },
+    verification: {
+      status: "passed",
+      reason: null,
+      commands: [{ command: "npm run test:e2e", status: "passed", summary: "layout smoke passed" }],
+    },
+    tool_activity: [
+      {
+        role: "coder",
+        tool_name: "native.git_diff",
+        status: "ok",
+        risk: "read",
+        title: "native.git_diff completed",
+        target: "web/src/app/globals.css",
+        approval_id: null,
+      },
+    ],
+    blockers: [],
+    advisory: [],
+    diagnostics: {},
+    raw_refs: {},
+    artifact_id: "artifact-report",
+    created_at: now,
+  };
 }
 
 function streamEventsFixture() {

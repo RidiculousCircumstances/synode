@@ -86,14 +86,18 @@ To use OpenHands for a worker role in a workflow, run OpenHands separately and s
 SYNODE_OPENHANDS_ENABLED=true
 SYNODE_OPENHANDS_BASE_URL=http://127.0.0.1:3000
 SYNODE_OPENHANDS_API_MODE=agent_server
+SYNODE_OPENHANDS_HOST_WORKSPACE=/absolute/path/to/synode/var/workspaces
+SYNODE_OPENHANDS_CONTAINER_WORKSPACE=/workspace
 # SYNODE_OPENHANDS_API_KEY=...
 ```
 
 Synode uses OpenHands confirmation as a pause signal only. The operator still
 approves or rejects the action in Synode, and Synode records the decision in
 the normal approval/audit stream. `agent_server` targets the local OpenHands
-Agent Server API; use `cloud_v1` only when intentionally targeting the
-OpenHands Cloud V1 API.
+Agent Server API and receives the same Synode model profile as the selected
+node. The workspace mapping is required when Synode runs in Docker and
+OpenHands runs on the host. Use `cloud_v1` only when intentionally targeting
+the OpenHands Cloud V1 API.
 
 ### Observability
 

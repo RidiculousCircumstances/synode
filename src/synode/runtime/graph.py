@@ -12,6 +12,7 @@ from langgraph.graph import StateGraph
 from langgraph.types import interrupt
 from pydantic import BaseModel, ValidationError
 
+from synode.application.reports import build_run_report
 from synode.models.errors import StructuredOutputValidationError
 from synode.models.provider import ModelProviderRegistry, ModelRequest
 from synode.observability import Observability
@@ -352,6 +353,7 @@ def _supervisor_node(deps: GraphDependencies):
                     model_options=provider.model_options or {},
                 ),
             )
+        decision, dropped_tool_calls = _sanitize_supervisor_decision(decision, deps, state)
         _validate_supervisor_decision(decision, deps, state)
         if state.get("interaction_mode") == InteractionMode.PLAN_REVIEW.value:
             decision = _supervisor_decision_from_operator_response(
@@ -370,6 +372,8 @@ def _supervisor_node(deps: GraphDependencies):
                     role=RoleName.SUPERVISOR.value,
                 ),
             )
+            decision, additional_dropped = _sanitize_supervisor_decision(decision, deps, state)
+            dropped_tool_calls.extend(additional_dropped)
             _validate_supervisor_decision(decision, deps, state)
         role_tool_calls = {
             step.role: [call.model_dump(mode="json") for call in step.tool_calls]
@@ -384,6 +388,18 @@ def _supervisor_node(deps: GraphDependencies):
             await repo.add_artifact(
                 state["run_id"], "supervisor_decision", decision.model_dump(mode="json")
             )
+            if dropped_tool_calls:
+                await repo.add_artifact(
+                    state["run_id"],
+                    "supervisor_plan_diagnostics",
+                    {"dropped_tool_calls": dropped_tool_calls},
+                )
+                await repo.add_event(
+                    state["run_id"],
+                    "supervisor_plan_sanitized",
+                    RoleName.SUPERVISOR.value,
+                    {"dropped_tool_calls": dropped_tool_calls},
+                )
             for role in decision.selected_roles:
                 await repo.add_event(state["run_id"], EventType.ROLE_SELECTED.value, role, {"role": role})
         return {
@@ -1503,38 +1519,13 @@ def _reviewer_node(deps: GraphDependencies):
 
 def _synthesizer_node(deps: GraphDependencies):
     async def node(state: SynodeState) -> SynodeState:
-        lines = ["Synode run summary:"]
-        lines.append(f"Mode: {state['mode']}")
-        for step in state.get("plan", []):
-            lines.append(f"- {step['role']}: {step['task']}")
-        for output in state.get("worker_outputs", []):
-            lines.append(f"\n[{output['role']}]\n{output['summary']}")
-        if state.get("coding_inspection"):
-            lines.append(f"\n[coding_inspection]\n{json.dumps(state['coding_inspection'], ensure_ascii=False)}")
-        if state.get("patch_proposal"):
-            lines.append(f"\n[patch_proposal]\n{json.dumps(state['patch_proposal'], ensure_ascii=False)}")
-        if state.get("patch_results"):
-            lines.append(f"\n[patch_results]\n{json.dumps(state['patch_results'], ensure_ascii=False)}")
-        if state.get("verification_result"):
-            lines.append(f"\n[verification]\n{json.dumps(state['verification_result'], ensure_ascii=False)}")
-        if state.get("coding_failure_category"):
-            lines.append(f"\nFailure category: {state['coding_failure_category']}")
-        if state.get("coding_repair_attempts"):
-            lines.append(f"\nRepair attempts: {state['coding_repair_attempts']}")
-        if state.get("patch_repair_error"):
-            lines.append(f"\nPatch repair error: {state['patch_repair_error']}")
-        review = state.get("review", {})
-        if review.get("blockers"):
-            lines.append("\nBlockers:")
-            lines.extend(f"- {item}" for item in review["blockers"])
-        if review.get("advisory_risks"):
-            lines.append("\nAdvisory risks:")
-            lines.extend(f"- {item}" for item in review["advisory_risks"])
-        final = "\n".join(lines)
+        report = build_run_report(dict(state), status="completed")
+        final = report.chat_text()
         async with deps.database.session() as session:
             repo = Repository(session)
-            await repo.add_artifact(state["run_id"], "final_answer", {"text": final})
-        return {"final_answer": final}
+            artifact = await repo.add_artifact(state["run_id"], "run_report", report.to_artifact())
+            await repo.add_artifact(state["run_id"], "final_answer", {"text": final, "run_report_artifact_id": artifact.id})
+        return {"final_answer": final, "run_report": {**report.to_artifact(), "artifact_id": artifact.id}}
 
     return node
 
@@ -1546,8 +1537,35 @@ async def _invoke_structured(
     schema: type[BaseModel],
     request: ModelRequest,
 ) -> Any:
-    response = await _invoke_model(deps, state, provider, request)
+    try:
+        response = await _invoke_model(deps, state, provider, request)
+        return schema.model_validate(response.structured)
+    except (StructuredOutputValidationError, ValidationError) as exc:
+        response = await _invoke_model(
+            deps,
+            state,
+            provider,
+            _structured_retry_request(request, schema=schema, error=str(exc)),
+        )
     return schema.model_validate(response.structured)
+
+
+def _structured_retry_request(
+    request: ModelRequest,
+    *,
+    schema: type[BaseModel],
+    error: str,
+) -> ModelRequest:
+    retry_prompt = (
+        f"{request.prompt}\n\n"
+        "The previous structured response was rejected by Synode validation.\n"
+        f"Validation error: {error[:1200]}\n"
+        "Retry once. Return one complete JSON object only. "
+        "Do not include Markdown fences, comments, prose, or partial strings. "
+        "The object must validate against this JSON schema:\n"
+        f"{json.dumps(schema.model_json_schema(), ensure_ascii=False)}"
+    )
+    return request.model_copy(update={"prompt": retry_prompt, "response_schema": schema})
 
 
 async def _invoke_model(
@@ -1771,6 +1789,50 @@ def _supervisor_decision_from_operator_response(
     raise ValueError(f"unknown operator response_type: {response_type}")
 
 
+def _sanitize_supervisor_decision(
+    decision: SupervisorDecision,
+    deps: GraphDependencies,
+    state: SynodeState,
+) -> tuple[SupervisorDecision, list[dict[str, Any]]]:
+    data = decision.model_dump(mode="json")
+    dropped: list[dict[str, Any]] = []
+    for step in data.get("plan", []):
+        if not isinstance(step, dict):
+            continue
+        role = str(step.get("role") or "")
+        try:
+            allowed = deps.roles.get(role).allowed_tools if role else []
+        except LookupError:
+            continue
+        filtered: list[dict[str, Any]] = []
+        for call in step.get("tool_calls", []):
+            if not isinstance(call, dict):
+                continue
+            name = str(call.get("name") or "")
+            reason: str | None = None
+            try:
+                deps.tool_executor.tools.get(name)
+            except LookupError:
+                reason = "unknown_tool"
+            if reason is None and name not in allowed:
+                reason = "role_not_allowed"
+            if reason is not None:
+                dropped.append(
+                    {
+                        "role": role,
+                        "tool_name": name,
+                        "reason": reason,
+                        "task": step.get("task"),
+                    }
+                )
+                continue
+            filtered.append(call)
+        step["tool_calls"] = filtered
+    if not dropped:
+        return decision, []
+    return SupervisorDecision.model_validate(data), dropped
+
+
 def _validate_supervisor_decision(
     decision: SupervisorDecision,
     deps: GraphDependencies,
@@ -1883,6 +1945,11 @@ async def _external_node_execution_input(
 def _node_execution_input(state: SynodeState | dict[str, Any], role: str) -> NodeExecutionInput:
     node = _node_for_role(state, role)
     plan_step = _plan_step_for_role(state, role)
+    plan_steps = [
+        step
+        for step in state.get("plan", [])
+        if isinstance(step, dict)
+    ]
     node_id = str(node.get("id") or role)
     backend_id = _role_runtime_backend(state, role)
     contract_id = _node_contract_id(state, node)
@@ -1902,6 +1969,7 @@ def _node_execution_input(state: SynodeState | dict[str, Any], role: str) -> Nod
         agent_graph_snapshot=state.get("agent_graph_snapshot", {}),
         role_spec=_role_spec_for_role_with_state(state, role),
         plan_task=str(plan_step.get("task") or state["task"]),
+        plan_steps=plan_steps,
         planned_tool_calls=[
             call
             for call in plan_step.get("tool_calls", [])

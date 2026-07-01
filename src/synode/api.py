@@ -35,6 +35,7 @@ from synode.schemas import (
     RunEventResponse,
     RunMetricsResponse,
     RunMode,
+    RunReportResponse,
     RunResponse,
     RunStatus,
     RunStopRequest,
@@ -279,6 +280,14 @@ def create_app() -> FastAPI:
     ) -> list[RunEventResponse]:
         service: OrchestrationService = request.app.state.service
         return await service.list_event_responses(run_id, after_id=after_id, limit=_page_limit(limit, maximum=500))
+
+    @app.get("/runs/{run_id}/report", response_model=RunReportResponse)
+    async def get_run_report(run_id: str, request: Request) -> RunReportResponse:
+        service: OrchestrationService = request.app.state.service
+        try:
+            return await service.get_run_report(run_id)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.get("/runs/{run_id}/events/stream")
     async def stream_events(run_id: str, request: Request, after_id: int = 0) -> StreamingResponse:

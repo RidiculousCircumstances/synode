@@ -15,6 +15,7 @@ import type {
   RunEvent,
   RunMetrics,
   RunMode,
+  RunReport,
   RuntimeStatus,
   SandboxStatus,
   Secret,
@@ -228,6 +229,10 @@ export function listEvents(runId: string, afterId = 0): Promise<RunEvent[]> {
 
 export function listArtifacts(runId: string): Promise<Artifact[]> {
   return request<Artifact[]>(`/runs/${runId}/artifacts`);
+}
+
+export function getRunReport(runId: string): Promise<RunReport> {
+  return request<RunReport>(`/runs/${runId}/report`);
 }
 
 export function listToolAudit(runId: string): Promise<ToolAudit[]> {

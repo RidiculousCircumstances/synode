@@ -6,6 +6,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
+from synode.domain.reports import RunReport
+
 
 def now_utc() -> datetime:
     return datetime.now(UTC)
@@ -79,6 +81,7 @@ class ThreadMessageAuthorType(StrEnum):
 class ThreadMessageType(StrEnum):
     TEXT = "text"
     RUN_SUMMARY = "run_summary"
+    RUN_REPORT = "run_report"
     APPROVAL_REQUEST = "approval_request"
     APPROVAL_DECISION = "approval_decision"
     OPERATOR_REQUEST = "operator_request"
@@ -130,7 +133,9 @@ class EventType(StrEnum):
     MODEL_STREAM_STARTED = "model_stream_started"
     MODEL_TOKEN_DELTA = "model_token_delta"
     MODEL_STREAM_COMPLETED = "model_stream_completed"
+    TOOL_STARTED = "tool_started"
     TOOL_CALLED = "tool_called"
+    TOOL_COMPLETED = "tool_completed"
     APPROVAL_REQUIRED = "approval_required"
     APPROVAL_DECIDED = "approval_decided"
     OPERATOR_REQUIRED = "operator_required"
@@ -563,6 +568,11 @@ class RunEventResponse(BaseModel):
     role: str | None = None
     payload: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
+
+
+class RunReportResponse(RunReport):
+    artifact_id: str | None = None
+    created_at: datetime | None = None
 
 
 class ApprovalResponse(BaseModel):

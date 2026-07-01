@@ -59,6 +59,10 @@ class Settings(BaseSettings):
     openhands_api_mode: Literal["agent_server", "cloud_v1"] = "agent_server"
     openhands_timeout_seconds: float = 120.0
     openhands_poll_interval_seconds: float = 1.0
+    openhands_max_iterations: int = 80
+    openhands_contract_repair_attempts: int = 1
+    openhands_host_workspace: str | None = None
+    openhands_container_workspace: str | None = None
     run_event_retention_days: int = 30
     model_delta_retention_days: int = 7
     tool_audit_retention_days: int = 30
@@ -115,6 +119,19 @@ class Settings(BaseSettings):
                 raise RuntimeError("SYNODE_OPENHANDS_TIMEOUT_SECONDS must be greater than zero")
             if self.openhands_poll_interval_seconds <= 0:
                 raise RuntimeError("SYNODE_OPENHANDS_POLL_INTERVAL_SECONDS must be greater than zero")
+            if self.openhands_max_iterations <= 0:
+                raise RuntimeError("SYNODE_OPENHANDS_MAX_ITERATIONS must be greater than zero")
+            if self.openhands_contract_repair_attempts < 0:
+                raise RuntimeError("SYNODE_OPENHANDS_CONTRACT_REPAIR_ATTEMPTS must be non-negative")
+            if bool(self.openhands_host_workspace) != bool(self.openhands_container_workspace):
+                raise RuntimeError(
+                    "SYNODE_OPENHANDS_HOST_WORKSPACE and "
+                    "SYNODE_OPENHANDS_CONTAINER_WORKSPACE must be set together"
+                )
+            if self.openhands_container_workspace and not Path(
+                self.openhands_container_workspace
+            ).is_absolute():
+                raise RuntimeError("SYNODE_OPENHANDS_CONTAINER_WORKSPACE must be an absolute path")
         if not self.workspace_allowlist_paths:
             raise RuntimeError("SYNODE_WORKSPACE_ALLOWLIST must include at least one path")
         if not self.mcp_proxy_base_url.strip():

@@ -18,7 +18,9 @@ const EVENT_TYPES = [
   "model_stream_started",
   "model_token_delta",
   "model_stream_completed",
+  "tool_started",
   "tool_called",
+  "tool_completed",
   "approval_required",
   "approval_decided",
   "operator_required",
@@ -59,6 +61,7 @@ export function useRunEvents(runId: string | null): RunEvent[] {
         void queryClient.invalidateQueries({ queryKey: ["runs"] });
         void queryClient.invalidateQueries({ queryKey: ["run", runId] });
         void queryClient.invalidateQueries({ queryKey: ["artifacts", runId] });
+        void queryClient.invalidateQueries({ queryKey: ["run-report", runId] });
         void queryClient.invalidateQueries({ queryKey: ["tool-audit", runId] });
         void queryClient.invalidateQueries({ queryKey: ["approvals", runId] });
         void queryClient.invalidateQueries({ queryKey: ["operator-requests", runId] });

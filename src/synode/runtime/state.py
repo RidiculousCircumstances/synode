@@ -35,4 +35,5 @@ class SynodeState(TypedDict, total=False):
     patch_repair_error: str
     review: dict[str, Any]
     plan_only: bool
+    run_report: dict[str, Any]
     final_answer: str

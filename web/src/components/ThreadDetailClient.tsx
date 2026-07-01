@@ -32,6 +32,7 @@ import { formatDateTime, shortId } from "@/lib/format";
 import { useBodyScrollLock } from "@/hooks/useBodyScrollLock";
 import { useRunEvents } from "@/hooks/useRunEvents";
 import type { InteractionMode, Run, RunEvent, RunMode, RunStatus, ThreadMessage } from "@/types";
+import { RunReportView, reportFromMessageMetadata } from "@/components/reports/RunReportView";
 import {
   CompactList,
   CompactRow,
@@ -555,6 +556,12 @@ function ApprovalInlineActions({
 }
 
 function ThreadMessageContent({ message }: { message: ThreadMessage }) {
+  if (message.message_type === "run_report") {
+    const report = reportFromMessageMetadata(message.metadata);
+    if (report) {
+      return <RunReportView report={report} density="chat" />;
+    }
+  }
   if (message.content.startsWith("Synode run summary:")) {
     return <RunSummaryContent content={message.content} />;
   }
@@ -1040,6 +1047,11 @@ function buildProcessingStatus(run: Run | null, events: RunEvent[]): ProcessingS
 
 function describeRunEvent(event: RunEvent): string {
   const payload = event.payload;
+  const displayTitle = eventDisplayString(payload, "title");
+  if (displayTitle) {
+    const target = eventDisplayString(payload, "target");
+    return target ? `${displayTitle}: ${target}` : displayTitle;
+  }
   if (event.event_type === "model_stream_started") {
     const role = event.role || metadataString(payload, "role") || "model";
     return `Streaming output from ${role}`;
@@ -1057,10 +1069,13 @@ function describeRunEvent(event: RunEvent): string {
     const role = event.role ? ` (${event.role})` : "";
     return `Running ${node.replaceAll("_", " ")}${role}`;
   }
-  if (event.event_type === "tool_called") {
+  if (event.event_type === "tool_started" || event.event_type === "tool_completed" || event.event_type === "tool_called") {
     const tool = metadataString(payload, "tool_name") || "tool";
     const status = metadataString(payload, "status");
-    return status ? `${tool} ${status}` : `Calling ${tool}`;
+    if (event.event_type === "tool_started") {
+      return `Using ${tool}`;
+    }
+    return status ? `${tool} ${status.replaceAll("_", " ")}` : `${tool} finished`;
   }
   if (event.event_type === "model_invoked") {
     const role = event.role || metadataString(payload, "role") || "model";
@@ -1104,6 +1119,7 @@ function isSpinningEvent(eventType: string): boolean {
     "approval_required",
     "verification_completed",
     "artifact_created",
+    "tool_completed",
     "model_stream_completed",
   ].includes(eventType);
 }
@@ -1411,6 +1427,15 @@ function buildApprovalDecisionMap(messages: ThreadMessage[]): Map<string, Approv
 
 function metadataString(metadata: Record<string, unknown>, key: string): string {
   const value = metadata[key];
+  return typeof value === "string" ? value : "";
+}
+
+function eventDisplayString(payload: Record<string, unknown>, key: string): string {
+  const display = payload.display;
+  if (!display || typeof display !== "object") {
+    return "";
+  }
+  const value = (display as Record<string, unknown>)[key];
   return typeof value === "string" ? value : "";
 }
 

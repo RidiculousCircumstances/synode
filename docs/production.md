@@ -67,12 +67,17 @@ SYNODE_OPENHANDS_API_KEY=
 SYNODE_OPENHANDS_API_MODE=agent_server
 SYNODE_OPENHANDS_TIMEOUT_SECONDS=120
 SYNODE_OPENHANDS_POLL_INTERVAL_SECONDS=1
+SYNODE_OPENHANDS_MAX_ITERATIONS=80
+SYNODE_OPENHANDS_HOST_WORKSPACE=/absolute/path/to/synode/var/workspaces
+SYNODE_OPENHANDS_CONTAINER_WORKSPACE=/workspace
 ```
 
 OpenHands is intentionally external to the default Compose stack. If a workflow
 requires OpenHands while it is disabled or unreachable, the run fails explicitly.
-`agent_server` is the default mode for a local OpenHands Agent Server. Use
-`cloud_v1` only for the hosted OpenHands Cloud API.
+`agent_server` is the default mode for a local OpenHands Agent Server. Synode
+passes OpenHands an `agent_settings` payload from the selected Synode model
+profile and translates Docker workspaces to host paths with the mapping above.
+Use `cloud_v1` only for the hosted OpenHands Cloud API.
 Do not rely on OpenHands' own UI confirmation as the source of authority:
 OpenHands pending actions are bridged into Synode approvals, and Synode approval
 records remain the audit source of truth.

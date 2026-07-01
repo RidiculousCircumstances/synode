@@ -12,7 +12,10 @@ from synode.registry import RoleRegistry
 from synode.runtime.execution import (
     ExecutionBackendRegistry,
     HttpOpenHandsClient,
+    NodeExecutionInput,
     OpenHandsConversationState,
+    OpenHandsNodeBackend,
+    _conversation_payload,
 )
 from synode.runtime.queue import InMemoryRunQueueTransport
 from synode.runtime.service import OrchestrationService
@@ -183,8 +186,10 @@ async def test_openhands_node_backend_completes_coding_run(settings, database, t
     assert "OpenHands completed" in (result.final_answer or "")
     assert len(client.payloads) == 1
     assert any(artifact.kind == "openhands_coder" for artifact in artifacts)
-    proxy_config = client.payloads[0]["mcp_servers"]["synode"]
+    proxy_config = client.payloads[0]["agent_settings"]["mcp_config"]["mcpServers"]["synode"]
     assert "/mcp/proxy/" in proxy_config["url"]
+    assert proxy_config["type"] == "streamable-http"
+    assert "tools" not in proxy_config
     assert proxy_config["headers"]["Authorization"].startswith("Bearer ")
 
 
@@ -322,6 +327,71 @@ async def test_openhands_confirmation_uses_synode_approval(settings, database, t
     assert client.accepted == ["conv-1"]
 
 
+async def test_openhands_contract_repair_continues_same_conversation(
+    settings,
+    database,
+    tmp_path: pathlib.Path,
+) -> None:
+    client = _FakeOpenHandsClient(["completed", "completed"], invalid_completions=1)
+    service = await _openhands_service(settings, database, client)
+    roles = {role.name: role for role in await service.list_agent_roles()}
+    graph = await service.create_agent_graph(
+        _graph_payload(
+            roles,
+            name="openhands repair graph",
+            workers=["coder"],
+            node_runtime_bindings={"coder": RuntimeBackend.OPENHANDS},
+        )
+    )
+
+    result = await service.run_task(
+        "Let OpenHands repair its malformed contract output",
+        workspace=str(tmp_path),
+        model_provider="fake",
+        mode=RunMode.CODING,
+        agent_graph_id=graph.id,
+    )
+    artifacts = await service.list_artifacts(result.id, limit=20)
+
+    assert result.status == RunStatus.COMPLETED
+    assert client.messages and "Synode rejected your previous final response" in client.messages[0]
+    assert any(
+        artifact.kind == "openhands_coder" and artifact.content.get("status") == "contract_error"
+        for artifact in artifacts
+    )
+    assert any(
+        artifact.kind == "openhands_coder" and artifact.content.get("status") == "completed"
+        for artifact in artifacts
+    )
+
+
+async def test_openhands_rejects_ungrounded_real_mcp_report(settings, database) -> None:
+    settings.openhands_enabled = True
+    settings.openhands_base_url = "http://openhands.test"
+    settings.openhands_contract_repair_attempts = 0
+    client = _FakeOpenHandsClient(["completed"])
+    backend = OpenHandsNodeBackend(settings, database, client=client)
+
+    with pytest.raises(RuntimeError, match="not grounded in Synode MCP tool audit"):
+        await backend.execute(
+            NodeExecutionInput(
+                run_id="run-ungrounded",
+                thread_id="thread-ungrounded",
+                node_id="coder",
+                role="coder",
+                backend_id=RuntimeBackend.OPENHANDS.value,
+                contract_id="worker_agent_output",
+                task="Patch the repository",
+                workspace="/workspace/project",
+                mode=RunMode.CODING.value,
+                model_provider=ModelProviderType.OLLAMA.value,
+                tool_proxy_url="http://127.0.0.1:8787/mcp/proxy/test",
+                tool_proxy_token="token",
+                tool_proxy_tools=["native.fs_list"],
+            )
+        )
+
+
 async def test_openhands_http_client_uses_agent_server_api(settings, monkeypatch: pytest.MonkeyPatch) -> None:
     settings.openhands_base_url = "http://openhands.test"
     settings.openhands_api_key = "session-key"
@@ -340,6 +410,12 @@ async def test_openhands_http_client_uses_agent_server_api(settings, monkeypatch
             return httpx.Response(200, json={"id": "conv-1", "execution_status": "idle"})
         if request.url.path == "/api/conversations/conv-1/run":
             return httpx.Response(200, json={"success": True})
+        if request.url.path == "/api/conversations/conv-1":
+            return httpx.Response(200, json={"id": "conv-1", "execution_status": "finished"})
+        if request.url.path == "/api/conversations/conv-1/agent_final_response":
+            return httpx.Response(200, json={"response": '{"summary":"done","changed_files":[]}'})
+        if request.url.path == "/api/conversations/conv-1/events":
+            return httpx.Response(200, json={"success": True})
         if request.url.path == "/api/conversations/conv-1/events/respond_to_confirmation":
             return httpx.Response(200, json={"success": True})
         return httpx.Response(404, json={"detail": "not found"})
@@ -352,17 +428,198 @@ async def test_openhands_http_client_uses_agent_server_api(settings, monkeypatch
         {
             "initial_message": {"content": [{"type": "text", "text": "inspect"}]},
             "workspace": "/workspace/project",
+            "metadata": {"synode_run_id": "run-1", "ignored": None},
+            "agent_settings": {
+                "schema_version": 4,
+                "agent_kind": "openhands",
+                "agent": "CodeActAgent",
+                "llm": {"model": "ollama/qwen2.5-coder:7b", "api_key": "ollama"},
+            },
         }
     )
+    finished = await client.get_conversation("conv-1")
+    repaired = await client.send_message("conv-1", "repair")
     await client.respond_to_confirmation("conv-1", accept=True, reason="approved")
 
     assert available is True
     assert detail == "OpenHands agent_server endpoint is reachable"
     assert state.conversation_id == "conv-1"
+    assert finished.final_message == '{"summary":"done","changed_files":[]}'
+    assert repaired.conversation_id == "conv-1"
     create_payload = next(body for method, path, body in seen if method == "POST" and path == "/api/conversations")
-    assert create_payload["workspace"] == {"working_dir": "/workspace/project"}
+    repair_payload = next(body for method, path, body in seen if method == "POST" and path == "/api/conversations/conv-1/events")
+    assert create_payload["workspace"] == {"working_dir": "/workspace/project", "kind": "LocalWorkspace"}
     assert create_payload["confirmation_policy"] == {"kind": "AlwaysConfirm"}
-    assert ("POST", "/api/conversations/conv-1/run", {}) in seen
+    assert create_payload["observability_metadata"] == {"synode_run_id": "run-1"}
+    assert "metadata" not in create_payload
+    assert create_payload["initial_message"]["run"] is True
+    assert create_payload["agent_settings"]["agent"] == "CodeActAgent"
+    assert repair_payload == {"role": "user", "run": True, "content": [{"type": "text", "text": "repair"}]}
+    assert ("POST", "/api/conversations/conv-1/run", {}) not in seen
+
+
+async def test_openhands_http_client_treats_fallback_already_running_start_as_success(
+    settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings.openhands_base_url = "http://openhands.test"
+    settings.openhands_api_mode = "agent_server"
+    seen: list[tuple[str, str]] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        seen.append((request.method, request.url.path))
+        if request.url.path == "/api/conversations":
+            return httpx.Response(201, json={"id": "conv-1", "execution_status": "idle"})
+        if request.url.path == "/api/conversations/conv-1/run":
+            return httpx.Response(
+                409,
+                json={"detail": "Conversation already running. Wait for completion or pause first."},
+            )
+        if request.url.path == "/api/conversations/conv-1":
+            return httpx.Response(200, json={"id": "conv-1", "execution_status": "running"})
+        return httpx.Response(404, json={"detail": "not found"})
+
+    _patch_execution_async_client(monkeypatch, httpx.MockTransport(handle))
+
+    client = HttpOpenHandsClient(settings)
+    state = await client.start_conversation(
+        {
+            "workspace": "/workspace/project",
+            "agent_settings": {
+                "schema_version": 4,
+                "agent_kind": "openhands",
+                "agent": "CodeActAgent",
+                "llm": {"model": "ollama/qwen2.5-coder:7b", "api_key": "ollama"},
+            },
+        }
+    )
+
+    assert state.conversation_id == "conv-1"
+    assert state.status == "running"
+    assert ("POST", "/api/conversations/conv-1/run") in seen
+    assert ("GET", "/api/conversations/conv-1") in seen
+
+
+async def test_openhands_http_client_rejects_idle_state_after_start_conflict(
+    settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings.openhands_base_url = "http://openhands.test"
+    settings.openhands_api_mode = "agent_server"
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/conversations":
+            return httpx.Response(201, json={"id": "conv-1", "execution_status": "idle"})
+        if request.url.path == "/api/conversations/conv-1/run":
+            return httpx.Response(
+                409,
+                json={"detail": "Conversation already running. Wait for completion or pause first."},
+            )
+        if request.url.path == "/api/conversations/conv-1":
+            return httpx.Response(200, json={"id": "conv-1", "execution_status": "idle"})
+        return httpx.Response(404, json={"detail": "not found"})
+
+    _patch_execution_async_client(monkeypatch, httpx.MockTransport(handle))
+
+    client = HttpOpenHandsClient(settings)
+    with pytest.raises(RuntimeError, match="conversation is still idle"):
+        await client.start_conversation(
+            {
+                "workspace": "/workspace/project",
+                "agent_settings": {
+                    "schema_version": 4,
+                    "agent_kind": "openhands",
+                    "agent": "CodeActAgent",
+                    "llm": {"model": "ollama/qwen2.5-coder:7b", "api_key": "ollama"},
+                },
+            }
+        )
+
+
+async def test_openhands_payload_uses_synode_profile_and_workspace_mapping(settings, database) -> None:
+    settings.openhands_max_iterations = 12
+    settings.openhands_host_workspace = "/host/synode-workspaces"
+    settings.openhands_container_workspace = "/workspace"
+    async with database.session() as session:
+        profile = await Repository(session).create_model_profile(
+            name="openhands eval profile",
+            provider_type=ModelProviderType.OLLAMA,
+            base_url="http://127.0.0.1:11434",
+            model="qwen2.5-coder:7b",
+            options={"temperature": 0.1, "top_p": 0.9, "num_predict": 800, "timeout_seconds": 180},
+        )
+
+    payload = await _conversation_payload(
+        NodeExecutionInput(
+            run_id="run-1",
+            thread_id="thread-1",
+            node_id="coder",
+            role="coder",
+            backend_id=RuntimeBackend.OPENHANDS.value,
+            contract_id="worker_agent_output",
+            task="Fix the CLI",
+            workspace="/workspace/evals/task",
+            mode=RunMode.CODING.value,
+            plan_task="Inspect the CLI entrypoint.",
+            plan_steps=[
+                {"role": "coder", "task": "Inspect the CLI entrypoint.", "tool_calls": []},
+                {"role": "coder", "task": "Patch argument parsing and run tests.", "tool_calls": []},
+                {"role": "reviewer", "task": "Review the result.", "tool_calls": []},
+            ],
+            default_model_profile_id=profile.id,
+        ),
+        settings,
+        database,
+    )
+
+    llm = payload["agent_settings"]["llm"]
+    message_text = payload["initial_message"]["content"][0]["text"]
+    assert payload["workspace"] == "/host/synode-workspaces/evals/task"
+    assert payload["max_iterations"] == 12
+    assert "Full user task: Fix the CLI" in message_text
+    assert "Role plan steps:" in message_text
+    assert "Patch argument parsing and run tests." in message_text
+    assert "Review the result." not in message_text
+    assert "When this node's work is complete" in message_text
+    assert llm["model"] == "ollama/qwen2.5-coder:7b"
+    assert llm["base_url"] == "http://127.0.0.1:11434"
+    assert llm["temperature"] == 0.1
+    assert llm["top_p"] == 0.9
+    assert llm["max_output_tokens"] == 800
+    assert llm["timeout"] == 180
+    assert llm["reasoning_effort"] == "none"
+    assert llm["enable_encrypted_reasoning"] is False
+    assert "native_tool_calling" not in llm
+
+
+async def test_openhands_llm_settings_can_override_native_tool_calling(settings, database) -> None:
+    async with database.session() as session:
+        profile = await Repository(session).create_model_profile(
+            name="openhands eval profile no native tools",
+            provider_type=ModelProviderType.OLLAMA,
+            base_url="http://127.0.0.1:11434",
+            model="qwen2.5-coder:7b",
+            options={"native_tool_calling": False},
+        )
+
+    payload = await _conversation_payload(
+        NodeExecutionInput(
+            run_id="run-1",
+            thread_id="thread-1",
+            node_id="coder",
+            role="coder",
+            backend_id=RuntimeBackend.OPENHANDS.value,
+            contract_id="worker_agent_output",
+            task="Fix the CLI",
+            workspace="/workspace/evals/task",
+            mode=RunMode.CODING.value,
+            default_model_profile_id=profile.id,
+        ),
+        settings,
+        database,
+    )
+
+    assert payload["agent_settings"]["llm"]["native_tool_calling"] is False
 
 
 async def test_secret_creation_requires_configured_key(service) -> None:
@@ -389,9 +646,11 @@ async def _openhands_service(settings, database, client: "_FakeOpenHandsClient")
 
 
 class _FakeOpenHandsClient:
-    def __init__(self, statuses: list[str]):
+    def __init__(self, statuses: list[str], *, invalid_completions: int = 0):
         self.statuses = statuses
+        self.invalid_completions = invalid_completions
         self.accepted: list[str] = []
+        self.messages: list[str] = []
         self.contract_id = "worker_agent_output"
         self.payloads: list[dict] = []
 
@@ -406,6 +665,10 @@ class _FakeOpenHandsClient:
         return self._state()
 
     async def get_conversation(self, conversation_id: str) -> OpenHandsConversationState:
+        return self._state()
+
+    async def send_message(self, conversation_id: str, text: str) -> OpenHandsConversationState:
+        self.messages.append(text)
         return self._state()
 
     async def respond_to_confirmation(
@@ -423,6 +686,15 @@ class _FakeOpenHandsClient:
 
     def _state(self) -> OpenHandsConversationState:
         status = self.statuses.pop(0) if self.statuses else "completed"
+        if status == "completed" and self.invalid_completions > 0:
+            self.invalid_completions -= 1
+            invalid = '```json\n{"tool_name":"native.fs_list","ok":true}\n```'
+            return OpenHandsConversationState(
+                conversation_id="conv-1",
+                status=status,
+                raw={"status": status, "final_message": invalid},
+                final_message=invalid,
+            )
         contract_payload = self._contract_payload()
         return OpenHandsConversationState(
             conversation_id="conv-1",

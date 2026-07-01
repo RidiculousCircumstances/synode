@@ -202,6 +202,12 @@
 - Coding evals can target `native_langgraph` or `openhands` backends. OpenHands
   evals bind only the coder node externally and skip native-only
   `PatchProposal` contract regressions explicitly.
+- Structured run reports are now the intended chat/run-detail presentation
+  surface. New runs should persist `run_report` artifacts and `run_report`
+  thread messages instead of technical `Synode run summary:` text.
+- Layered package boundaries have started with `domain`, `application`, and
+  `infrastructure`; new report/read-model code uses these layers and architecture
+  tests enforce dependency direction for them.
 
 ### Now:
 - MVP backend and operator UI include DB-backed runtime configuration screens
@@ -240,6 +246,9 @@
 - Small-model coding benchmark tasks cover refund accounting, inclusive date
   filtering, config precedence, markdown TOC idempotency, no-change behavior,
   operator ambiguity handling, and unsafe verification contract behavior.
+- Chat UI should render structured reports, patch results, verification, and
+  tool activity as compact views; raw JSON belongs in collapsed diagnostics or
+  run artifacts.
 
 ### Next:
 - Run `synode eval coding` against `llama3.1:8b` and `qwen2.5-coder:7b`, compare

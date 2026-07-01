@@ -28,6 +28,7 @@ export type ThreadMessageAuthorType = "user" | "agent" | "system";
 export type ThreadMessageType =
   | "text"
   | "run_summary"
+  | "run_report"
   | "approval_request"
   | "approval_decision"
   | "operator_request"
@@ -104,6 +105,78 @@ export interface Artifact {
   path: string | null;
   content: Record<string, unknown>;
   created_at: string;
+}
+
+export interface PlanReportStep {
+  role: string;
+  task: string;
+  status: "planned" | "running" | "completed" | "blocked";
+  tool_count: number;
+}
+
+export interface RoleOutputReport {
+  role: string;
+  summary: string;
+  tool_count: number;
+  failed_tool_count: number;
+  risks: string[];
+}
+
+export interface PatchFileReport {
+  path: string;
+  operation: string;
+  status: "ok" | "failed" | "pending_approval" | "skipped";
+  summary: string | null;
+  error: string | null;
+}
+
+export interface PatchResultsReport {
+  status: "not_applicable" | "ok" | "failed" | "pending_approval" | "no_change";
+  files: PatchFileReport[];
+  raw_count: number;
+}
+
+export interface VerificationCommandReport {
+  command: string;
+  status: "passed" | "failed" | "skipped" | "unknown";
+  summary: string | null;
+}
+
+export interface VerificationReport {
+  status: "not_run" | "passed" | "failed" | "skipped";
+  commands: VerificationCommandReport[];
+  reason: string | null;
+}
+
+export interface ToolActivityReport {
+  role: string | null;
+  tool_name: string;
+  status: string;
+  risk: string | null;
+  title: string;
+  target: string | null;
+  approval_id: string | null;
+}
+
+export interface RunReport {
+  version: number;
+  run_id: string;
+  thread_id: string;
+  mode: string;
+  status: string;
+  headline: string;
+  summary: string;
+  plan: PlanReportStep[];
+  role_outputs: RoleOutputReport[];
+  patch_results: PatchResultsReport;
+  verification: VerificationReport;
+  tool_activity: ToolActivityReport[];
+  blockers: string[];
+  advisory: string[];
+  diagnostics: Record<string, unknown>;
+  raw_refs: Record<string, string>;
+  artifact_id?: string | null;
+  created_at?: string | null;
 }
 
 export interface Approval {

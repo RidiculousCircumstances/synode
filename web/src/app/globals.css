@@ -1681,6 +1681,160 @@ a {
   white-space: pre;
 }
 
+.run-report {
+  display: grid;
+  gap: 0.75rem;
+  min-width: 0;
+}
+
+.run-report-chat {
+  gap: 0.55rem;
+}
+
+.run-report-head,
+.run-report-tile,
+.run-report-section,
+.run-report-issues {
+  min-width: 0;
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--card) 72%, transparent);
+  border-radius: 0.55rem;
+  padding: 0.7rem;
+}
+
+.run-report-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.run-report-head strong {
+  display: block;
+  font-size: 0.93rem;
+  line-height: 1.25;
+}
+
+.run-report-head p,
+.run-report-role p {
+  margin: 0.25rem 0 0;
+  color: var(--muted-foreground);
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+
+.run-report-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.65rem;
+}
+
+.run-report-tile-head,
+.run-report-section h3,
+.run-report-issues h3 {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.45rem;
+  margin: 0 0 0.55rem;
+  font-size: 0.76rem;
+  color: var(--foreground);
+}
+
+.run-report-section h3,
+.run-report-issues h3 {
+  justify-content: flex-start;
+}
+
+.run-report-plan,
+.run-report-files,
+.run-report-commands,
+.run-report-issues ul {
+  display: grid;
+  gap: 0.38rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.run-report-plan li,
+.run-report-files li,
+.run-report-commands li,
+.run-report-tool,
+.run-report-role {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.45rem;
+  min-width: 0;
+  border-top: 1px solid color-mix(in srgb, var(--border) 75%, transparent);
+  padding-top: 0.38rem;
+  font-size: 0.78rem;
+}
+
+.run-report-plan li:first-child,
+.run-report-files li:first-child,
+.run-report-commands li:first-child,
+.run-report-tool:first-child,
+.run-report-role:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.run-report-files li,
+.run-report-commands li {
+  grid-template-columns: auto minmax(0, 1fr);
+}
+
+.run-report-files em,
+.run-report-tool em,
+.run-report-role small,
+.run-report-commands small,
+.run-report-files small {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted-foreground);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.run-report-files strong {
+  grid-column: 1 / -1;
+  color: var(--danger);
+  font-size: 0.74rem;
+  font-weight: 600;
+}
+
+.run-report-role-list,
+.run-report-tools {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.run-report-role {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+}
+
+.run-report-issues.danger {
+  border-color: color-mix(in srgb, var(--danger) 42%, var(--border));
+}
+
+.run-report-issues.warning {
+  border-color: color-mix(in srgb, var(--warning) 42%, var(--border));
+}
+
+.run-report-issues li {
+  color: var(--muted-foreground);
+  font-size: 0.78rem;
+}
+
+.final-answer-text {
+  color: var(--foreground);
+  font-size: 0.9rem;
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+
 .artifact-row {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
@@ -3176,6 +3330,13 @@ a {
   .agent-catalog-row.with-actions,
   .graph-config-row,
   .thread-run-row {
+    grid-template-columns: 1fr;
+  }
+
+  .run-report-grid,
+  .run-report-plan li,
+  .run-report-role,
+  .run-report-tool {
     grid-template-columns: 1fr;
   }
 

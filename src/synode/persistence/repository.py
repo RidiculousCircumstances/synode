@@ -438,7 +438,7 @@ class Repository:
             run.thread_id,
             author_type=ThreadMessageAuthorType.SYSTEM,
             author_name="runtime",
-            message_type=ThreadMessageType.RUN_SUMMARY,
+            message_type=ThreadMessageType.RUN_REPORT,
             content=f"Run cancelling: {reason}",
             run_id=run_id,
             metadata={"status": RunStatus.CANCELLING.value},
@@ -855,9 +855,15 @@ class Repository:
         self.session.add(record)
         await self.add_event(
             run_id,
-            EventType.TOOL_CALLED.value,
+            EventType.TOOL_COMPLETED.value,
             role,
-            {"tool_name": tool_name, "risk": risk.value, "status": status, "approval_id": approval_id},
+            {
+                "tool_name": tool_name,
+                "risk": risk.value,
+                "status": status,
+                "approval_id": approval_id,
+                "display": _tool_event_display(tool_name, status, output_payload, approval_id=approval_id),
+            },
         )
         await self.session.flush()
         return record
@@ -1932,6 +1938,55 @@ def _truncate_json_payload(payload: dict[str, Any], max_bytes: int) -> dict[str,
         "max_size_bytes": max_bytes,
         "preview": preview,
     }
+
+
+def _tool_event_display(
+    tool_name: str,
+    status: str,
+    output_payload: dict[str, Any],
+    *,
+    approval_id: str | None,
+) -> dict[str, Any]:
+    if approval_id:
+        title = f"{tool_name} needs approval"
+        tone = "warning"
+    elif status in {"ok", "approved"}:
+        title = f"{tool_name} completed"
+        tone = "success"
+    elif status == "denied":
+        title = f"{tool_name} denied"
+        tone = "danger"
+    else:
+        title = f"{tool_name} failed"
+        tone = "danger"
+    target = _tool_event_target(output_payload)
+    return {
+        "title": title,
+        "status": status,
+        "tone": tone,
+        "target": target,
+    }
+
+
+def _tool_event_target(output_payload: dict[str, Any]) -> str | None:
+    output = output_payload.get("output")
+    if not isinstance(output, dict):
+        output = output_payload
+    for key in ("path", "file", "command", "query", "url"):
+        value = output.get(key)
+        if value:
+            return _compact_text(value, 180)
+    error = output_payload.get("error")
+    if error:
+        return _compact_text(error, 180)
+    return None
+
+
+def _compact_text(value: Any, limit: int) -> str:
+    text = " ".join(str(value).split())
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3].rstrip() + "..."
 
 
 def _rowcount(result: Any) -> int:

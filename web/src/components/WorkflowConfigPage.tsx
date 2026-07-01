@@ -269,7 +269,7 @@ export default function WorkflowConfigPage() {
       <PageHeader
         eyebrow="workflow config"
         title="Workflows"
-        description="Graph presets, role inventory, and execution diagnostics."
+        description="Graph presets, role catalog, and latest execution diagnostics."
         icon={Bot}
         summary={
           <div className="summary-grid compact">
@@ -283,14 +283,14 @@ export default function WorkflowConfigPage() {
         onChange={setActiveTab}
         ariaLabel="Workflow configuration sections"
         items={[
-          { id: "workflows", label: "Workflows", description: "Graph presets", icon: GitBranch, count: graphs.length },
+          { id: "workflows", label: "Graphs", description: "Agent graphs", icon: GitBranch, count: graphs.length },
           { id: "roles", label: "Roles", description: "Role catalog", icon: Users, count: agents.length },
           { id: "execution", label: "Execution", description: "Latest graph", icon: Activity, count: runsQuery.data?.length ?? 0 },
         ]}
       />
       {activeTab === "workflows" ? (
         <Panel
-          title="Workflows"
+          title="Agent graphs"
           className="workflow-table-panel"
           action={
             <button type="button" className="primary-button" onClick={openCreateGraphDialog}>

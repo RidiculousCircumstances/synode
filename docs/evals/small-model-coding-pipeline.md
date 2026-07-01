@@ -88,7 +88,12 @@ make eval-coding
 OpenHands eval mode binds only the coder node to `openhands`; supervisor and
 reviewer stay native. The native-only unsafe verification contract task is
 skipped in OpenHands mode because it exercises Synode `PatchProposal`
-validation rather than black-box node execution.
+validation rather than black-box node execution. In `agent_server` mode Synode
+passes OpenHands an `agent_settings` payload built from the same Synode model
+profile used by the run. When API/worker run in Docker and OpenHands runs on
+the host, set `SYNODE_OPENHANDS_HOST_WORKSPACE` and
+`SYNODE_OPENHANDS_CONTAINER_WORKSPACE` so `/workspace/evals/...` maps back to
+the host `var/workspaces/evals/...` tree.
 
 ## Acceptance
 
