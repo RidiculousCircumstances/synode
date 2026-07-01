@@ -32,7 +32,11 @@ export default function ThreadsPage() {
   const threads = threadsQuery.data ?? [];
   const activeCount = useMemo(() => threads.filter((thread) => thread.status === "active").length, [threads]);
   const blockedCount = useMemo(
-    () => threads.filter((thread) => thread.latest_run_status === "waiting_approval").length,
+    () =>
+      threads.filter(
+        (thread) =>
+          thread.latest_run_status === "waiting_approval" || thread.latest_run_status === "waiting_operator",
+      ).length,
     [threads],
   );
 

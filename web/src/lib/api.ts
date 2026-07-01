@@ -8,7 +8,10 @@ import type {
   ModelProfileTestResult,
   MCPServer,
   MCPServerTransport,
+  OperatorRequest,
+  OperatorResponseType,
   Run,
+  InteractionMode,
   RunEvent,
   RunMetrics,
   RunMode,
@@ -143,6 +146,7 @@ export function createThread(payload: {
   role_model_profile_ids?: Record<string, string>;
   agent_graph_id?: string | null;
   mode: RunMode;
+  interaction_mode?: InteractionMode;
 }): Promise<ThreadDetail> {
   return request<ThreadDetail>("/threads", {
     method: "POST",
@@ -175,6 +179,7 @@ export function createThreadRun(
     role_model_profile_ids?: Record<string, string>;
     agent_graph_id?: string | null;
     mode: RunMode;
+    interaction_mode?: InteractionMode;
   },
 ): Promise<Run> {
   return request<Run>(`/threads/${threadId}/runs`, {
@@ -195,6 +200,7 @@ export function createRun(payload: {
   role_model_profile_ids?: Record<string, string>;
   agent_graph_id?: string | null;
   mode: RunMode;
+  interaction_mode?: InteractionMode;
 }): Promise<Run> {
   return request<Run>("/runs", {
     method: "POST",
@@ -232,12 +238,37 @@ export function listRunApprovals(runId: string): Promise<Approval[]> {
   return request<Approval[]>(`/runs/${runId}/approvals`);
 }
 
+export function listRunOperatorRequests(runId: string): Promise<OperatorRequest[]> {
+  return request<OperatorRequest[]>(`/runs/${runId}/operator-requests`);
+}
+
 export function decideApproval(
   approvalId: string,
   decision: "approve" | "reject",
   reason: string,
 ): Promise<{ status: string }> {
   return request<{ status: string }>(`/approvals/${approvalId}/${decision}`, {
+    method: "POST",
+    body: JSON.stringify({ reason }),
+  });
+}
+
+export function respondOperatorRequest(
+  requestId: string,
+  payload: {
+    response_type: OperatorResponseType;
+    message?: string | null;
+    payload?: Record<string, unknown>;
+  },
+): Promise<OperatorRequest> {
+  return request<OperatorRequest>(`/operator-requests/${requestId}/respond`, {
+    method: "POST",
+    body: JSON.stringify({ payload: {}, ...payload }),
+  });
+}
+
+export function cancelOperatorRequest(requestId: string, reason: string): Promise<OperatorRequest> {
+  return request<OperatorRequest>(`/operator-requests/${requestId}/cancel`, {
     method: "POST",
     body: JSON.stringify({ reason }),
   });

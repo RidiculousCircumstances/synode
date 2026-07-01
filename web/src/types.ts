@@ -3,6 +3,7 @@ export type RunStatus =
   | "queued"
   | "running"
   | "waiting_approval"
+  | "waiting_operator"
   | "cancelling"
   | "completed"
   | "failed"
@@ -10,6 +11,7 @@ export type RunStatus =
   | "cancelled";
 
 export type RunMode = "general" | "coding";
+export type InteractionMode = "auto" | "plan_review" | "plan_only";
 
 export type RuntimeBackend = string;
 export type AgentGraphNodeKind = "control" | "worker";
@@ -28,6 +30,8 @@ export type ThreadMessageType =
   | "run_summary"
   | "approval_request"
   | "approval_decision"
+  | "operator_request"
+  | "operator_decision"
   | "final";
 
 export interface Run {
@@ -35,6 +39,7 @@ export interface Run {
   thread_id: string;
   status: RunStatus;
   mode: RunMode;
+  interaction_mode: InteractionMode;
   task: string;
   workspace: string | null;
   model_provider: string;
@@ -112,6 +117,28 @@ export interface Approval {
   decision_reason: string | null;
   created_at: string;
   decided_at: string | null;
+}
+
+export type OperatorRequestKind = "plan_review" | "ambiguity" | "state_edit";
+export type OperatorRequestStatus = "pending" | "resolved" | "cancelled";
+export type OperatorResponseType = "approve" | "edit" | "reject" | "respond";
+
+export interface OperatorRequest {
+  id: string;
+  run_id: string;
+  thread_id: string;
+  node_id: string | null;
+  role: string | null;
+  kind: OperatorRequestKind;
+  prompt: string;
+  context: Record<string, unknown>;
+  proposed_payload: Record<string, unknown>;
+  status: OperatorRequestStatus;
+  response_payload: Record<string, unknown>;
+  created_at: string;
+  resolved_at: string | null;
+  cancelled_at: string | null;
+  consumed_at: string | null;
 }
 
 export interface ToolAudit {

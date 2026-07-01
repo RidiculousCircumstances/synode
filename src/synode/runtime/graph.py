@@ -7,7 +7,9 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from langgraph.constants import END, START
+from langgraph.errors import GraphInterrupt
 from langgraph.graph import StateGraph
+from langgraph.types import interrupt
 from pydantic import BaseModel
 
 from synode.models.provider import ModelProviderRegistry, ModelRequest
@@ -25,12 +27,20 @@ from synode.runtime.decisions import (
     SupervisorDecision,
     VerificationPlan,
 )
-from synode.runtime.execution import ExecutionBackendRegistry, NodeExecutionInput
+from synode.runtime.execution import (
+    ExecutionBackendRegistry,
+    NodeExecutionInput,
+    NodeExecutionOutput,
+)
+from synode.runtime.operator import OperatorRejected, operator_interrupt_payload
 from synode.runtime.state import SynodeState
 from synode.schemas import (
     AgentOutput,
     EventType,
+    InteractionMode,
     NodeExecutionStatus,
+    OperatorRequestKind,
+    OperatorResponseType,
     RoleName,
     RunMode,
     ToolCall,
@@ -106,6 +116,8 @@ def _observed_node(name: str, deps: GraphDependencies, handler: Any):
         ):
             try:
                 result = await handler(state)
+            except GraphInterrupt:
+                raise
             except Exception as exc:
                 await _record_event(
                     deps,
@@ -174,7 +186,9 @@ def _supervisor_node(deps: GraphDependencies):
         if backend != "native_langgraph":
             if deps.execution_backends is None:
                 raise RuntimeError("execution backend registry is not configured")
-            backend_output = await deps.execution_backends.execute(
+            backend_output = await _execute_external_node_with_operator_interrupt(
+                deps,
+                state,
                 backend,
                 await _external_node_execution_input(deps, state, RoleName.SUPERVISOR.value),
             )
@@ -201,6 +215,24 @@ def _supervisor_node(deps: GraphDependencies):
                 ),
             )
         _validate_supervisor_decision(decision, deps, state)
+        if state.get("interaction_mode") == InteractionMode.PLAN_REVIEW.value:
+            decision = _supervisor_decision_from_operator_response(
+                decision,
+                _request_operator(
+                    state,
+                    kind=OperatorRequestKind.PLAN_REVIEW,
+                    prompt="Review the proposed execution plan before Synode starts worker nodes.",
+                    context={
+                        "task": state["task"],
+                        "mode": state["mode"],
+                        "workspace": state.get("workspace"),
+                    },
+                    proposed_payload={"decision": decision.model_dump(mode="json")},
+                    node_id=_node_for_role(state, RoleName.SUPERVISOR.value).get("id"),
+                    role=RoleName.SUPERVISOR.value,
+                ),
+            )
+            _validate_supervisor_decision(decision, deps, state)
         role_tool_calls = {
             step.role: [call.model_dump(mode="json") for call in step.tool_calls]
             for step in decision.plan
@@ -220,12 +252,15 @@ def _supervisor_node(deps: GraphDependencies):
             "selected_roles": decision.selected_roles,
             "plan": plan,
             "role_tool_calls": role_tool_calls,
+            "plan_only": state.get("interaction_mode") == InteractionMode.PLAN_ONLY.value,
         }
 
     return node
 
 
 def _route_after_supervisor(state: SynodeState) -> str:
+    if state.get("interaction_mode") == InteractionMode.PLAN_ONLY.value or state.get("plan_only"):
+        return "synthesizer"
     if state["mode"] == RunMode.CODING.value:
         if _role_runtime_backend(state, RoleName.CODER.value) != "native_langgraph":
             return "graph_workers"
@@ -263,7 +298,9 @@ async def _run_worker_role(deps: GraphDependencies, state: SynodeState, role: st
     if backend != "native_langgraph":
         if deps.execution_backends is None:
             raise RuntimeError("execution backend registry is not configured")
-        backend_output = await deps.execution_backends.execute(
+        backend_output = await _execute_external_node_with_operator_interrupt(
+            deps,
+            state,
             backend,
             await _external_node_execution_input(deps, state, role),
         )
@@ -315,6 +352,37 @@ async def _run_worker_role(deps: GraphDependencies, state: SynodeState, role: st
             external_state={"native": True},
         )
     return output
+
+
+async def _execute_external_node_with_operator_interrupt(
+    deps: GraphDependencies,
+    state: SynodeState,
+    backend: str,
+    node_input: NodeExecutionInput,
+) -> NodeExecutionOutput:
+    if deps.execution_backends is None:
+        raise RuntimeError("execution backend registry is not configured")
+    output = await deps.execution_backends.execute(backend, node_input)
+    for _ in range(3):
+        if output.status != NodeExecutionStatus.WAITING_OPERATOR:
+            return output
+        if output.operator_request is None:
+            raise RuntimeError(f"external node requested operator input without a request: {node_input.node_id}")
+        request = output.operator_request
+        response = _request_operator(
+            state,
+            kind=request.kind,
+            prompt=request.prompt,
+            context=request.context,
+            proposed_payload=request.proposed_payload,
+            node_id=request.node_id or node_input.node_id,
+            role=request.role or node_input.role,
+        )
+        output = await deps.execution_backends.execute(
+            backend,
+            replace(node_input, operator_response=response),
+        )
+    raise RuntimeError(f"external node repeatedly requested operator input: {node_input.node_id}")
 
 
 def _coding_inspect_node(deps: GraphDependencies):
@@ -477,7 +545,9 @@ def _reviewer_node(deps: GraphDependencies):
         if backend != "native_langgraph":
             if deps.execution_backends is None:
                 raise RuntimeError("execution backend registry is not configured")
-            backend_output = await deps.execution_backends.execute(
+            backend_output = await _execute_external_node_with_operator_interrupt(
+                deps,
+                state,
                 backend,
                 await _external_node_execution_input(
                     deps,
@@ -740,6 +810,56 @@ def _response_usage(response: Any) -> dict[str, int | None]:
 
 def _schema_name(schema: type[BaseModel] | None) -> str | None:
     return schema.__name__ if schema is not None else None
+
+
+def _request_operator(
+    state: SynodeState | dict[str, Any],
+    *,
+    kind: OperatorRequestKind | str,
+    prompt: str,
+    context: dict[str, Any],
+    proposed_payload: dict[str, Any],
+    node_id: str | None,
+    role: str | None,
+) -> dict[str, Any]:
+    response = interrupt(
+        operator_interrupt_payload(
+            run_id=str(state["run_id"]),
+            thread_id=str(state["thread_id"]),
+            kind=kind,
+            prompt=prompt,
+            context=context,
+            proposed_payload=proposed_payload,
+            node_id=node_id,
+            role=role,
+        )
+    )
+    if not isinstance(response, dict):
+        raise ValueError("operator response must be a JSON object")
+    return response
+
+
+def _supervisor_decision_from_operator_response(
+    decision: SupervisorDecision,
+    response: dict[str, Any],
+) -> SupervisorDecision:
+    response_type = str(response.get("response_type") or "")
+    if response_type == OperatorResponseType.APPROVE.value:
+        return decision
+    if response_type == OperatorResponseType.EDIT.value:
+        payload = response.get("payload")
+        if not isinstance(payload, dict):
+            raise ValueError("edited plan response requires payload")
+        edited = payload.get("decision")
+        if not isinstance(edited, dict):
+            edited = payload
+        return SupervisorDecision.model_validate(edited)
+    if response_type == OperatorResponseType.REJECT.value:
+        message = response.get("message")
+        raise OperatorRejected(str(message) if message else "Operator rejected the execution plan.")
+    if response_type == OperatorResponseType.RESPOND.value:
+        raise ValueError("plan review requires approve, edit, or reject")
+    raise ValueError(f"unknown operator response_type: {response_type}")
 
 
 def _validate_supervisor_decision(

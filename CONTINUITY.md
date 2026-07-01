@@ -165,6 +165,16 @@
   Backend/contract compatibility is validated through backend capabilities, and
   external supervisor/reviewer payloads must validate against their Synode node
   contracts before graph execution continues.
+- Planning/operator mode is implemented. Runs carry `interaction_mode`
+  (`auto`, `plan_review`, `plan_only`), `waiting_operator` is a first-class run
+  state, operator requests are DB-backed, API endpoints expose/respond/cancel
+  them, supervisor plan review uses LangGraph `interrupt()` and
+  `Command(resume=...)`, and external node backends can request operator input
+  through the same contract.
+- Run detail UI has an Operator tab with plan preview and
+  approve/edit/reject/respond actions. Run/thread composers expose interaction
+  mode, dashboards count `waiting_operator`, and SSE invalidates operator
+  request state.
 
 ### Now:
 - MVP backend and operator UI include DB-backed runtime configuration screens
@@ -194,6 +204,9 @@
 - Settings UI manages MCP servers through a compact table and creation modal.
 - Workflows UI allows backend selection for supervisor, reviewer, and worker
   nodes while keeping fixed control-node contracts read-only.
+- Operator planning is available for local runs: `plan_review` stops before
+  worker nodes for human approval/editing, while `plan_only` returns the
+  supervisor plan without executing workers.
 
 ### Next:
 - Tune real-model prompts against broader local workloads.

@@ -1728,6 +1728,56 @@ a {
   gap: 0.4rem;
 }
 
+.operator-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(10rem, auto);
+  gap: 0.75rem;
+  align-items: start;
+}
+
+.operator-request-main,
+.operator-request-title {
+  min-width: 0;
+}
+
+.operator-request-title strong,
+.operator-request-title em {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.operator-request-editor {
+  width: 100%;
+  min-height: 6rem;
+  margin-top: 0.55rem;
+  resize: vertical;
+  font-family: var(--font-mono), ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.78rem;
+}
+
+.operator-plan-preview {
+  display: grid;
+  gap: 0.35rem;
+  margin-top: 0.55rem;
+}
+
+.operator-plan-step {
+  display: grid;
+  grid-template-columns: 8rem minmax(0, 1fr);
+  gap: 0.5rem;
+  align-items: baseline;
+  font-size: 0.82rem;
+}
+
+.operator-plan-step span {
+  color: var(--muted);
+}
+
+.operator-plan-step strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .icon-button {
   width: 2.15rem;
   height: 2.15rem;
@@ -3116,6 +3166,8 @@ a {
   .provider-row,
   .model-profile-row,
   .approval-row,
+  .operator-row,
+  .operator-plan-step,
   .audit-row,
   .recent-run-row,
   .event-row-compact,

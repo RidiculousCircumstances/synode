@@ -17,6 +17,7 @@ const STATUS_TONE_BY_VALUE: Record<string, StatusTone> = {
   error: "danger",
   warning: "warning",
   waiting_approval: "warning",
+  waiting_operator: "warning",
   pending: "warning",
   queued: "info",
   cancelling: "warning",

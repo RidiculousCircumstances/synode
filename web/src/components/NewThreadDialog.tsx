@@ -8,7 +8,7 @@ import { type FormEvent, useEffect, useState } from "react";
 
 import { createThread, listAgentGraphs, listModelProfiles } from "@/lib/api";
 import { useBodyScrollLock } from "@/hooks/useBodyScrollLock";
-import type { RunMode } from "@/types";
+import type { InteractionMode, RunMode } from "@/types";
 
 export default function NewThreadDialog({
   open,
@@ -25,6 +25,7 @@ export default function NewThreadDialog({
   const [profileId, setProfileId] = useState("");
   const [graphId, setGraphId] = useState("");
   const [mode, setMode] = useState<RunMode>("general");
+  const [interactionMode, setInteractionMode] = useState<InteractionMode>("auto");
   const profilesQuery = useQuery({ queryKey: ["model-profiles"], queryFn: listModelProfiles, enabled: open });
   const graphsQuery = useQuery({ queryKey: ["agent-graphs"], queryFn: listAgentGraphs, enabled: open });
   const profiles = profilesQuery.data ?? [];
@@ -69,6 +70,7 @@ export default function NewThreadDialog({
       default_model_profile_id: profileId || null,
       agent_graph_id: graphId || null,
       mode,
+      interaction_mode: interactionMode,
     });
   };
 
@@ -107,6 +109,14 @@ export default function NewThreadDialog({
               <select value={mode} onChange={(event) => setMode(event.target.value as RunMode)}>
                 <option value="general">general</option>
                 <option value="coding">coding</option>
+              </select>
+            </label>
+            <label className="field">
+              <span>Interaction</span>
+              <select value={interactionMode} onChange={(event) => setInteractionMode(event.target.value as InteractionMode)}>
+                <option value="auto">auto</option>
+                <option value="plan_review">plan review</option>
+                <option value="plan_only">plan only</option>
               </select>
             </label>
             <label className="field">

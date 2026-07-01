@@ -19,7 +19,14 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from sqlalchemy.types import JSON
 
-from synode.schemas import ApprovalStatus, RunMode, RunStatus, ThreadStatus
+from synode.schemas import (
+    ApprovalStatus,
+    InteractionMode,
+    OperatorRequestStatus,
+    RunMode,
+    RunStatus,
+    ThreadStatus,
+)
 
 
 def new_id() -> str:
@@ -63,6 +70,9 @@ class RunRecord(Base):
     thread_id: Mapped[str] = mapped_column(ForeignKey("threads.id", ondelete="RESTRICT"), nullable=False)
     status: Mapped[str] = mapped_column(String(32), default=RunStatus.CREATED.value, nullable=False)
     mode: Mapped[str] = mapped_column(String(32), default=RunMode.GENERAL.value, nullable=False)
+    interaction_mode: Mapped[str] = mapped_column(
+        String(32), default=InteractionMode.AUTO.value, nullable=False
+    )
     task: Mapped[str] = mapped_column(Text, nullable=False)
     workspace: Mapped[str | None] = mapped_column(Text, nullable=True)
     model_provider: Mapped[str] = mapped_column(String(80), nullable=False)
@@ -89,6 +99,9 @@ class RunRecord(Base):
 
     thread: Mapped[ThreadRecord] = relationship(back_populates="runs")
     events: Mapped[list["RunEventRecord"]] = relationship(back_populates="run", cascade="all, delete-orphan")
+    operator_requests: Mapped[list["OperatorRequestRecord"]] = relationship(
+        back_populates="run", cascade="all, delete-orphan"
+    )
 
 
 class ThreadMessageRecord(Base):
@@ -138,6 +151,38 @@ class ApprovalRecord(Base):
     decision_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class OperatorRequestRecord(Base):
+    __tablename__ = "operator_requests"
+    __table_args__ = (
+        Index("ix_operator_requests_run_status", "run_id", "status"),
+        Index("ix_operator_requests_thread_status", "thread_id", "status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    run_id: Mapped[str] = mapped_column(ForeignKey("runs.id", ondelete="CASCADE"), nullable=False)
+    thread_id: Mapped[str] = mapped_column(ForeignKey("threads.id", ondelete="CASCADE"), nullable=False)
+    node_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    role: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    kind: Mapped[str] = mapped_column(String(40), nullable=False)
+    prompt: Mapped[str] = mapped_column(Text, nullable=False)
+    context: Mapped[dict[str, Any]] = mapped_column(JsonType().with_variant(JSONB, "postgresql"), default=dict)
+    proposed_payload: Mapped[dict[str, Any]] = mapped_column(
+        JsonType().with_variant(JSONB, "postgresql"), default=dict
+    )
+    status: Mapped[str] = mapped_column(
+        String(32), default=OperatorRequestStatus.PENDING.value, nullable=False
+    )
+    response_payload: Mapped[dict[str, Any]] = mapped_column(
+        JsonType().with_variant(JSONB, "postgresql"), default=dict
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    run: Mapped[RunRecord] = relationship(back_populates="operator_requests")
 
 
 class ToolAuditRecord(Base):

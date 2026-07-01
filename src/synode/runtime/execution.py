@@ -45,6 +45,7 @@ class NodeExecutionInput:
     tool_proxy_url: str | None = None
     tool_proxy_token: str | None = None
     tool_proxy_tools: list[str] = field(default_factory=list)
+    operator_response: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -53,6 +54,16 @@ class ApprovalRequest:
     action: str
     reason: str
     payload: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class OperatorRequest:
+    kind: str
+    prompt: str
+    context: dict[str, Any] = field(default_factory=dict)
+    proposed_payload: dict[str, Any] = field(default_factory=dict)
+    node_id: str | None = None
+    role: str | None = None
 
 
 @dataclass(frozen=True)
@@ -69,6 +80,7 @@ class NodeExecutionOutput:
     artifacts: list[dict[str, Any]] = field(default_factory=list)
     external_conversation_id: str | None = None
     approval_request: ApprovalRequest | None = None
+    operator_request: OperatorRequest | None = None
     approval_id: str | None = None
     external_state: dict[str, Any] = field(default_factory=dict)
 
@@ -533,6 +545,7 @@ def _conversation_payload(node_input: NodeExecutionInput) -> dict[str, Any]:
         f"Conversation context: {node_input.conversation_context}\n"
         f"Previous worker outputs: {node_input.previous_worker_outputs}\n"
         f"Upstream outputs: {node_input.upstream_outputs}\n"
+        f"Operator response: {node_input.operator_response or {}}\n"
         f"Graph snapshot: {graph}\n"
         f"Contract JSON schema: {contract_schema}\n"
     )

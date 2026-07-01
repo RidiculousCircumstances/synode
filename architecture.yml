@@ -12,6 +12,7 @@ components:
       - Structured run read models, SSE event stream with model deltas, run cancellation, and metrics endpoints
       - Run queue adapter, Procrastinate dispatch, worker heartbeat, stale-run recovery, and exact run claims
       - AgentGraph v2 node schema, code-based node contracts, node execution state, and backend registry with native LangGraph and optional external OpenHands execution for control and worker nodes
+      - Operator planning gates, ambiguity interrupts, durable operator requests, and LangGraph checkpoint resume
       - Optional Langfuse trace emission
   - name: web
     path: web
@@ -76,8 +77,10 @@ rules:
   - MCP tools must pass the same policy and audit path as native tools.
   - MCP server configuration is DB-backed; nodes and external runtimes must use Synode's tool gateway or scoped HTTP MCP proxy instead of calling configured MCP servers directly.
   - Persistence owns mutable thread, run, event, approval, artifact, audit, and memory state.
+  - Operator requests are distinct from tool approvals: operator requests resolve plan review, ambiguity, or state-edit decisions; approvals authorize concrete risky tool/runtime actions.
   - The run queue transports only `run_id` jobs; the `runs` table remains the source of truth for execution state.
   - Threads are the user-facing work unit; runs are immutable execution attempts inside threads.
+  - Planning/operator pauses must use LangGraph interrupts and resume with `Command(resume=...)`; approval resumes may restart graph execution through artifact/runtime state and must not reuse stale completed checkpoints.
   - Agent role YAML files must not name concrete model IDs.
   - DB-backed model profiles, role profile bindings, and agent graph snapshots own runtime model routing.
   - AgentGraph v2 nodes have stable node ids, explicit node edges, node runtime bindings, and code-registered node contracts; role-level graph fields are not part of the API/runtime contract.
@@ -157,8 +160,10 @@ critical_flows:
     description: Synode executes graph nodes through the snapshot-selected backend when that backend supports the node contract, records runtime_node_states, and validates external backend payloads back into Synode contracts before continuing graph execution.
   - name: approval
     description: Risky native or external runtime actions pause through Synode approval state before execution can resume.
+  - name: operator-interrupt
+    description: Plan review and backend/node ambiguity pause the run as `waiting_operator`, persist an operator request, and resume the same graph checkpoint after approve/edit/respond decisions or cancel on reject.
   - name: run-cancellation
-    description: Operator stop or approval rejection cancels the run, records a cancellation event, rejects pending approvals, and allows a new run in the same thread.
+    description: Operator stop, operator rejection, or approval rejection cancels the run, records a cancellation event, rejects pending approvals, cancels pending operator requests, and allows a new run in the same thread.
   - name: mcp-tool-call
     description: DB-backed MCP discovery registers tools as `mcp.<server>.<tool>`; native nodes call them through the in-process tool gateway, and external runtimes call only scoped Synode HTTP MCP proxy sessions that enforce allowlists, approvals, sandbox checks, and audit.
   - name: sandboxed-command-execution

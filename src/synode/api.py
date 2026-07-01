@@ -28,6 +28,9 @@ from synode.schemas import (
     ModelProfileResponse,
     ModelProfileTestResponse,
     ModelProfileUpdateRequest,
+    OperatorRequestDecision,
+    OperatorRequestResponse,
+    OperatorRequestStatus,
     RunCreateRequest,
     RunEventResponse,
     RunMetricsResponse,
@@ -100,6 +103,7 @@ def create_app() -> FastAPI:
                 default_model_profile_id=payload.default_model_profile_id,
                 role_model_profile_ids=payload.role_model_profile_ids,
                 agent_graph_id=payload.agent_graph_id,
+                interaction_mode=payload.interaction_mode,
             )
         except LookupError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -202,6 +206,7 @@ def create_app() -> FastAPI:
                 default_model_profile_id=payload.default_model_profile_id,
                 role_model_profile_ids=payload.role_model_profile_ids,
                 agent_graph_id=payload.agent_graph_id,
+                interaction_mode=payload.interaction_mode,
             )
         except LookupError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -227,6 +232,7 @@ def create_app() -> FastAPI:
                 default_model_profile_id=payload.default_model_profile_id,
                 role_model_profile_ids=payload.role_model_profile_ids,
                 agent_graph_id=payload.agent_graph_id,
+                interaction_mode=payload.interaction_mode,
             )
         except LookupError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -291,7 +297,14 @@ def create_app() -> FastAPI:
                         f"data: {event.model_dump_json()}\n\n"
                     )
                 run = await service.get_run(run_id)
-                if run.status.value in {"completed", "failed", "failed_verification", "waiting_approval", "cancelled"}:
+                if run.status.value in {
+                    "completed",
+                    "failed",
+                    "failed_verification",
+                    "waiting_approval",
+                    "waiting_operator",
+                    "cancelled",
+                }:
                     break
                 if not events:
                     yield ": heartbeat\n\n"
@@ -328,6 +341,22 @@ def create_app() -> FastAPI:
     ) -> list[ApprovalResponse]:
         service: OrchestrationService = request.app.state.service
         return await service.list_approvals(run_id=run_id, limit=_page_limit(limit), offset=_page_offset(offset))
+
+    @app.get("/runs/{run_id}/operator-requests", response_model=list[OperatorRequestResponse])
+    async def get_run_operator_requests(
+        run_id: str,
+        request: Request,
+        status: OperatorRequestStatus | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[OperatorRequestResponse]:
+        service: OrchestrationService = request.app.state.service
+        return await service.list_operator_requests(
+            run_id=run_id,
+            status=status,
+            limit=_page_limit(limit),
+            offset=_page_offset(offset),
+        )
 
     @app.get("/runs/{run_id}/metrics", response_model=RunMetricsResponse)
     async def get_run_metrics(run_id: str, request: Request) -> RunMetricsResponse:
@@ -371,6 +400,34 @@ def create_app() -> FastAPI:
         service: OrchestrationService = request.app.state.service
         await service.reject(approval_id, payload.reason)
         return {"status": "rejected"}
+
+    @app.post("/operator-requests/{request_id}/respond", response_model=OperatorRequestResponse)
+    async def respond_operator_request(
+        request_id: str,
+        payload: OperatorRequestDecision,
+        request: Request,
+    ) -> OperatorRequestResponse:
+        service: OrchestrationService = request.app.state.service
+        try:
+            return await service.respond_operator_request(request_id, payload)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post("/operator-requests/{request_id}/cancel", response_model=OperatorRequestResponse)
+    async def cancel_operator_request(
+        request_id: str,
+        payload: ApprovalDecision,
+        request: Request,
+    ) -> OperatorRequestResponse:
+        service: OrchestrationService = request.app.state.service
+        try:
+            return await service.cancel_operator_request(request_id, payload.reason)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.get("/approvals", response_model=list[ApprovalResponse])
     async def list_approvals(

@@ -21,6 +21,9 @@ const EVENT_TYPES = [
   "tool_called",
   "approval_required",
   "approval_decided",
+  "operator_required",
+  "operator_decided",
+  "operator_cancelled",
   "artifact_created",
   "verification_completed",
   "run_cancelling",
@@ -58,6 +61,7 @@ export function useRunEvents(runId: string | null): RunEvent[] {
         void queryClient.invalidateQueries({ queryKey: ["artifacts", runId] });
         void queryClient.invalidateQueries({ queryKey: ["tool-audit", runId] });
         void queryClient.invalidateQueries({ queryKey: ["approvals", runId] });
+        void queryClient.invalidateQueries({ queryKey: ["operator-requests", runId] });
         void queryClient.invalidateQueries({ queryKey: ["run-metrics", runId] });
       };
       EVENT_TYPES.forEach((type) => source.addEventListener(type, handler as EventListener));

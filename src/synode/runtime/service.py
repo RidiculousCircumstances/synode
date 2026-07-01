@@ -10,6 +10,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, AsyncIterator
 
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.types import Command
 
 from synode.config import Settings
 from synode.logging import log_event
@@ -22,6 +23,7 @@ from synode.persistence.repository import (
     to_agent_role_response,
     to_mcp_server_response,
     to_model_profile_response,
+    to_operator_request_response,
     to_run_response,
     to_secret_response,
     to_thread_message_response,
@@ -32,6 +34,7 @@ from synode.runtime.capabilities import validate_backend_contract
 from synode.runtime.contracts import default_contract_for_role, default_contract_registry
 from synode.runtime.execution import ExecutionBackendRegistry, build_execution_backend_registry
 from synode.runtime.graph import GraphDependencies, build_graph
+from synode.runtime.operator import OperatorInterrupt, OperatorRejected
 from synode.runtime.queue import (
     MissingRunQueueTransport,
     RunQueueTransport,
@@ -50,6 +53,7 @@ from synode.schemas import (
     EventType,
     ExecutionBackendStatusResponse,
     GpuMetrics,
+    InteractionMode,
     MCPServerCreateRequest,
     MCPServerResponse,
     MCPServerTransport,
@@ -62,6 +66,11 @@ from synode.schemas import (
     ModelProfileTestResponse,
     ModelProfileUpdateRequest,
     ModelProviderType,
+    OperatorRequestDecision,
+    OperatorRequestKind,
+    OperatorRequestResponse,
+    OperatorRequestStatus,
+    OperatorResponseType,
     ProcessMetrics,
     QueueStatusResponse,
     RoleName,
@@ -100,6 +109,7 @@ ACTIVE_RUN_STATUSES = {
     RunStatus.QUEUED.value,
     RunStatus.RUNNING.value,
     RunStatus.WAITING_APPROVAL.value,
+    RunStatus.WAITING_OPERATOR.value,
     RunStatus.CANCELLING.value,
 }
 
@@ -117,6 +127,7 @@ CONVERSATION_CONTEXT_MESSAGE_TYPES = {
     ThreadMessageType.TEXT.value,
     ThreadMessageType.FINAL.value,
     ThreadMessageType.APPROVAL_DECISION.value,
+    ThreadMessageType.OPERATOR_DECISION.value,
 }
 
 
@@ -144,6 +155,7 @@ class OrchestrationService:
         self.tool_executor = ToolExecutor(database, roles, tools, settings, self.observability)
         self._run_tasks: dict[str, asyncio.Task[None]] = {}
         self._stop_reasons: dict[str, str] = {}
+        self._memory_checkpointer = MemorySaver()
 
     async def start_run(self, run_id: str) -> None:
         log_fields: dict[str, Any] = {}
@@ -204,6 +216,7 @@ class OrchestrationService:
         default_model_profile_id: str | None = None,
         role_model_profile_ids: dict[str, str] | None = None,
         agent_graph_id: str | None = None,
+        interaction_mode: InteractionMode = InteractionMode.AUTO,
     ) -> RunResponse:
         trace_id = self.observability.create_trace_id()
         async with self.database.session() as session:
@@ -226,6 +239,7 @@ class OrchestrationService:
                 role_model_profile_ids=config["role_model_profile_ids"],
                 agent_graph_id=config["agent_graph_id"],
                 agent_graph_snapshot=config["agent_graph_snapshot"],
+                interaction_mode=interaction_mode,
             )
             return to_run_response(run)
 
@@ -239,6 +253,7 @@ class OrchestrationService:
         default_model_profile_id: str | None = None,
         role_model_profile_ids: dict[str, str] | None = None,
         agent_graph_id: str | None = None,
+        interaction_mode: InteractionMode = InteractionMode.AUTO,
     ) -> ThreadDetailResponse:
         trace_id = self.observability.create_trace_id()
         async with self.database.session() as session:
@@ -263,6 +278,7 @@ class OrchestrationService:
                 role_model_profile_ids=config["role_model_profile_ids"],
                 agent_graph_id=config["agent_graph_id"],
                 agent_graph_snapshot=config["agent_graph_snapshot"],
+                interaction_mode=interaction_mode,
             )
             return await self._thread_detail(repo, thread.id)
 
@@ -336,6 +352,7 @@ class OrchestrationService:
         default_model_profile_id: str | None = None,
         role_model_profile_ids: dict[str, str] | None = None,
         agent_graph_id: str | None = None,
+        interaction_mode: InteractionMode = InteractionMode.AUTO,
     ) -> RunResponse:
         trace_id = self.observability.create_trace_id()
         async with self.database.session() as session:
@@ -367,6 +384,7 @@ class OrchestrationService:
                 role_model_profile_ids=config["role_model_profile_ids"],
                 agent_graph_id=config["agent_graph_id"],
                 agent_graph_snapshot=config["agent_graph_snapshot"],
+                interaction_mode=interaction_mode,
             )
             return to_run_response(run)
 
@@ -504,6 +522,61 @@ class OrchestrationService:
                 for approval in approvals
             ]
 
+    async def list_operator_requests(
+        self,
+        run_id: str | None = None,
+        status: OperatorRequestStatus | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[OperatorRequestResponse]:
+        async with self.database.session() as session:
+            repo = Repository(session)
+            records = await repo.list_operator_requests(
+                run_id=run_id,
+                status=status,
+                limit=limit,
+                offset=offset,
+            )
+            return [to_operator_request_response(record) for record in records]
+
+    async def respond_operator_request(
+        self,
+        request_id: str,
+        decision: OperatorRequestDecision,
+    ) -> OperatorRequestResponse:
+        should_resume = decision.response_type != OperatorResponseType.REJECT
+        run_id = ""
+        async with self.database.session() as session:
+            repo = Repository(session)
+            record = await repo.get_operator_request(request_id)
+            if record is None:
+                raise LookupError(f"operator request not found: {request_id}")
+            if record.status != OperatorRequestStatus.PENDING.value:
+                raise ValueError(f"operator request already decided: {request_id}")
+            run_id = record.run_id
+            response_payload = {
+                "response_type": decision.response_type.value,
+                "message": decision.message,
+                "payload": decision.payload,
+            }
+            record = await repo.resolve_operator_request(request_id, response_payload)
+            response = to_operator_request_response(record)
+        if should_resume:
+            await self.start_run(run_id)
+        else:
+            await self._mark_run_cancelled(run_id, decision.message or "Operator rejected the run.")
+        return response
+
+    async def cancel_operator_request(self, request_id: str, reason: str | None = None) -> OperatorRequestResponse:
+        run_id = ""
+        async with self.database.session() as session:
+            repo = Repository(session)
+            record = await repo.cancel_operator_request(request_id, reason)
+            response = to_operator_request_response(record)
+            run_id = record.run_id
+        await self._mark_run_cancelled(run_id, reason or "Operator request cancelled.")
+        return response
+
     async def run_task(
         self,
         task: str,
@@ -513,6 +586,7 @@ class OrchestrationService:
         default_model_profile_id: str | None = None,
         role_model_profile_ids: dict[str, str] | None = None,
         agent_graph_id: str | None = None,
+        interaction_mode: InteractionMode = InteractionMode.AUTO,
     ) -> RunResponse:
         run = await self.create_run(
             task,
@@ -522,6 +596,7 @@ class OrchestrationService:
             default_model_profile_id,
             role_model_profile_ids,
             agent_graph_id,
+            interaction_mode,
         )
         await self.execute_run(run.id)
         return await self.get_run(run.id)
@@ -548,6 +623,27 @@ class OrchestrationService:
                     {"reason": run.error or "Run stopped by user."},
                 )
                 return
+            pending_operator_response = await repo.latest_unconsumed_operator_response(run_id)
+            if run.status == RunStatus.WAITING_OPERATOR.value and pending_operator_response is None:
+                pending_operator_requests = await repo.count_operator_requests(
+                    run_id,
+                    status=OperatorRequestStatus.PENDING,
+                )
+                if pending_operator_requests:
+                    return
+                raise ValueError(f"run is waiting for operator response: {run_id}")
+            resume_operator_request_id = (
+                pending_operator_response.id if pending_operator_response is not None else None
+            )
+            resume_payload = (
+                pending_operator_response.response_payload if pending_operator_response is not None else None
+            )
+            approval_count = await repo.count_approvals(run_id)
+            checkpoint_thread_id = (
+                run_id
+                if resume_payload is not None or approval_count == 0
+                else f"{run_id}:approval-restart:{time.time_ns()}"
+            )
             await repo.set_run_status(run_id, RunStatus.RUNNING)
             await repo.add_event(run_id, EventType.RUN_STARTED.value, None, {})
             task = run.task
@@ -561,6 +657,7 @@ class OrchestrationService:
             agent_graph_id = run.agent_graph_id
             agent_graph_snapshot = run.agent_graph_snapshot or {}
             mode = run.mode
+            interaction_mode = run.interaction_mode
             trace_id = run.observability_trace_id
             thread_id = run.thread_id
             log_event(
@@ -596,6 +693,7 @@ class OrchestrationService:
                 "agent_graph_id": agent_graph_id,
                 "agent_graph_snapshot": agent_graph_snapshot,
                 "mode": mode,
+                "interaction_mode": interaction_mode,
                 "observability_trace_id": trace_id,
                 "worker_outputs": [],
             }
@@ -606,14 +704,40 @@ class OrchestrationService:
                 input_payload={"task": task, "workspace": workspace, "mode": mode},
                 metadata={"run_id": run_id, "model_provider": model_provider},
             ):
-                final_state = await self._invoke_graph(run_id, state)
+                if resume_payload is None:
+                    if checkpoint_thread_id == run_id:
+                        final_state = await self._invoke_graph(run_id, state)
+                    else:
+                        final_state = await self._invoke_graph(
+                            run_id,
+                            state,
+                            checkpoint_thread_id=checkpoint_thread_id,
+                        )
+                elif checkpoint_thread_id == run_id:
+                    final_state = await self._invoke_graph(run_id, state, resume_payload=resume_payload)
+                else:
+                    final_state = await self._invoke_graph(
+                        run_id,
+                        state,
+                        resume_payload=resume_payload,
+                        checkpoint_thread_id=checkpoint_thread_id,
+                    )
                 self.observability.update_current_span(output={"status": "finished"})
+            if resume_operator_request_id is not None:
+                async with self.database.session() as session:
+                    repo = Repository(session)
+                    await repo.mark_operator_request_consumed(resume_operator_request_id)
+            operator_interrupt = _extract_operator_interrupt(final_state)
+            if operator_interrupt is not None:
+                await self._record_operator_interrupt(operator_interrupt)
+                return
             review = final_state.get("review", {})
             final_answer = final_state.get("final_answer", "")
             async with self.database.session() as session:
                 repo = Repository(session)
                 pending_approvals = await repo.count_approvals(run_id, status=ApprovalStatus.PENDING)
                 blockers = list(review.get("blockers", []))
+                plan_only = bool(final_state.get("plan_only")) or interaction_mode == InteractionMode.PLAN_ONLY.value
                 if pending_approvals:
                     await repo.set_run_status(run_id, RunStatus.WAITING_APPROVAL, final_answer=final_answer)
                     log_event(
@@ -633,7 +757,7 @@ class OrchestrationService:
                         run_id=run_id,
                         metadata={"status": RunStatus.WAITING_APPROVAL.value},
                     )
-                elif mode == RunMode.CODING.value and not review.get("can_proceed", False):
+                elif mode == RunMode.CODING.value and not plan_only and not review.get("can_proceed", False):
                     await repo.set_run_status(run_id, RunStatus.FAILED_VERIFICATION, final_answer=final_answer)
                     log_event(
                         logger,
@@ -675,6 +799,8 @@ class OrchestrationService:
         except asyncio.CancelledError:
             await self._mark_run_cancelled(run_id, await self._cancellation_reason(run_id))
             raise
+        except OperatorRejected as exc:
+            await self._mark_run_cancelled(run_id, str(exc))
         except Exception as exc:
             async with self.database.session() as session:
                 repo = Repository(session)
@@ -828,6 +954,7 @@ class OrchestrationService:
                 return
             should_cancel_external = True
             await repo.reject_pending_approvals(run_id, reason)
+            await repo.cancel_pending_operator_requests(run_id, reason)
             await repo.set_run_status(run_id, RunStatus.CANCELLED, final_answer=reason, error=reason)
             await repo.add_event(run_id, EventType.RUN_CANCELLED.value, None, {"reason": reason})
             log_event(
@@ -1672,7 +1799,51 @@ class OrchestrationService:
                 raise ValueError(f"{transport.value} MCP server config requires url")
         return normalized
 
-    async def _invoke_graph(self, run_id: str, state: dict[str, Any]) -> dict[str, Any]:
+    async def _record_operator_interrupt(self, operator_interrupt: OperatorInterrupt) -> None:
+        payload = operator_interrupt.payload
+        run_id = str(payload.get("run_id") or "")
+        if not run_id:
+            raise RuntimeError("operator interrupt is missing run_id")
+        async with self.database.session() as session:
+            repo = Repository(session)
+            run = await repo.get_run(run_id)
+            if run is None:
+                raise LookupError(f"run not found: {run_id}")
+            thread_id = str(payload.get("thread_id") or run.thread_id)
+            if thread_id != run.thread_id:
+                raise RuntimeError("operator interrupt thread_id does not match run")
+            kind = OperatorRequestKind(str(payload.get("kind") or ""))
+            role = _optional_string(payload.get("role"))
+            await repo.create_operator_request(
+                request_id=operator_interrupt.interrupt_id,
+                run_id=run.id,
+                thread_id=run.thread_id,
+                node_id=_optional_string(payload.get("node_id")),
+                role=role,
+                kind=kind,
+                prompt=str(payload.get("prompt") or "Operator input required."),
+                context=_dict_or_empty(payload.get("context")),
+                proposed_payload=_dict_or_empty(payload.get("proposed_payload")),
+            )
+            log_event(
+                logger,
+                EventType.OPERATOR_REQUIRED.value,
+                run_id=run.id,
+                thread_id=run.thread_id,
+                trace_id=run.observability_trace_id,
+                role=role,
+                operator_request_id=operator_interrupt.interrupt_id,
+                kind=kind.value,
+            )
+
+    async def _invoke_graph(
+        self,
+        run_id: str,
+        state: dict[str, Any],
+        *,
+        resume_payload: dict[str, Any] | None = None,
+        checkpoint_thread_id: str | None = None,
+    ) -> dict[str, Any]:
         roles = self._role_registry_for_state(state)
         tool_executor = ToolExecutor(
             self.database,
@@ -1692,7 +1863,11 @@ class OrchestrationService:
         )
         async with self._checkpointer() as checkpointer:
             graph = build_graph(deps, checkpointer=checkpointer)
-            result = await graph.ainvoke(state, config={"configurable": {"thread_id": run_id}})
+            graph_input: Any = Command(resume=resume_payload) if resume_payload is not None else state
+            result = await graph.ainvoke(
+                graph_input,
+                config={"configurable": {"thread_id": checkpoint_thread_id or run_id}},
+            )
             return dict(result)
 
     def _role_registry_for_state(self, state: dict[str, Any]) -> RoleRegistry:
@@ -1732,7 +1907,7 @@ class OrchestrationService:
                 await checkpointer.setup()
                 yield checkpointer
         else:
-            yield MemorySaver()
+            yield self._memory_checkpointer
 
     async def close(self) -> None:
         for task in list(self._run_tasks.values()):
@@ -1822,6 +1997,35 @@ def _bearer_token(authorization: str | None) -> str:
     if scheme.lower() != "bearer" or not token.strip():
         return ""
     return token.strip()
+
+
+def _extract_operator_interrupt(result: dict[str, Any]) -> OperatorInterrupt | None:
+    raw_interrupts = result.get("__interrupt__")
+    if raw_interrupts is None:
+        return None
+    if not isinstance(raw_interrupts, list | tuple) or not raw_interrupts:
+        raise RuntimeError("graph returned an invalid interrupt envelope")
+    first = raw_interrupts[0]
+    payload = getattr(first, "value", None)
+    interrupt_id = getattr(first, "id", None)
+    if not isinstance(payload, dict):
+        raise RuntimeError("graph interrupt payload must be a JSON object")
+    if payload.get("type") != "operator_request":
+        raise RuntimeError(f"unsupported graph interrupt type: {payload.get('type')}")
+    if not isinstance(interrupt_id, str) or not interrupt_id:
+        raise RuntimeError("graph interrupt is missing id")
+    return OperatorInterrupt(interrupt_id=interrupt_id, payload=payload)
+
+
+def _dict_or_empty(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _optional_string(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value)
+    return text if text else None
 
 
 def _sum_optional(left: int | None, right: object) -> int | None:

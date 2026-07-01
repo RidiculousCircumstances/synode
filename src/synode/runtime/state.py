@@ -16,6 +16,7 @@ class SynodeState(TypedDict, total=False):
     agent_graph_id: str | None
     agent_graph_snapshot: dict[str, Any]
     mode: str
+    interaction_mode: str
     observability_trace_id: str | None
     selected_roles: list[str]
     plan: list[dict[str, Any]]
@@ -27,4 +28,5 @@ class SynodeState(TypedDict, total=False):
     patch_results: list[dict[str, Any]]
     verification_result: dict[str, Any]
     review: dict[str, Any]
+    plan_only: bool
     final_answer: str

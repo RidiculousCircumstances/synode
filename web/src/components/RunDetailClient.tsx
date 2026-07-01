@@ -9,6 +9,7 @@ import {
   FileJson,
   GitPullRequest,
   Layers,
+  MessageSquareText,
   ShieldCheck,
   TerminalSquare,
   X,
@@ -37,7 +38,9 @@ import {
   listAgents,
   listArtifacts,
   listRunApprovals,
+  listRunOperatorRequests,
   listToolAudit,
+  respondOperatorRequest,
   resumeRun,
   stopRun,
 } from "@/lib/api";
@@ -51,9 +54,9 @@ import {
   shortId,
 } from "@/lib/format";
 import { useRunEvents } from "@/hooks/useRunEvents";
-import type { Approval, Artifact, Run, RunEvent, RunMetrics, RuntimeStatus, SystemMetrics, ToolAudit } from "@/types";
+import type { Approval, Artifact, OperatorRequest, Run, RunEvent, RunMetrics, RuntimeStatus, SystemMetrics, ToolAudit } from "@/types";
 
-type RunTab = "overview" | "agents" | "timeline" | "artifacts" | "diff-tests" | "approvals" | "metrics";
+type RunTab = "overview" | "agents" | "timeline" | "artifacts" | "diff-tests" | "operator" | "approvals" | "metrics";
 
 type EventGroup = {
   key: string;
@@ -72,10 +75,11 @@ const RUN_TABS: Array<{
   { id: "timeline", label: "Timeline", description: "events", icon: Clock3 },
   { id: "artifacts", label: "Artifacts", description: "outputs", icon: FileJson },
   { id: "diff-tests", label: "Diff / Tests", description: "coding", icon: GitPullRequest },
+  { id: "operator", label: "Operator", description: "human", icon: MessageSquareText },
   { id: "approvals", label: "Approvals", description: "gates", icon: ShieldCheck },
   { id: "metrics", label: "Metrics", description: "usage", icon: Activity },
 ];
-const RUN_ACTIVE_STATUSES = new Set(["created", "queued", "running", "waiting_approval", "cancelling"]);
+const RUN_ACTIVE_STATUSES = new Set(["created", "queued", "running", "waiting_approval", "waiting_operator", "cancelling"]);
 
 export default function RunDetailClient({ runId }: { runId: string }) {
   const router = useRouter();
@@ -100,6 +104,10 @@ export default function RunDetailClient({ runId }: { runId: string }) {
   const approvalsQuery = useQuery({
     queryKey: ["approvals", runId],
     queryFn: () => listRunApprovals(runId),
+  });
+  const operatorRequestsQuery = useQuery({
+    queryKey: ["operator-requests", runId],
+    queryFn: () => listRunOperatorRequests(runId),
   });
   const metricsQuery = useQuery({
     queryKey: ["run-metrics", runId],
@@ -132,6 +140,7 @@ export default function RunDetailClient({ runId }: { runId: string }) {
   const artifacts = artifactsQuery.data ?? [];
   const audit = auditQuery.data ?? [];
   const approvals = approvalsQuery.data ?? [];
+  const operatorRequests = operatorRequestsQuery.data ?? [];
   const metrics = metricsQuery.data ?? null;
   const system = systemMetricsQuery.data ?? null;
   const runtime = runtimeStatusQuery.data ?? null;
@@ -141,6 +150,7 @@ export default function RunDetailClient({ runId }: { runId: string }) {
       void runQuery.refetch();
       void metricsQuery.refetch();
       void approvalsQuery.refetch();
+      void operatorRequestsQuery.refetch();
     },
   });
 
@@ -153,6 +163,8 @@ export default function RunDetailClient({ runId }: { runId: string }) {
           ? artifacts.length
           : tab.id === "approvals"
             ? approvals.filter((approval) => approval.status === "pending").length
+            : tab.id === "operator"
+              ? operatorRequests.filter((request) => request.status === "pending").length
             : undefined,
   }));
 
@@ -197,6 +209,7 @@ export default function RunDetailClient({ runId }: { runId: string }) {
       {activeTab === "timeline" ? <TimelineTab events={events} /> : null}
       {activeTab === "artifacts" ? <ArtifactsTab artifacts={artifacts} /> : null}
       {activeTab === "diff-tests" ? <DiffTestsTab audit={audit} /> : null}
+      {activeTab === "operator" ? <OperatorRequestsTab requests={operatorRequests} runId={runId} /> : null}
       {activeTab === "approvals" ? <ApprovalsTab approvals={approvals} runId={runId} /> : null}
       {activeTab === "metrics" ? <MetricsTab metrics={metrics} system={system} runtime={runtime} /> : null}
     </div>
@@ -465,6 +478,153 @@ function DiffTestsTab({ audit }: { audit: ToolAudit[] }) {
       </Panel>
     </div>
   );
+}
+
+function OperatorRequestsTab({ requests, runId }: { requests: OperatorRequest[]; runId: string }) {
+  const queryClient = useQueryClient();
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const mutation = useMutation({
+    mutationFn: async ({
+      request,
+      responseType,
+      value,
+    }: {
+      request: OperatorRequest;
+      responseType: "approve" | "edit" | "reject" | "respond";
+      value?: string;
+    }) => {
+      if (responseType === "edit") {
+        const parsed = JSON.parse(value || "{}") as Record<string, unknown>;
+        await respondOperatorRequest(request.id, {
+          response_type: "edit",
+          message: "Edited from Synode UI",
+          payload: request.kind === "plan_review" ? { decision: parsed } : parsed,
+        });
+        return;
+      }
+      await respondOperatorRequest(request.id, {
+        response_type: responseType,
+        message: value || `${responseType} from Synode UI`,
+        payload: {},
+      });
+    },
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: ["operator-requests", runId] });
+      void queryClient.invalidateQueries({ queryKey: ["run", runId] });
+      void queryClient.invalidateQueries({ queryKey: ["runs"] });
+      void queryClient.invalidateQueries({ queryKey: ["run-metrics", runId] });
+    },
+  });
+
+  return (
+    <Panel title="Operator requests">
+      <CompactList>
+        {requests.map((request) => {
+          const draft = drafts[request.id] ?? defaultOperatorDraft(request);
+          return (
+            <CompactRow key={request.id} className="operator-row">
+              <div className="operator-request-main">
+                <div className="operator-request-title">
+                  <strong>{request.kind.replaceAll("_", " ")}</strong>
+                  <em>{request.prompt}</em>
+                </div>
+                {request.kind === "plan_review" ? <PlanReviewPreview request={request} /> : null}
+                {request.status === "pending" ? (
+                  <textarea
+                    className="operator-request-editor"
+                    value={draft}
+                    rows={request.kind === "plan_review" ? 8 : 3}
+                    onChange={(event) => setDrafts((current) => ({ ...current, [request.id]: event.target.value }))}
+                  />
+                ) : (
+                  <CodeBlock value={formatUnknown(request.response_payload) || "{}"} />
+                )}
+              </div>
+              <StatusBadge value={request.status} />
+              {request.status === "pending" ? (
+                <div className="approval-actions">
+                  <button
+                    className="icon-button approve"
+                    title="Approve"
+                    type="button"
+                    disabled={mutation.isPending}
+                    onClick={() => mutation.mutate({ request, responseType: "approve" })}
+                  >
+                    <Check size={16} aria-hidden />
+                  </button>
+                  {request.kind === "plan_review" ? (
+                    <button
+                      className="secondary-button compact-control"
+                      type="button"
+                      disabled={mutation.isPending}
+                      onClick={() => mutation.mutate({ request, responseType: "edit", value: draft })}
+                    >
+                      Edit
+                    </button>
+                  ) : (
+                    <button
+                      className="secondary-button compact-control"
+                      type="button"
+                      disabled={mutation.isPending}
+                      onClick={() => mutation.mutate({ request, responseType: "respond", value: draft })}
+                    >
+                      Respond
+                    </button>
+                  )}
+                  <button
+                    className="icon-button reject"
+                    title="Reject"
+                    type="button"
+                    disabled={mutation.isPending}
+                    onClick={() => mutation.mutate({ request, responseType: "reject" })}
+                  >
+                    <X size={16} aria-hidden />
+                  </button>
+                </div>
+              ) : (
+                <span className="muted">{request.resolved_at ? formatDateTime(request.resolved_at) : "decided"}</span>
+              )}
+            </CompactRow>
+          );
+        })}
+        {!requests.length ? <EmptyState title="No operator requests" /> : null}
+      </CompactList>
+      {mutation.error ? <div className="error-line">{mutation.error.message}</div> : null}
+    </Panel>
+  );
+}
+
+function PlanReviewPreview({ request }: { request: OperatorRequest }) {
+  const decision = nestedUnknown(request.proposed_payload, ["decision"]);
+  if (!decision || typeof decision !== "object" || Array.isArray(decision)) {
+    return null;
+  }
+  const plan = Array.isArray((decision as { plan?: unknown }).plan) ? (decision as { plan: unknown[] }).plan : [];
+  return (
+    <div className="operator-plan-preview">
+      {plan.map((step, index) => {
+        if (!step || typeof step !== "object" || Array.isArray(step)) {
+          return null;
+        }
+        const role = String((step as { role?: unknown }).role ?? "role");
+        const task = String((step as { task?: unknown }).task ?? "");
+        return (
+          <div key={`${role}-${index}`} className="operator-plan-step">
+            <span>{role}</span>
+            <strong>{task}</strong>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function defaultOperatorDraft(request: OperatorRequest): string {
+  if (request.kind === "plan_review") {
+    const decision = nestedUnknown(request.proposed_payload, ["decision"]);
+    return JSON.stringify(decision ?? request.proposed_payload, null, 2);
+  }
+  return "";
 }
 
 function ApprovalsTab({ approvals, runId }: { approvals: Approval[]; runId: string }) {

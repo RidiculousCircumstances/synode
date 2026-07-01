@@ -16,6 +16,7 @@ from synode.persistence.models import (
     MCPProxySessionRecord,
     MCPServerRecord,
     ModelProfileRecord,
+    OperatorRequestRecord,
     RunEventRecord,
     RunRecord,
     RuntimeNodeStateRecord,
@@ -36,11 +37,16 @@ from synode.schemas import (
     AgentRoleResponse,
     ApprovalStatus,
     EventType,
+    InteractionMode,
     MCPServerResponse,
     MCPServerTransport,
     ModelProfileResponse,
     ModelProviderType,
     NodeExecutionStatus,
+    OperatorRequestKind,
+    OperatorRequestResponse,
+    OperatorRequestStatus,
+    OperatorResponseType,
     RoleName,
     RunMode,
     RunResponse,
@@ -77,6 +83,7 @@ class Repository:
         role_model_profile_ids: dict[str, str] | None = None,
         agent_graph_id: str | None = None,
         agent_graph_snapshot: dict[str, Any] | None = None,
+        interaction_mode: InteractionMode = InteractionMode.AUTO,
     ) -> RunRecord:
         thread = await self.get_thread(thread_id) if thread_id is not None else None
         if thread_id is not None and thread is None:
@@ -90,6 +97,7 @@ class Repository:
             model_provider=model_provider,
             workspace=workspace,
             mode=mode.value,
+            interaction_mode=interaction_mode.value,
             observability_trace_id=observability_trace_id,
             default_model_profile_id=default_model_profile_id,
             role_model_profile_ids=role_model_profile_ids or {},
@@ -335,6 +343,7 @@ class Repository:
             run.completed_at = None
         elif status in {
             RunStatus.WAITING_APPROVAL,
+            RunStatus.WAITING_OPERATOR,
             RunStatus.COMPLETED,
             RunStatus.FAILED,
             RunStatus.FAILED_VERIFICATION,
@@ -373,6 +382,10 @@ class Repository:
             pending = await self.count_approvals(run_id, status=ApprovalStatus.PENDING)
             if pending:
                 raise ValueError(f"run has pending approvals: {run_id}")
+        if run.status == RunStatus.WAITING_OPERATOR.value:
+            pending_operator = await self.count_operator_requests(run_id, status=OperatorRequestStatus.PENDING)
+            if pending_operator:
+                raise ValueError(f"run has pending operator requests: {run_id}")
         if run.status != RunStatus.QUEUED.value:
             await self.set_run_status(run_id, RunStatus.QUEUED)
             await self.add_event(run_id, EventType.RUN_QUEUED.value, None, {})
@@ -589,6 +602,213 @@ class Repository:
             )
         await self.session.flush()
         return approvals
+
+    async def create_operator_request(
+        self,
+        *,
+        run_id: str,
+        thread_id: str,
+        kind: OperatorRequestKind | str,
+        prompt: str,
+        context: dict[str, Any] | None = None,
+        proposed_payload: dict[str, Any] | None = None,
+        node_id: str | None = None,
+        role: str | None = None,
+        request_id: str | None = None,
+    ) -> OperatorRequestRecord:
+        existing = await self.get_operator_request(request_id) if request_id else None
+        if existing is not None:
+            return existing
+        kind_value = kind.value if isinstance(kind, OperatorRequestKind) else str(kind)
+        record = OperatorRequestRecord(
+            id=request_id or new_id(),
+            run_id=run_id,
+            thread_id=thread_id,
+            node_id=node_id,
+            role=role,
+            kind=kind_value,
+            prompt=prompt,
+            context=_truncate_json_payload(context or {}, MAX_EVENT_PAYLOAD_BYTES),
+            proposed_payload=_truncate_json_payload(proposed_payload or {}, MAX_ARTIFACT_PAYLOAD_BYTES),
+            response_payload={},
+            status=OperatorRequestStatus.PENDING.value,
+        )
+        self.session.add(record)
+        await self.set_run_status(run_id, RunStatus.WAITING_OPERATOR)
+        await self.add_event(
+            run_id,
+            EventType.OPERATOR_REQUIRED.value,
+            role,
+            {
+                "operator_request_id": record.id,
+                "kind": kind_value,
+                "node_id": node_id,
+                "role": role,
+            },
+        )
+        await self.add_thread_message(
+            thread_id,
+            author_type=ThreadMessageAuthorType.SYSTEM,
+            author_name="operator",
+            message_type=ThreadMessageType.OPERATOR_REQUEST,
+            content=prompt,
+            run_id=run_id,
+            metadata={
+                "operator_request_id": record.id,
+                "kind": kind_value,
+                "node_id": node_id,
+                "role": role,
+            },
+        )
+        await self.session.flush()
+        return record
+
+    async def get_operator_request(self, request_id: str | None) -> OperatorRequestRecord | None:
+        if request_id is None:
+            return None
+        return await self.session.get(OperatorRequestRecord, request_id)
+
+    async def list_operator_requests(
+        self,
+        run_id: str | None = None,
+        status: OperatorRequestStatus | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[OperatorRequestRecord]:
+        query = select(OperatorRequestRecord).order_by(OperatorRequestRecord.created_at.desc())
+        if run_id is not None:
+            query = query.where(OperatorRequestRecord.run_id == run_id)
+        if status is not None:
+            query = query.where(OperatorRequestRecord.status == status.value)
+        result = await self.session.execute(query.limit(limit).offset(offset))
+        return list(result.scalars().all())
+
+    async def count_operator_requests(
+        self,
+        run_id: str,
+        status: OperatorRequestStatus | None = None,
+    ) -> int:
+        query = select(func.count()).select_from(OperatorRequestRecord).where(
+            OperatorRequestRecord.run_id == run_id
+        )
+        if status is not None:
+            query = query.where(OperatorRequestRecord.status == status.value)
+        return int(await self.session.scalar(query) or 0)
+
+    async def resolve_operator_request(
+        self,
+        request_id: str,
+        response_payload: dict[str, Any],
+    ) -> OperatorRequestRecord:
+        record = await self.get_operator_request(request_id)
+        if record is None:
+            raise LookupError(f"operator request not found: {request_id}")
+        if record.status != OperatorRequestStatus.PENDING.value:
+            raise ValueError(f"operator request already decided: {request_id}")
+        response_type = str(response_payload.get("response_type") or "")
+        if response_type and response_type not in {item.value for item in OperatorResponseType}:
+            raise ValueError(f"unknown operator response_type: {response_type}")
+        record.status = OperatorRequestStatus.RESOLVED.value
+        record.response_payload = _truncate_json_payload(response_payload, MAX_EVENT_PAYLOAD_BYTES)
+        record.resolved_at = datetime.now(UTC)
+        await self.add_event(
+            record.run_id,
+            EventType.OPERATOR_DECIDED.value,
+            record.role,
+            {
+                "operator_request_id": record.id,
+                "kind": record.kind,
+                "response_type": response_type or None,
+            },
+        )
+        await self.add_thread_message(
+            record.thread_id,
+            author_type=ThreadMessageAuthorType.SYSTEM,
+            author_name="operator",
+            message_type=ThreadMessageType.OPERATOR_DECISION,
+            content=f"Operator response recorded: {response_type or 'response'}",
+            run_id=record.run_id,
+            metadata={
+                "operator_request_id": record.id,
+                "kind": record.kind,
+                "response_type": response_type or None,
+            },
+        )
+        await self.session.flush()
+        return record
+
+    async def cancel_operator_request(self, request_id: str, reason: str | None = None) -> OperatorRequestRecord:
+        record = await self.get_operator_request(request_id)
+        if record is None:
+            raise LookupError(f"operator request not found: {request_id}")
+        if record.status != OperatorRequestStatus.PENDING.value:
+            raise ValueError(f"operator request already decided: {request_id}")
+        record.status = OperatorRequestStatus.CANCELLED.value
+        record.cancelled_at = datetime.now(UTC)
+        record.response_payload = {"reason": reason or "cancelled"}
+        await self.add_event(
+            record.run_id,
+            EventType.OPERATOR_CANCELLED.value,
+            record.role,
+            {
+                "operator_request_id": record.id,
+                "kind": record.kind,
+                "reason": reason,
+            },
+        )
+        await self.session.flush()
+        return record
+
+    async def cancel_pending_operator_requests(
+        self,
+        run_id: str,
+        reason: str | None = None,
+    ) -> list[OperatorRequestRecord]:
+        result = await self.session.execute(
+            select(OperatorRequestRecord)
+            .where(
+                OperatorRequestRecord.run_id == run_id,
+                OperatorRequestRecord.status == OperatorRequestStatus.PENDING.value,
+            )
+            .order_by(OperatorRequestRecord.created_at)
+        )
+        records = list(result.scalars().all())
+        for record in records:
+            record.status = OperatorRequestStatus.CANCELLED.value
+            record.cancelled_at = datetime.now(UTC)
+            record.response_payload = {"reason": reason or "cancelled"}
+            await self.add_event(
+                record.run_id,
+                EventType.OPERATOR_CANCELLED.value,
+                record.role,
+                {
+                    "operator_request_id": record.id,
+                    "kind": record.kind,
+                    "reason": reason,
+                },
+            )
+        await self.session.flush()
+        return records
+
+    async def latest_unconsumed_operator_response(self, run_id: str) -> OperatorRequestRecord | None:
+        result = await self.session.execute(
+            select(OperatorRequestRecord)
+            .where(
+                OperatorRequestRecord.run_id == run_id,
+                OperatorRequestRecord.status == OperatorRequestStatus.RESOLVED.value,
+                OperatorRequestRecord.consumed_at.is_(None),
+            )
+            .order_by(OperatorRequestRecord.resolved_at.asc(), OperatorRequestRecord.created_at.asc())
+            .limit(1)
+        )
+        return result.scalars().first()
+
+    async def mark_operator_request_consumed(self, request_id: str) -> None:
+        record = await self.get_operator_request(request_id)
+        if record is None:
+            raise LookupError(f"operator request not found: {request_id}")
+        record.consumed_at = datetime.now(UTC)
+        await self.session.flush()
 
     async def list_approvals(
         self,
@@ -1445,6 +1665,7 @@ def to_run_response(run: RunRecord) -> RunResponse:
         thread_id=run.thread_id,
         status=RunStatus(run.status),
         mode=RunMode(run.mode),
+        interaction_mode=InteractionMode(run.interaction_mode),
         task=run.task,
         workspace=run.workspace,
         model_provider=run.model_provider,
@@ -1462,6 +1683,26 @@ def to_run_response(run: RunRecord) -> RunResponse:
         heartbeat_at=run.heartbeat_at,
         created_at=run.created_at,
         updated_at=run.updated_at,
+    )
+
+
+def to_operator_request_response(record: OperatorRequestRecord) -> OperatorRequestResponse:
+    return OperatorRequestResponse(
+        id=record.id,
+        run_id=record.run_id,
+        thread_id=record.thread_id,
+        node_id=record.node_id,
+        role=record.role,
+        kind=OperatorRequestKind(record.kind),
+        prompt=record.prompt,
+        context=record.context or {},
+        proposed_payload=record.proposed_payload or {},
+        status=OperatorRequestStatus(record.status),
+        response_payload=record.response_payload or {},
+        created_at=record.created_at,
+        resolved_at=record.resolved_at,
+        cancelled_at=record.cancelled_at,
+        consumed_at=record.consumed_at,
     )
 
 

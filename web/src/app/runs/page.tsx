@@ -15,6 +15,7 @@ const STATUS_OPTIONS: Array<"all" | RunStatus> = [
   "queued",
   "running",
   "waiting_approval",
+  "waiting_operator",
   "cancelling",
   "completed",
   "failed",
@@ -53,7 +54,10 @@ export default function RunsPage() {
             <MetricTile label="Total" value={runs.length} />
             <MetricTile label="Queued" value={runs.filter((run) => run.status === "queued").length} />
             <MetricTile label="Running" value={runs.filter((run) => run.status === "running").length} />
-            <MetricTile label="Blocked" value={runs.filter((run) => run.status === "waiting_approval").length} />
+            <MetricTile
+              label="Blocked"
+              value={runs.filter((run) => run.status === "waiting_approval" || run.status === "waiting_operator").length}
+            />
           </div>
         }
       />

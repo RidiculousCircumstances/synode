@@ -8,7 +8,7 @@ import pytest
 from synode.api import create_app
 from synode.persistence.repository import Repository
 from synode.runtime.service import OrchestrationService
-from synode.schemas import RunStatus
+from synode.schemas import InteractionMode, RunStatus
 
 
 async def test_api_exposes_run_read_models(service: OrchestrationService, tmp_path: pathlib.Path) -> None:
@@ -127,6 +127,35 @@ async def test_api_stops_run_without_request_body(service: OrchestrationService,
         event["event_type"] == "run_cancelled" and event["payload"]["reason"] == "Run stopped by user."
         for event in events
     )
+
+
+async def test_api_exposes_operator_requests(service: OrchestrationService, tmp_path: pathlib.Path) -> None:
+    (tmp_path / "data.csv").write_text("date,revenue\n2026-06-01,10\n", encoding="utf-8")
+    run = await service.run_task(
+        "Analyze sample data",
+        workspace=str(tmp_path),
+        model_provider="fake",
+        interaction_mode=InteractionMode.PLAN_REVIEW,
+    )
+
+    app = create_app()
+    app.state.service = service
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://synode.test") as client:
+        listed = (await client.get(f"/runs/{run.id}/operator-requests")).json()
+        response = (
+            await client.post(
+                f"/operator-requests/{listed[0]['id']}/respond",
+                json={"response_type": "approve", "message": "approved in api", "payload": {}},
+            )
+        ).json()
+        refreshed = (await client.get(f"/runs/{run.id}")).json()
+
+    assert run.status == RunStatus.WAITING_OPERATOR
+    assert listed[0]["kind"] == "plan_review"
+    assert listed[0]["status"] == "pending"
+    assert response["status"] == "resolved"
+    assert refreshed["status"] == RunStatus.QUEUED.value
 
 
 async def test_api_queues_runs_and_exposes_runtime_status(

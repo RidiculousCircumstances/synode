@@ -10,7 +10,17 @@ from synode.models.provider import FakeModelProvider, ModelRequest, ModelRespons
 from synode.persistence.models import ApprovalRecord
 from synode.persistence.repository import Repository
 from synode.runtime.worker import RunWorker
-from synode.schemas import ApprovalStatus, EventType, RunMode, RunStatus
+from synode.schemas import (
+    ApprovalStatus,
+    EventType,
+    InteractionMode,
+    OperatorRequestDecision,
+    OperatorRequestKind,
+    OperatorRequestStatus,
+    OperatorResponseType,
+    RunMode,
+    RunStatus,
+)
 
 
 class StreamingFakeProvider(FakeModelProvider):
@@ -185,6 +195,75 @@ async def test_follow_up_run_receives_thread_conversation_context(
     assert any(item["message_type"] == "final" for item in context)
     assert not any(item["message_type"] == "run_summary" for item in context)
     assert not any(item["author_type"] == "user" and item["content"] == "Use that context for a follow-up" for item in context)
+
+
+async def test_plan_review_waits_for_operator_then_resumes(service, tmp_path: pathlib.Path) -> None:
+    (tmp_path / "data.csv").write_text("date,revenue\n2026-06-01,10\n2026-06-02,20\n", encoding="utf-8")
+
+    first = await service.run_task(
+        "Analyze sample data and summarize findings",
+        workspace=str(tmp_path),
+        model_provider="fake",
+        interaction_mode=InteractionMode.PLAN_REVIEW,
+    )
+    requests = await service.list_operator_requests(run_id=first.id)
+
+    assert first.status == RunStatus.WAITING_OPERATOR
+    assert len(requests) == 1
+    assert requests[0].kind == OperatorRequestKind.PLAN_REVIEW
+    assert requests[0].status == OperatorRequestStatus.PENDING
+    assert requests[0].proposed_payload["decision"]["selected_roles"] == ["data_analyst"]
+
+    await service.respond_operator_request(
+        requests[0].id,
+        OperatorRequestDecision(response_type=OperatorResponseType.APPROVE),
+    )
+    assert await RunWorker(service, worker_id="operator-approval-worker").run_once() is True
+    resumed = await service.get_run(first.id)
+    updated_requests = await service.list_operator_requests(run_id=first.id)
+
+    assert resumed.status == RunStatus.COMPLETED
+    assert resumed.final_answer is not None
+    assert "data_analyst" in resumed.final_answer
+    assert updated_requests[0].status == OperatorRequestStatus.RESOLVED
+    assert updated_requests[0].consumed_at is not None
+
+
+async def test_plan_review_reject_cancels_run(service, tmp_path: pathlib.Path) -> None:
+    (tmp_path / "data.csv").write_text("date,revenue\n2026-06-01,10\n", encoding="utf-8")
+    first = await service.run_task(
+        "Analyze sample data",
+        workspace=str(tmp_path),
+        model_provider="fake",
+        interaction_mode=InteractionMode.PLAN_REVIEW,
+    )
+    request = (await service.list_operator_requests(run_id=first.id))[0]
+
+    await service.respond_operator_request(
+        request.id,
+        OperatorRequestDecision(response_type=OperatorResponseType.REJECT, message="plan needs changes"),
+    )
+    rejected = await service.get_run(first.id)
+
+    assert rejected.status == RunStatus.CANCELLED
+    assert rejected.final_answer == "plan needs changes"
+
+
+async def test_plan_only_finishes_without_worker_tools(service, tmp_path: pathlib.Path) -> None:
+    (tmp_path / "data.csv").write_text("date,revenue\n2026-06-01,10\n", encoding="utf-8")
+
+    result = await service.run_task(
+        "Plan the sample data analysis",
+        workspace=str(tmp_path),
+        model_provider="fake",
+        interaction_mode=InteractionMode.PLAN_ONLY,
+    )
+    audit = await service.list_tool_audit(result.id)
+
+    assert result.status == RunStatus.COMPLETED
+    assert result.final_answer is not None
+    assert "- data_analyst:" in result.final_answer
+    assert audit == []
 
 
 async def test_streaming_provider_emits_model_stream_events(service, tmp_path: pathlib.Path) -> None:

@@ -16,6 +16,7 @@ class RunStatus(StrEnum):
     QUEUED = "queued"
     RUNNING = "running"
     WAITING_APPROVAL = "waiting_approval"
+    WAITING_OPERATOR = "waiting_operator"
     CANCELLING = "cancelling"
     COMPLETED = "completed"
     FAILED = "failed"
@@ -26,6 +27,12 @@ class RunStatus(StrEnum):
 class RunMode(StrEnum):
     GENERAL = "general"
     CODING = "coding"
+
+
+class InteractionMode(StrEnum):
+    AUTO = "auto"
+    PLAN_REVIEW = "plan_review"
+    PLAN_ONLY = "plan_only"
 
 
 class RuntimeBackend(StrEnum):
@@ -47,6 +54,7 @@ class AgentGraphNodeKind(StrEnum):
 class NodeExecutionStatus(StrEnum):
     COMPLETED = "completed"
     WAITING_APPROVAL = "waiting_approval"
+    WAITING_OPERATOR = "waiting_operator"
     FAILED = "failed"
     CANCELLED = "cancelled"
 
@@ -73,6 +81,8 @@ class ThreadMessageType(StrEnum):
     RUN_SUMMARY = "run_summary"
     APPROVAL_REQUEST = "approval_request"
     APPROVAL_DECISION = "approval_decision"
+    OPERATOR_REQUEST = "operator_request"
+    OPERATOR_DECISION = "operator_decision"
     FINAL = "final"
 
 
@@ -80,6 +90,25 @@ class ApprovalStatus(StrEnum):
     PENDING = "pending"
     APPROVED = "approved"
     REJECTED = "rejected"
+
+
+class OperatorRequestKind(StrEnum):
+    PLAN_REVIEW = "plan_review"
+    AMBIGUITY = "ambiguity"
+    STATE_EDIT = "state_edit"
+
+
+class OperatorRequestStatus(StrEnum):
+    PENDING = "pending"
+    RESOLVED = "resolved"
+    CANCELLED = "cancelled"
+
+
+class OperatorResponseType(StrEnum):
+    APPROVE = "approve"
+    EDIT = "edit"
+    REJECT = "reject"
+    RESPOND = "respond"
 
 
 class ToolRisk(StrEnum):
@@ -104,6 +133,9 @@ class EventType(StrEnum):
     TOOL_CALLED = "tool_called"
     APPROVAL_REQUIRED = "approval_required"
     APPROVAL_DECIDED = "approval_decided"
+    OPERATOR_REQUIRED = "operator_required"
+    OPERATOR_DECIDED = "operator_decided"
+    OPERATOR_CANCELLED = "operator_cancelled"
     ARTIFACT_CREATED = "artifact_created"
     VERIFICATION_COMPLETED = "verification_completed"
     RUN_CANCELLING = "run_cancelling"
@@ -383,6 +415,7 @@ class RunCreateRequest(BaseModel):
     role_model_profile_ids: dict[str, str] = Field(default_factory=dict)
     agent_graph_id: str | None = None
     mode: RunMode = RunMode.GENERAL
+    interaction_mode: InteractionMode = InteractionMode.AUTO
 
     @field_validator("task")
     @classmethod
@@ -399,6 +432,7 @@ class ThreadCreateRequest(BaseModel):
     role_model_profile_ids: dict[str, str] = Field(default_factory=dict)
     agent_graph_id: str | None = None
     mode: RunMode = RunMode.GENERAL
+    interaction_mode: InteractionMode = InteractionMode.AUTO
 
     @field_validator("message")
     @classmethod
@@ -428,6 +462,7 @@ class ThreadRunCreateRequest(BaseModel):
     role_model_profile_ids: dict[str, str] = Field(default_factory=dict)
     agent_graph_id: str | None = None
     mode: RunMode = RunMode.GENERAL
+    interaction_mode: InteractionMode = InteractionMode.AUTO
 
     @field_validator("message")
     @classmethod
@@ -440,6 +475,7 @@ class RunResponse(BaseModel):
     thread_id: str
     status: RunStatus
     mode: RunMode
+    interaction_mode: InteractionMode
     task: str
     workspace: str | None = None
     model_provider: str
@@ -490,6 +526,30 @@ class ThreadDetailResponse(BaseModel):
 
 class ApprovalDecision(BaseModel):
     reason: str | None = None
+
+
+class OperatorRequestDecision(BaseModel):
+    response_type: OperatorResponseType
+    message: str | None = None
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class OperatorRequestResponse(BaseModel):
+    id: str
+    run_id: str
+    thread_id: str
+    node_id: str | None = None
+    role: str | None = None
+    kind: OperatorRequestKind
+    prompt: str
+    context: dict[str, Any] = Field(default_factory=dict)
+    proposed_payload: dict[str, Any] = Field(default_factory=dict)
+    status: OperatorRequestStatus
+    response_payload: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime
+    resolved_at: datetime | None = None
+    cancelled_at: datetime | None = None
+    consumed_at: datetime | None = None
 
 
 class RunStopRequest(BaseModel):

@@ -31,7 +31,7 @@ import {
 import { formatDateTime, shortId } from "@/lib/format";
 import { useBodyScrollLock } from "@/hooks/useBodyScrollLock";
 import { useRunEvents } from "@/hooks/useRunEvents";
-import type { Run, RunEvent, RunMode, RunStatus, ThreadMessage } from "@/types";
+import type { InteractionMode, Run, RunEvent, RunMode, RunStatus, ThreadMessage } from "@/types";
 import {
   CompactList,
   CompactRow,
@@ -39,7 +39,7 @@ import {
   StatusBadge,
 } from "@/components/ui/primitives";
 
-const RUN_BUSY_STATUSES: RunStatus[] = ["created", "queued", "running", "waiting_approval", "cancelling"];
+const RUN_BUSY_STATUSES: RunStatus[] = ["created", "queued", "running", "waiting_approval", "waiting_operator", "cancelling"];
 
 export default function ThreadDetailClient({ threadId }: { threadId: string }) {
   const queryClient = useQueryClient();
@@ -713,6 +713,7 @@ function FollowUpComposer({
   const [graphId, setGraphId] = useState(latestRun?.agent_graph_id ?? "");
   const [workspace, setWorkspace] = useState(latestRun?.workspace ?? "");
   const [mode, setMode] = useState<RunMode>(latestRun?.mode ?? "general");
+  const [interactionMode, setInteractionMode] = useState<InteractionMode>(latestRun?.interaction_mode ?? "auto");
   const profilesQuery = useQuery({ queryKey: ["model-profiles"], queryFn: listModelProfiles });
   const graphsQuery = useQuery({ queryKey: ["agent-graphs"], queryFn: listAgentGraphs });
   const profiles = profilesQuery.data ?? [];
@@ -738,6 +739,7 @@ function FollowUpComposer({
     setGraphId(latestRun?.agent_graph_id ?? "");
     setWorkspace(latestRun?.workspace ?? "");
     setMode(latestRun?.mode ?? "general");
+    setInteractionMode(latestRun?.interaction_mode ?? "auto");
   }, [latestRun]);
 
   const submit = (event: FormEvent) => {
@@ -754,6 +756,7 @@ function FollowUpComposer({
         default_model_profile_id: profileId || null,
         agent_graph_id: graphId || null,
         mode,
+        interaction_mode: interactionMode,
       },
     });
   };
@@ -782,6 +785,18 @@ function FollowUpComposer({
                 <select value={mode} onChange={(event) => setMode(event.target.value as RunMode)} disabled={disabled}>
                   <option value="general">general</option>
                   <option value="coding">coding</option>
+                </select>
+              </label>
+              <label className="field">
+                <span>Interaction</span>
+                <select
+                  value={interactionMode}
+                  onChange={(event) => setInteractionMode(event.target.value as InteractionMode)}
+                  disabled={disabled}
+                >
+                  <option value="auto">auto</option>
+                  <option value="plan_review">plan review</option>
+                  <option value="plan_only">plan only</option>
                 </select>
               </label>
               <label className="field">
@@ -986,6 +1001,14 @@ function buildProcessingStatus(run: Run | null, events: RunEvent[]): ProcessingS
     return {
       kind: "approval",
       text: "Waiting for approval",
+      runId: run.id,
+      spinning: false,
+    };
+  }
+  if (run.status === "waiting_operator") {
+    return {
+      kind: "operator",
+      text: "Waiting for operator",
       runId: run.id,
       spinning: false,
     };
