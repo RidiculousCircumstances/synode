@@ -60,28 +60,55 @@ if operation == "write_file":
     emit({"ok": True, "path": str(path.relative_to(root)), "bytes": len(encoded)})
 
 if operation == "patch_apply":
-    changed = []
     patches = payload.get("patches")
     if not isinstance(patches, list) or not patches:
         fail("patches are required")
+    targets = {}
+    target_order = []
     for item in patches:
         if not isinstance(item, dict):
             fail("patch item must be an object")
         path = resolve_relative(root, str(item.get("path", "")))
         if not path.exists() or not path.is_file():
             fail(f"patch target is not an existing file: {path.relative_to(root)}")
-        old_content = path.read_text(encoding="utf-8")
-        digest = hashlib.sha256(old_content.encode("utf-8")).hexdigest()
+        relative_path = str(path.relative_to(root))
+        if relative_path not in targets:
+            old_content = path.read_text(encoding="utf-8")
+            digest = hashlib.sha256(old_content.encode("utf-8")).hexdigest()
+            targets[relative_path] = {
+                "path": path,
+                "old_content": old_content,
+                "new_content": old_content,
+                "old_sha256": digest,
+            }
+            target_order.append(relative_path)
+        target = targets[relative_path]
         expected_sha256 = str(item.get("expected_sha256", ""))
-        if digest != expected_sha256:
-            fail(f"checksum mismatch for {path.relative_to(root)}: expected {expected_sha256}, got {digest}")
+        if target["old_sha256"] != expected_sha256:
+            fail(f"checksum mismatch for {relative_path}: expected {expected_sha256}, got {target['old_sha256']}")
         old_text = str(item.get("old_text", ""))
         new_text = str(item.get("new_text", ""))
-        occurrences = old_content.count(old_text)
+        current_content = target["new_content"]
+        occurrences = current_content.count(old_text)
         if occurrences != 1:
-            fail(f"old_text must occur exactly once in {path.relative_to(root)}; occurrences={occurrences}")
-        path.write_text(old_content.replace(old_text, new_text, 1), encoding="utf-8")
-        changed.append({"path": str(path.relative_to(root)), "old_sha256": digest})
+            fail(f"old_text must occur exactly once in {relative_path}; occurrences={occurrences}")
+        target["new_content"] = current_content.replace(old_text, new_text, 1)
+    changed = []
+    written = []
+    try:
+        for relative_path in target_order:
+            target = targets[relative_path]
+            target["path"].write_text(target["new_content"], encoding="utf-8")
+            written.append(relative_path)
+            changed.append({"path": relative_path, "old_sha256": target["old_sha256"]})
+    except OSError as exc:
+        for relative_path in written:
+            target = targets[relative_path]
+            try:
+                target["path"].write_text(target["old_content"], encoding="utf-8")
+            except OSError:
+                pass
+        fail(f"failed to write patch result: {exc}")
     emit({"ok": True, "changed": changed})
 
 fail(f"unsupported mutation operation: {operation}")

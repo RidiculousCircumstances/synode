@@ -27,6 +27,8 @@ class SynodeState(TypedDict, total=False):
     patch_proposal: dict[str, Any]
     patch_results: list[dict[str, Any]]
     verification_result: dict[str, Any]
+    coding_repair_attempts: int
+    patch_repair_error: str
     review: dict[str, Any]
     plan_only: bool
     final_answer: str

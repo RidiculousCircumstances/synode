@@ -16,6 +16,13 @@ class OperatorRejected(RuntimeError):
     pass
 
 
+class ApprovalRequired(RuntimeError):
+    def __init__(self, approval_id: str, tool_name: str):
+        super().__init__(f"approval required for {tool_name}: {approval_id}")
+        self.approval_id = approval_id
+        self.tool_name = tool_name
+
+
 def operator_interrupt_payload(
     *,
     run_id: str,

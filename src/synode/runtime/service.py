@@ -34,7 +34,7 @@ from synode.runtime.capabilities import validate_backend_contract
 from synode.runtime.contracts import default_contract_for_role, default_contract_registry
 from synode.runtime.execution import ExecutionBackendRegistry, build_execution_backend_registry
 from synode.runtime.graph import GraphDependencies, build_graph
-from synode.runtime.operator import OperatorInterrupt, OperatorRejected
+from synode.runtime.operator import ApprovalRequired, OperatorInterrupt, OperatorRejected
 from synode.runtime.queue import (
     MissingRunQueueTransport,
     RunQueueTransport,
@@ -799,6 +799,23 @@ class OrchestrationService:
         except asyncio.CancelledError:
             await self._mark_run_cancelled(run_id, await self._cancellation_reason(run_id))
             raise
+        except ApprovalRequired as exc:
+            async with self.database.session() as session:
+                repo = Repository(session)
+                run = await repo.get_run(run_id)
+                pending_approvals = await repo.count_approvals(run_id, status=ApprovalStatus.PENDING)
+                if run is not None and run.status not in TERMINAL_RUN_STATUSES and pending_approvals:
+                    await repo.set_run_status(run_id, RunStatus.WAITING_APPROVAL)
+                log_event(
+                    logger,
+                    RunStatus.WAITING_APPROVAL.value,
+                    run_id=run_id,
+                    thread_id=run.thread_id if run is not None else None,
+                    trace_id=trace_id,
+                    provider=model_provider,
+                    approval_id=exc.approval_id,
+                    tool_name=exc.tool_name,
+                )
         except OperatorRejected as exc:
             await self._mark_run_cancelled(run_id, str(exc))
         except Exception as exc:

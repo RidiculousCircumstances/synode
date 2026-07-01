@@ -23,6 +23,8 @@ class Database:
         if url.startswith("sqlite+aiosqlite:///:memory:"):
             kwargs["poolclass"] = StaticPool
             kwargs["connect_args"] = {"check_same_thread": False}
+        else:
+            kwargs["pool_pre_ping"] = True
         self.engine: AsyncEngine = create_async_engine(url, **kwargs)
         self.session_factory = async_sessionmaker(self.engine, expire_on_commit=False)
 
@@ -46,4 +48,3 @@ class Database:
 
     async def close(self) -> None:
         await self.engine.dispose()
-

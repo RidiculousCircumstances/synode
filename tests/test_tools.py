@@ -209,6 +209,96 @@ async def test_patch_apply_mutation_runs_inside_sandbox(
     assert target.read_text(encoding="utf-8") == "value = 'new'\n"
 
 
+async def test_patch_apply_supports_multiple_patches_for_one_file(
+    database, tool_executor: ToolExecutor, tmp_path: pathlib.Path
+) -> None:
+    target = tmp_path / "module.py"
+    original = "alpha = 'old'\nbeta = 'old'\n"
+    target.write_text(original, encoding="utf-8")
+    digest = hashlib.sha256(original.encode("utf-8")).hexdigest()
+    async with database.session() as session:
+        repo = Repository(session)
+        run = await repo.create_run("patch one file twice", model_provider="fake", workspace=str(tmp_path))
+        run_id = run.id
+
+    call = ToolCall(
+        name="native.patch_apply",
+        arguments={
+            "patches": [
+                {
+                    "path": "module.py",
+                    "expected_sha256": digest,
+                    "old_text": "alpha = 'old'",
+                    "new_text": "alpha = 'new'",
+                },
+                {
+                    "path": "module.py",
+                    "expected_sha256": digest,
+                    "old_text": "beta = 'old'",
+                    "new_text": "beta = 'new'",
+                },
+            ]
+        },
+    )
+    first = await tool_executor.execute(run_id, "coder", str(tmp_path), call)
+    assert first.approval_id
+
+    async with database.session() as session:
+        repo = Repository(session)
+        await repo.decide_approval(first.approval_id, ApprovalStatus.APPROVED, "test")
+
+    second = await tool_executor.execute(run_id, "coder", str(tmp_path), call)
+
+    assert second.ok
+    assert second.output["changed"] == [{"path": str(target), "old_sha256": digest}]
+    assert target.read_text(encoding="utf-8") == "alpha = 'new'\nbeta = 'new'\n"
+
+
+async def test_patch_apply_does_not_partially_write_when_later_patch_fails(
+    database, tool_executor: ToolExecutor, tmp_path: pathlib.Path
+) -> None:
+    target = tmp_path / "module.py"
+    original = "alpha = 'old'\nbeta = 'old'\n"
+    target.write_text(original, encoding="utf-8")
+    digest = hashlib.sha256(original.encode("utf-8")).hexdigest()
+    async with database.session() as session:
+        repo = Repository(session)
+        run = await repo.create_run("patch one file atomically", model_provider="fake", workspace=str(tmp_path))
+        run_id = run.id
+
+    call = ToolCall(
+        name="native.patch_apply",
+        arguments={
+            "patches": [
+                {
+                    "path": "module.py",
+                    "expected_sha256": digest,
+                    "old_text": "alpha = 'old'",
+                    "new_text": "alpha = 'new'",
+                },
+                {
+                    "path": "module.py",
+                    "expected_sha256": digest,
+                    "old_text": "gamma = 'old'",
+                    "new_text": "gamma = 'new'",
+                },
+            ]
+        },
+    )
+    first = await tool_executor.execute(run_id, "coder", str(tmp_path), call)
+    assert first.approval_id
+
+    async with database.session() as session:
+        repo = Repository(session)
+        await repo.decide_approval(first.approval_id, ApprovalStatus.APPROVED, "test")
+
+    second = await tool_executor.execute(run_id, "coder", str(tmp_path), call)
+
+    assert not second.ok
+    assert "old_text must occur exactly once" in str(second.error)
+    assert target.read_text(encoding="utf-8") == original
+
+
 class FailingMutationSandbox:
     def ensure_available(self) -> None:
         return None

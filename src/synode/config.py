@@ -119,6 +119,7 @@ class Settings(BaseSettings):
         if self.worker_concurrency < 1:
             raise RuntimeError("SYNODE_WORKER_CONCURRENCY must be at least 1")
         positive_limits = {
+            "SYNODE_MODEL_TIMEOUT_SECONDS": self.model_timeout_seconds,
             "SYNODE_SANDBOX_CPU_SECONDS": self.sandbox_cpu_seconds,
             "SYNODE_SANDBOX_MEMORY_MB": self.sandbox_memory_mb,
             "SYNODE_SANDBOX_DISK_MB": self.sandbox_disk_mb,

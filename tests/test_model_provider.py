@@ -5,7 +5,7 @@ import json
 import httpx
 import pytest
 
-from synode.models.errors import StructuredOutputValidationError
+from synode.models.errors import ModelProviderUnavailableError, StructuredOutputValidationError
 from synode.models.provider import ModelRequest, OllamaProvider
 from synode.runtime.decisions import RiskLevel, SupervisorDecision
 from synode.schemas import RoleName
@@ -95,6 +95,17 @@ async def test_ollama_provider_rejects_invalid_structured_response(monkeypatch: 
 
     with pytest.raises(StructuredOutputValidationError):
         await provider.invoke(ModelRequest(role="supervisor", prompt="plan", response_schema=SupervisorDecision))
+
+
+async def test_ollama_provider_reports_empty_timeout_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("", request=request)
+
+    _patch_async_client(monkeypatch, httpx.MockTransport(handle))
+    provider = OllamaProvider("http://ollama.test", "llama3.1:8b", timeout_seconds=12.5)
+
+    with pytest.raises(ModelProviderUnavailableError, match=r"ollama request failed: ReadTimeout after 12.5s"):
+        await provider.invoke(ModelRequest(role="coder", prompt="produce patch"))
 
 
 def test_supervisor_decision_rejects_system_roles() -> None:

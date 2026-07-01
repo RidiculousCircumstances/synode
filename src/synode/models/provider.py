@@ -214,7 +214,7 @@ class OllamaProvider:
                 response = await client.post(f"{self.base_url}/api/chat", json=payload)
                 response.raise_for_status()
         except httpx.HTTPError as exc:
-            raise ModelProviderUnavailableError(f"ollama request failed: {exc}") from exc
+            raise ModelProviderUnavailableError(_http_error_detail("ollama request failed", exc, timeout)) from exc
         try:
             body = response.json()
             content = body["message"]["content"]
@@ -276,7 +276,7 @@ class OllamaProvider:
                         if body.get("done"):
                             final_body = body
         except httpx.HTTPError as exc:
-            raise ModelProviderUnavailableError(f"ollama stream request failed: {exc}") from exc
+            raise ModelProviderUnavailableError(_http_error_detail("ollama stream request failed", exc, timeout)) from exc
         input_tokens = _optional_int(final_body.get("prompt_eval_count"))
         output_tokens = _optional_int(final_body.get("eval_count"))
         total_tokens = input_tokens + output_tokens if input_tokens is not None and output_tokens is not None else None
@@ -297,7 +297,7 @@ class OllamaProvider:
                 response.raise_for_status()
                 payload = response.json()
         except httpx.HTTPError as exc:
-            return ModelHealth(provider=self.name, ok=False, model=self.model, error=str(exc))
+            return ModelHealth(provider=self.name, ok=False, model=self.model, error=_http_error_detail("ollama health failed", exc, 5))
         models = {item.get("name") for item in payload.get("models", []) if isinstance(item, dict)}
         if self.model not in models:
             return ModelHealth(
@@ -366,7 +366,9 @@ class OpenAICompatibleProvider:
                 )
                 response.raise_for_status()
         except httpx.HTTPError as exc:
-            raise ModelProviderUnavailableError(f"openai-compatible request failed: {exc}") from exc
+            raise ModelProviderUnavailableError(
+                _http_error_detail("openai-compatible request failed", exc, timeout)
+            ) from exc
         try:
             body = response.json()
             choice = body["choices"][0]
@@ -448,7 +450,9 @@ class OpenAICompatibleProvider:
                             parts.append(delta)
                             await on_delta(delta)
         except httpx.HTTPError as exc:
-            raise ModelProviderUnavailableError(f"openai-compatible stream request failed: {exc}") from exc
+            raise ModelProviderUnavailableError(
+                _http_error_detail("openai-compatible stream request failed", exc, timeout)
+            ) from exc
         input_tokens = _optional_int(usage.get("prompt_tokens"))
         output_tokens = _optional_int(usage.get("completion_tokens"))
         total_tokens = _optional_int(usage.get("total_tokens"))
@@ -470,7 +474,12 @@ class OpenAICompatibleProvider:
                 response.raise_for_status()
                 payload = response.json()
         except httpx.HTTPError as exc:
-            return ModelHealth(provider=self.name, ok=False, model=self.model, error=str(exc))
+            return ModelHealth(
+                provider=self.name,
+                ok=False,
+                model=self.model,
+                error=_http_error_detail("openai-compatible health failed", exc, 5),
+            )
         models = {
             item.get("id")
             for item in payload.get("data", [])
@@ -588,6 +597,21 @@ def _optional_int(value: object) -> int | None:
     if isinstance(value, int):
         return value
     return None
+
+
+def _http_error_detail(prefix: str, exc: httpx.HTTPError, timeout: float | int | None) -> str:
+    if isinstance(exc, httpx.TimeoutException):
+        timeout_text = f" after {float(timeout):g}s" if timeout is not None else ""
+        detail = f"{exc.__class__.__name__}{timeout_text}"
+    elif isinstance(exc, httpx.HTTPStatusError):
+        response = exc.response
+        body = response.text[:500].strip()
+        detail = f"HTTP {response.status_code}"
+        if body:
+            detail = f"{detail}: {body}"
+    else:
+        detail = str(exc).strip() or exc.__class__.__name__
+    return f"{prefix}: {detail}"
 
 
 def _request_messages(request: ModelRequest) -> list[dict[str, str]]:

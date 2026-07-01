@@ -9,6 +9,13 @@ from sqlalchemy import select
 from synode.models.provider import FakeModelProvider, ModelRequest, ModelResponse
 from synode.persistence.models import ApprovalRecord
 from synode.persistence.repository import Repository
+from synode.runtime.decisions import FilePatch, PatchProposal
+from synode.runtime.graph import (
+    _normalize_patch_proposal,
+    _patch_proposal_validation_errors,
+    _route_after_patch_repair,
+    _route_after_verify,
+)
 from synode.runtime.worker import RunWorker
 from synode.schemas import (
     ApprovalStatus,
@@ -18,6 +25,7 @@ from synode.schemas import (
     OperatorRequestKind,
     OperatorRequestStatus,
     OperatorResponseType,
+    RoleName,
     RunMode,
     RunStatus,
 )
@@ -40,6 +48,94 @@ class StreamingFakeProvider(FakeModelProvider):
             total_tokens=4,
             latency_ms=1.0,
         )
+
+
+def test_route_after_verify_allows_one_real_model_repair_pass() -> None:
+    assert (
+        _route_after_verify(
+            {
+                "mode": RunMode.CODING.value,
+                "model_provider": "ollama",
+                "verification_result": {"ok": False},
+                "coding_repair_attempts": 0,
+            }
+        )
+        == "coding_patch_repair"
+    )
+    assert (
+        _route_after_verify(
+            {
+                "mode": RunMode.CODING.value,
+                "model_provider": "fake",
+                "verification_result": {"ok": False},
+                "coding_repair_attempts": 0,
+            }
+        )
+        == "reviewer"
+    )
+    assert (
+        _route_after_verify(
+            {
+                "mode": RunMode.CODING.value,
+                "model_provider": "ollama",
+                "verification_result": {"ok": False},
+                "coding_repair_attempts": 1,
+            }
+        )
+        == "reviewer"
+    )
+
+
+def test_route_after_patch_repair_falls_back_to_review_on_repair_error() -> None:
+    assert _route_after_patch_repair({"patch_repair_error": "invalid repair proposal"}) == "reviewer"
+    assert _route_after_patch_repair({"patch_proposal": {"patches": []}}) == "patch_apply"
+
+
+def test_patch_proposal_normalizer_aligns_unique_indented_old_text() -> None:
+    content = "def total(rows):\n    for row in rows:\n        value += row.amount\n    return value\n"
+    proposal = PatchProposal(
+        summary="Patch total.",
+        patches=[
+            FilePatch(
+                path="ledger.py",
+                expected_sha256="0" * 64,
+                old_text="for row in rows:\nvalue += row.amount",
+                new_text="for row in rows:\n        value -= row.amount",
+            )
+        ],
+        verification_commands=[["pytest", "-q"]],
+    )
+
+    normalized = _normalize_patch_proposal(
+        proposal,
+        [{"path": "ledger.py", "sha256": "1" * 64, "content": content}],
+    )
+
+    assert normalized.patches[0].expected_sha256 == "1" * 64
+    assert normalized.patches[0].old_text == "    for row in rows:\n        value += row.amount"
+
+
+def test_patch_proposal_validation_rejects_unsafe_verification_command() -> None:
+    content = "def total(rows):\n    return sum(row.amount for row in rows)\n"
+    proposal = PatchProposal(
+        summary="Patch total.",
+        patches=[
+            FilePatch(
+                path="ledger.py",
+                expected_sha256="1" * 64,
+                old_text="return sum(row.amount for row in rows)",
+                new_text="return sum(row.net_amount for row in rows)",
+            )
+        ],
+        verification_commands=[["git", "add", "."]],
+    )
+
+    errors = _patch_proposal_validation_errors(
+        proposal,
+        [{"path": "ledger.py", "sha256": "1" * 64, "content": content}],
+    )
+
+    assert "verification command 0 is unsafe: ['git', 'add', '.']" in errors
 
 
 async def test_run_task_completes_with_fake_data_agent(service, tmp_path: pathlib.Path) -> None:
@@ -67,6 +163,13 @@ async def test_coding_workflow_requires_approval_then_applies_patch(service, dat
         mode=RunMode.CODING,
     )
     assert first.status == RunStatus.WAITING_APPROVAL
+    first_events = await service.list_event_responses(first.id, limit=500)
+    assert any(event.event_type == EventType.APPROVAL_REQUIRED for event in first_events)
+    assert not any(
+        event.event_type == EventType.NODE_STARTED and event.role == RoleName.REVIEWER
+        for event in first_events
+    )
+    assert not any(event.event_type == EventType.RUN_COMPLETED for event in first_events)
     async with database.session() as session:
         approval = (
             await session.execute(

@@ -175,6 +175,17 @@
   approve/edit/reject/respond actions. Run/thread composers expose interaction
   mode, dashboards count `waiting_operator`, and SSE invalidates operator
   request state.
+- Real local eval was run against non-Qwen Ollama `llama3.1:8b` with a
+  five-node native graph, Procrastinate queue, Docker sandbox, and a small
+  Python ledger fixture workspace. Model/profile smoke, `plan_only`,
+  `plan_review`, and rejected approval scenarios passed. Coding mode exposed
+  model/contract issues and now ends invalid repair output as managed
+  `failed_verification` instead of system failure.
+- Real eval fixes include approval pause handling, deterministic approval
+  rejection cancellation, atomic multi-patch `native.patch_apply`, patch
+  old-text normalization, pre-patch verification evidence, one-pass repair
+  routing, unsafe verification command validation, clearer provider timeout
+  errors, DB `pool_pre_ping`, and positive model-timeout config validation.
 
 ### Now:
 - MVP backend and operator UI include DB-backed runtime configuration screens
@@ -207,9 +218,14 @@
 - Operator planning is available for local runs: `plan_review` stops before
   worker nodes for human approval/editing, while `plan_only` returns the
   supervisor plan without executing workers.
+- Additional local model `llama3.1:8b` is installed in Ollama for real evals.
+- The real eval fixture remains in ignored `var/workspaces/synode-real-eval`
+  and is reset to its intentionally failing baseline after coding runs.
 
 ### Next:
 - Tune real-model prompts against broader local workloads.
+- Improve native coding verification-command selection, or route coding work to
+  a stronger backend such as OpenHands/Codex/Claude Code for production use.
 - Add production auth before exposing UI/API outside localhost.
 - Add Prometheus/Grafana metrics if host-level dashboards are required.
 
