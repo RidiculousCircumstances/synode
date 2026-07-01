@@ -4,9 +4,9 @@ import json
 import re
 from typing import Any
 
-from synode.runtime.contracts import CODING_PATCH_PROPOSAL_CONTRACT
-from synode.runtime.decisions import FilePatch, PatchProposal
-from synode.tools.shell import is_safe_command
+from synode.domain.runtime.commands import is_safe_command
+from synode.domain.runtime.contracts import CODING_PATCH_PROPOSAL_CONTRACT
+from synode.domain.runtime.decisions import FilePatch, PatchProposal
 from synode.validation.operator import invalid_operator_question_text_reason
 from synode.validation.python import (
     PythonPatchValidator,

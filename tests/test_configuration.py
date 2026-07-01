@@ -6,20 +6,9 @@ import pathlib
 import httpx
 import pytest
 
-from synode.models.provider import ModelProviderRegistry
-from synode.persistence.repository import Repository
-from synode.registry import RoleRegistry
-from synode.runtime.execution import (
-    ExecutionBackendRegistry,
-    HttpOpenHandsClient,
-    NodeExecutionInput,
-    OpenHandsConversationState,
-    OpenHandsNodeBackend,
-    _conversation_payload,
-)
-from synode.runtime.queue import InMemoryRunQueueTransport
-from synode.runtime.service import OrchestrationService
-from synode.schemas import (
+from synode.application.orchestration import OrchestrationService
+from synode.application.ports import NodeExecutionInput
+from synode.domain.models import (
     AgentGraphCreateRequest,
     ApprovalStatus,
     ModelProfileCreateRequest,
@@ -29,7 +18,22 @@ from synode.schemas import (
     RuntimeBackend,
     SecretCreateRequest,
 )
-from synode.tools import build_tool_registry
+from synode.domain.roles import RoleRegistry
+from synode.infrastructure.composition import InfrastructureMCPToolManager
+from synode.infrastructure.models.provider import ModelProviderRegistry
+from synode.infrastructure.observability import Observability
+from synode.infrastructure.persistence.repository import Repository
+from synode.infrastructure.runtime.execution import (
+    ExecutionBackendRegistry,
+    HttpOpenHandsClient,
+    OpenHandsConversationState,
+    OpenHandsNodeBackend,
+    _conversation_payload,
+)
+from synode.infrastructure.runtime.queue import InMemoryRunQueueTransport
+from synode.infrastructure.security import SecretCipher
+from synode.infrastructure.tools import ToolExecutor, build_tool_registry
+from synode.infrastructure.tools.sandbox import SandboxRunner
 
 
 def _graph_payload(
@@ -318,7 +322,7 @@ async def test_openhands_confirmation_uses_synode_approval(settings, database, t
 
     await service.approve(approvals[0].id, "approved for test")
     await service.resume_run(first.id)
-    from synode.runtime.worker import RunWorker
+    from synode.infrastructure.runtime.worker import RunWorker
 
     assert await RunWorker(service, worker_id="openhands-approval-worker").run_once() is True
     resumed = await service.get_run(first.id)
@@ -634,14 +638,29 @@ async def _openhands_service(settings, database, client: "_FakeOpenHandsClient")
     roles = RoleRegistry.load_builtin()
     models = ModelProviderRegistry()
     tools = await build_tool_registry(settings, include_mcp=False)
-    return OrchestrationService(
-        settings,
+    observability = Observability(settings)
+    tool_executor_factory = lambda role_registry: ToolExecutor(  # noqa: E731
         database,
-        roles,
-        models,
+        role_registry,
         tools,
+        settings,
+        observability,
+    )
+    return OrchestrationService(
+        settings=settings,
+        database=database,
+        roles=roles,
+        models=models,
+        tools=tools,
+        observability=observability,
         run_queue=InMemoryRunQueueTransport(),
         execution_backends=ExecutionBackendRegistry(settings, database, openhands_client=client),
+        secret_cipher=SecretCipher(settings) if settings.secrets_key else None,
+        tool_executor=tool_executor_factory(roles),
+        tool_executor_factory=tool_executor_factory,
+        repository_factory=Repository,
+        sandbox_status_factory=lambda: SandboxRunner(settings).status(),
+        mcp_tool_manager=InfrastructureMCPToolManager(),
     )
 
 
@@ -752,4 +771,4 @@ def _patch_execution_async_client(monkeypatch: pytest.MonkeyPatch, transport: ht
         async def __aexit__(self, *args: object) -> None:
             await self._client.__aexit__(*args)
 
-    monkeypatch.setattr("synode.runtime.execution.httpx.AsyncClient", ClientFactory)
+    monkeypatch.setattr("synode.infrastructure.runtime.execution.httpx.AsyncClient", ClientFactory)

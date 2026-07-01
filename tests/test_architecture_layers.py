@@ -9,26 +9,59 @@ SRC = ROOT / "src" / "synode"
 
 def test_domain_does_not_import_outer_layers() -> None:
     forbidden = (
-        "synode.api",
-        "synode.cli",
+        "synode.interfaces",
         "synode.application",
         "synode.infrastructure",
-        "synode.persistence",
-        "synode.runtime",
-        "synode.tools",
-        "synode.models",
+        *REMOVED_ROOT_MODULES,
     )
     assert_no_imports(SRC / "domain", forbidden)
 
 
 def test_application_does_not_import_api_or_infrastructure_adapters() -> None:
     forbidden = (
-        "synode.api",
-        "synode.cli",
+        "synode.interfaces",
         "synode.infrastructure",
-        "synode.persistence",
+        *REMOVED_ROOT_MODULES,
     )
     assert_no_imports(SRC / "application", forbidden)
+
+
+def test_infrastructure_does_not_import_interfaces() -> None:
+    assert_no_imports(SRC / "infrastructure", ("synode.interfaces", *REMOVED_ROOT_MODULES))
+
+
+def test_removed_root_modules_are_not_tracked_sources() -> None:
+    missing = [module for module in REMOVED_ROOT_PATHS if (SRC / module).exists()]
+    assert missing == []
+
+
+REMOVED_ROOT_MODULES = (
+    "synode.runtime",
+    "synode.persistence",
+    "synode.tools",
+    "synode.models",
+    "synode.schemas",
+    "synode.registry",
+    "synode.config",
+    "synode.observability",
+    "synode.security",
+    "synode.api",
+    "synode.cli",
+)
+
+REMOVED_ROOT_PATHS = (
+    "runtime",
+    "persistence",
+    "tools",
+    "models",
+    "schemas.py",
+    "registry.py",
+    "config.py",
+    "observability.py",
+    "security.py",
+    "api.py",
+    "cli.py",
+)
 
 
 def assert_no_imports(path: Path, forbidden: tuple[str, ...]) -> None:
@@ -48,4 +81,3 @@ def assert_no_imports(path: Path, forbidden: tuple[str, ...]) -> None:
             if module and module.startswith(forbidden):
                 violations.append(f"{file_path.relative_to(ROOT)} imports {module}")
     assert violations == []
-

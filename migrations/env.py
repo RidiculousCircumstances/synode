@@ -5,9 +5,9 @@ from logging.config import fileConfig
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 
-from synode.config import Settings
-from synode.persistence.models import Base
-from synode.persistence.urls import to_sync_database_url
+from synode.infrastructure.config import Settings
+from synode.infrastructure.persistence.models import Base
+from synode.infrastructure.persistence.urls import to_sync_database_url
 
 config = context.config
 

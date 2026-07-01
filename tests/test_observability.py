@@ -4,8 +4,8 @@ import pathlib
 
 import pytest
 
-from synode.config import Settings
-from synode.observability import Observability
+from synode.infrastructure.config import Settings
+from synode.infrastructure.observability import Observability
 
 
 def test_observability_disabled_is_explicit_noop(settings: Settings) -> None:

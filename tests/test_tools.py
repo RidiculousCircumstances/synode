@@ -3,12 +3,12 @@ from __future__ import annotations
 import hashlib
 import pathlib
 
-from synode.persistence.repository import Repository
-from synode.registry import RoleRegistry
-from synode.schemas import ApprovalStatus, ToolCall
-from synode.tools import build_tool_registry
-from synode.tools.base import ToolExecutor
-from synode.tools.sandbox import SandboxResult, SandboxStatus
+from synode.domain.models import ApprovalStatus, ToolCall
+from synode.domain.roles import RoleRegistry
+from synode.infrastructure.persistence.repository import Repository
+from synode.infrastructure.tools import build_tool_registry
+from synode.infrastructure.tools.base import ToolExecutor
+from synode.infrastructure.tools.sandbox import SandboxResult, SandboxStatus
 
 
 async def test_data_profile_tool_profiles_csv(service, tmp_path: pathlib.Path) -> None:

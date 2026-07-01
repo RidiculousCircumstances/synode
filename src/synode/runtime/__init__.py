@@ -1,2 +1,0 @@
-"""Synode runtime package."""
-

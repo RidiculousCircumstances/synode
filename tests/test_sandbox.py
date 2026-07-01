@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from synode.config import Settings
-from synode.tools.sandbox import (
+from synode.infrastructure.config import Settings
+from synode.infrastructure.tools.sandbox import (
     SandboxRunner,
     SandboxUnavailable,
     _docker_container_config,

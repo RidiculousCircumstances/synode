@@ -4,13 +4,19 @@ import pathlib
 
 import pytest
 
-from synode.config import Settings
-from synode.models.provider import ModelProviderRegistry
-from synode.persistence.database import Database
-from synode.registry import RoleRegistry
-from synode.runtime.queue import InMemoryRunQueueTransport
-from synode.runtime.service import OrchestrationService
-from synode.tools import ToolExecutor, build_tool_registry
+from synode.application.orchestration import OrchestrationService
+from synode.domain.roles import RoleRegistry
+from synode.infrastructure.composition import InfrastructureMCPToolManager
+from synode.infrastructure.config import Settings
+from synode.infrastructure.models.provider import ModelProviderRegistry
+from synode.infrastructure.observability import Observability
+from synode.infrastructure.persistence.database import Database
+from synode.infrastructure.persistence.repository import Repository
+from synode.infrastructure.runtime.execution import ExecutionBackendRegistry
+from synode.infrastructure.runtime.queue import InMemoryRunQueueTransport
+from synode.infrastructure.security import SecretCipher
+from synode.infrastructure.tools import ToolExecutor, build_tool_registry
+from synode.infrastructure.tools.sandbox import SandboxRunner
 
 
 @pytest.fixture()
@@ -38,13 +44,29 @@ async def service(settings: Settings, database: Database) -> OrchestrationServic
     roles = RoleRegistry.load_builtin()
     models = ModelProviderRegistry()
     tools = await build_tool_registry(settings, include_mcp=False)
-    return OrchestrationService(
-        settings,
+    observability = Observability(settings)
+    tool_executor_factory = lambda role_registry: ToolExecutor(  # noqa: E731
         database,
-        roles,
-        models,
+        role_registry,
         tools,
+        settings,
+        observability,
+    )
+    return OrchestrationService(
+        settings=settings,
+        database=database,
+        roles=roles,
+        models=models,
+        tools=tools,
+        observability=observability,
         run_queue=InMemoryRunQueueTransport(),
+        execution_backends=ExecutionBackendRegistry(settings, database),
+        secret_cipher=SecretCipher(settings) if settings.secrets_key else None,
+        tool_executor=tool_executor_factory(roles),
+        tool_executor_factory=tool_executor_factory,
+        repository_factory=Repository,
+        sandbox_status_factory=lambda: SandboxRunner(settings).status(),
+        mcp_tool_manager=InfrastructureMCPToolManager(),
     )
 
 

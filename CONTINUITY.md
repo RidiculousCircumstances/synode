@@ -90,7 +90,7 @@
 - UI runtime config defaults to `apiBaseUrl=auto`: browser clients resolve API
   as `http(s)://<current-ui-host>:8787`, so LAN access does not call client-side
   `127.0.0.1`.
-- Optional Langfuse tracing is implemented through `synode.observability` and
+- Optional Langfuse tracing is implemented through `synode.infrastructure.observability` and
   instruments runs, graph nodes, model calls, and tool calls.
 - `docker-compose.observability.yaml` adds Langfuse web/worker plus separate
   Postgres, ClickHouse, Redis, and MinIO services.

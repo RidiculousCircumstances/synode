@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from synode.runtime.decisions import FilePatch, PatchProposal
+from synode.domain.runtime.decisions import FilePatch, PatchProposal
 from synode.validation.patches import (
     categorize_patch_validation_failure,
     extract_required_patch_symbols,

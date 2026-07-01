@@ -5,10 +5,13 @@ import json
 import httpx
 import pytest
 
-from synode.models.errors import ModelProviderUnavailableError, StructuredOutputValidationError
-from synode.models.provider import ModelRequest, OllamaProvider
-from synode.runtime.decisions import RiskLevel, SupervisorDecision
-from synode.schemas import RoleName
+from synode.domain.errors import (
+    ModelProviderUnavailableError,
+    StructuredOutputValidationError,
+)
+from synode.domain.models import RoleName
+from synode.domain.runtime.decisions import RiskLevel, SupervisorDecision
+from synode.infrastructure.models.provider import ModelRequest, OllamaProvider
 
 
 async def test_ollama_provider_maps_structured_response(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -173,4 +176,4 @@ def _patch_async_client(monkeypatch: pytest.MonkeyPatch, transport: httpx.MockTr
         async def __aexit__(self, *args: object) -> None:
             await self.client.aclose()
 
-    monkeypatch.setattr("synode.models.provider.httpx.AsyncClient", ClientFactory)
+    monkeypatch.setattr("synode.infrastructure.models.provider.httpx.AsyncClient", ClientFactory)

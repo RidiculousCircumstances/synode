@@ -4,7 +4,7 @@ import ast
 import re
 from typing import Any
 
-from synode.runtime.decisions import PatchProposal
+from synode.domain.runtime.decisions import PatchProposal
 
 
 class PythonPatchValidator:

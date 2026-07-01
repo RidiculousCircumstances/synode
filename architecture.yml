@@ -16,21 +16,26 @@ components:
     responsibilities:
       - Database, queue, model provider, tool, sandbox, MCP, OpenHands, logging, and observability adapters
       - Adapter implementations may depend on domain contracts and external libraries
-  - name: app-entrypoints
-    path: src/synode
+  - name: interfaces
+    path: src/synode/interfaces
     responsibilities:
-      - CLI and FastAPI composition roots
-      - Runtime migration boundary modules while the layered package split is completed
-      - LangGraph orchestration runtime wiring
-      - Model provider abstraction, DB-backed model profiles, Ollama provider, OpenAI-compatible provider, and optional model streaming
-      - Tool policy, native tools, DB-backed MCP servers, and Synode MCP proxy
-      - Persistence, conversational threads, agent graphs, encrypted secrets, audit log, and approval state
+      - CLI and FastAPI entrypoints
+      - HTTP request/response routing, SSE streaming, and CLI command surfaces
+      - Wires requests into application use cases through the infrastructure composition root
+  - name: composition
+    path: src/synode/infrastructure/composition.py
+    responsibilities:
+      - Startup assembly for Settings, DB, queue, model providers, tool gateway, MCP, sandbox, OpenHands, observability, and application services
+      - No business workflow decisions
+  - name: application-runtime
+    path: src/synode/application
+    responsibilities:
+      - LangGraph orchestration wiring
+      - Conversational threads, runs, approvals, operator requests, graph snapshots, profile binding, and structured run reports
       - Structured run read models, run report endpoint, SSE event stream with model/tool activity, run cancellation, and metrics endpoints
-      - Run queue adapter, Procrastinate dispatch, worker heartbeat, stale-run recovery, and exact run claims
       - AgentGraph v2 node schema, code-based node contracts, node execution state, and backend registry with native LangGraph and optional external OpenHands execution for control and worker nodes
       - Operator planning gates, ambiguity interrupts, durable operator requests, and LangGraph checkpoint resume
       - Deterministic validation layer for operator questions, patch proposals, verification commands, and language-specific patch checks
-      - Optional Langfuse trace emission
   - name: web
     path: web
     responsibilities:
@@ -89,8 +94,7 @@ components:
 rules:
   - Domain must not depend on application, infrastructure, API, CLI, persistence, runtime, tool, or model-provider implementations.
   - Application may depend on domain contracts and abstract ports, but not concrete infrastructure adapters.
-  - Infrastructure may depend on domain and external libraries, and is wired by API/CLI composition roots.
-  - Orchestration may depend on model, tool, persistence, and registry modules.
+  - Infrastructure may depend on domain, application ports, and external libraries, and is wired by the composition root.
   - Tool implementations must depend on policy and shared schemas, not on API entrypoints.
   - API and CLI must call the orchestration service, not duplicate graph behavior.
   - UI must consume structured API read models, run reports, and event display payloads; it must not parse `final_answer` or raw artifact JSON as a UI protocol.
@@ -119,31 +123,31 @@ rules:
 
 entrypoints:
   - name: cli
-    path: src/synode/cli.py
+    path: src/synode/interfaces/cli.py
     type: cli
     command: synode
   - name: api
-    path: src/synode/api.py
+    path: src/synode/interfaces/http/app.py
     type: asgi
-    command: uvicorn synode.api:create_app --factory
+    command: uvicorn synode.interfaces.http.app:create_app --factory
   - name: db-upgrade
-    path: src/synode/cli.py
+    path: src/synode/interfaces/cli.py
     type: cli
     command: synode db upgrade
   - name: queue-upgrade
-    path: src/synode/cli.py
+    path: src/synode/interfaces/cli.py
     type: cli
     command: synode queue upgrade
   - name: worker
-    path: src/synode/cli.py
+    path: src/synode/interfaces/cli.py
     type: cli
     command: synode worker run
   - name: model-health
-    path: src/synode/cli.py
+    path: src/synode/interfaces/cli.py
     type: cli
     command: synode models health
   - name: fabricator
-    path: src/synode/cli.py
+    path: src/synode/interfaces/cli.py
     type: cli
     command: synode fabricator
   - name: docker-compose

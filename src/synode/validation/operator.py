@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 
-from synode.runtime.contracts import CODING_PATCH_PROPOSAL_CONTRACT
+from synode.domain.runtime.contracts import CODING_PATCH_PROPOSAL_CONTRACT
 
 
 def invalid_operator_question_text_reason(text: str, *, contract_id: str) -> str | None:

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from synode.registry import RoleRegistry
-from synode.runtime.routing import select_worker_roles
+from synode.domain.roles import RoleRegistry
+from synode.domain.runtime.routing import select_worker_roles
 
 
 def test_builtin_roles_load() -> None:

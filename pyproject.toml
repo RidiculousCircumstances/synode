@@ -45,10 +45,10 @@ dev = [
 ]
 
 [project.scripts]
-synode = "synode.cli:main"
+synode = "synode.interfaces.cli:main"
 
 [project.entry-points."uvicorn.factories"]
-synode = "synode.api:create_app"
+synode = "synode.interfaces.http.app:create_app"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/synode"]

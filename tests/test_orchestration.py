@@ -6,20 +6,7 @@ from subprocess import run
 import pytest
 from sqlalchemy import select
 
-from synode.models.errors import StructuredOutputValidationError
-from synode.models.provider import (
-    FakeModelProvider,
-    ModelProviderRegistry,
-    ModelRequest,
-    ModelResponse,
-)
-from synode.observability import Observability
-from synode.persistence.models import ApprovalRecord
-from synode.persistence.repository import Repository
-from synode.registry import RoleRegistry
-from synode.runtime.contracts import WORKER_AGENT_OUTPUT_CONTRACT
-from synode.runtime.decisions import NativeLoopAction, PatchProposal, SupervisorDecision
-from synode.runtime.graph import (
+from synode.application.graph.engine import (
     GraphDependencies,
     ResolvedModelProvider,
     _build_coding_context_packet,
@@ -38,9 +25,8 @@ from synode.runtime.graph import (
     _validate_supervisor_decision,
     _verification_command_catalog,
 )
-from synode.runtime.operator import ApprovalRequired
-from synode.runtime.worker import RunWorker
-from synode.schemas import (
+from synode.domain.errors import StructuredOutputValidationError
+from synode.domain.models import (
     ApprovalStatus,
     EventType,
     InteractionMode,
@@ -54,6 +40,20 @@ from synode.schemas import (
     ToolCall,
     ToolResult,
 )
+from synode.domain.roles import RoleRegistry
+from synode.domain.runtime.contracts import WORKER_AGENT_OUTPUT_CONTRACT
+from synode.domain.runtime.decisions import NativeLoopAction, PatchProposal, SupervisorDecision
+from synode.domain.runtime.operator import ApprovalRequired
+from synode.infrastructure.models.provider import (
+    FakeModelProvider,
+    ModelProviderRegistry,
+    ModelRequest,
+    ModelResponse,
+)
+from synode.infrastructure.observability import Observability
+from synode.infrastructure.persistence.models import ApprovalRecord
+from synode.infrastructure.persistence.repository import Repository
+from synode.infrastructure.runtime.worker import RunWorker
 
 
 class StreamingFakeProvider(FakeModelProvider):
@@ -495,6 +495,7 @@ async def test_supervisor_plan_sanitizer_drops_disallowed_tool_hints(
     roles = RoleRegistry.load_builtin()
     deps = GraphDependencies(
         database=database,
+            repository_factory=Repository,
         roles=roles,
         models=ModelProviderRegistry(),
         tool_executor=tool_executor,
@@ -561,6 +562,7 @@ async def test_native_worker_loop_rejects_disallowed_tool_without_execution(
     )
     deps = GraphDependencies(
         database=database,
+            repository_factory=Repository,
         roles=tool_executor.roles,
         models=models,
         tool_executor=tool_executor,
@@ -614,6 +616,7 @@ async def test_native_worker_loop_surfaces_approval(
     )
     deps = GraphDependencies(
         database=database,
+            repository_factory=Repository,
         roles=tool_executor.roles,
         models=models,
         tool_executor=tool_executor,
@@ -689,6 +692,7 @@ async def test_native_worker_loop_retries_invalid_final_payload(
     )
     deps = GraphDependencies(
         database=database,
+            repository_factory=Repository,
         roles=tool_executor.roles,
         models=models,
         tool_executor=tool_executor,
@@ -753,6 +757,7 @@ async def test_native_worker_loop_rejects_duplicate_tool_call_without_reexecutio
     )
     deps = GraphDependencies(
         database=database,
+            repository_factory=Repository,
         roles=tool_executor.roles,
         models=models,
         tool_executor=tool_executor,
@@ -806,6 +811,7 @@ async def test_native_worker_loop_includes_tool_catalog(
     models.register(provider)
     deps = GraphDependencies(
         database=database,
+            repository_factory=Repository,
         roles=tool_executor.roles,
         models=models,
         tool_executor=tool_executor,
@@ -1069,6 +1075,7 @@ async def test_streaming_provider_emits_model_stream_events(service, tmp_path: p
         )
     deps = GraphDependencies(
         database=service.database,
+            repository_factory=Repository,
         roles=service.roles,
         models=service.models,
         tool_executor=service.tool_executor,
@@ -1120,6 +1127,7 @@ async def test_structured_model_call_retries_invalid_json_once(service, tmp_path
         )
     deps = GraphDependencies(
         database=service.database,
+            repository_factory=Repository,
         roles=service.roles,
         models=service.models,
         tool_executor=service.tool_executor,

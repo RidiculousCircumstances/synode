@@ -5,10 +5,10 @@ import pathlib
 import httpx
 import pytest
 
-from synode.api import create_app
-from synode.persistence.repository import Repository
-from synode.runtime.service import OrchestrationService
-from synode.schemas import InteractionMode, RunStatus
+from synode.application.orchestration import OrchestrationService
+from synode.domain.models import InteractionMode, RunStatus
+from synode.infrastructure.persistence.repository import Repository
+from synode.interfaces.http.app import create_app
 
 
 async def test_api_exposes_run_read_models(service: OrchestrationService, tmp_path: pathlib.Path) -> None:
@@ -232,7 +232,7 @@ async def test_api_manages_mcp_servers_and_refreshes_registry(
         assert config["transport"] == "stdio"
         return ["repo_status"]
 
-    monkeypatch.setattr("synode.runtime.service.discover_mcp_tools", fake_discover)
+    monkeypatch.setattr(service.mcp_tool_manager, "discover", fake_discover)
     app = create_app()
     app.state.service = service
     transport = httpx.ASGITransport(app=app)

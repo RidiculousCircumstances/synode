@@ -4,9 +4,9 @@ import asyncio
 import pathlib
 from datetime import UTC, datetime, timedelta
 
-from synode.persistence.repository import Repository
-from synode.runtime.worker import RunWorker
-from synode.schemas import EventType, RunStatus, ToolRisk
+from synode.domain.models import EventType, RunStatus, ToolRisk
+from synode.infrastructure.persistence.repository import Repository
+from synode.infrastructure.runtime.worker import RunWorker
 
 
 async def test_worker_claims_queued_run_and_completes(service, tmp_path: pathlib.Path) -> None:
