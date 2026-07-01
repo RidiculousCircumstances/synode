@@ -202,6 +202,18 @@
 - Coding evals can target `native_langgraph` or `openhands` backends. OpenHands
   evals bind only the coder node externally and skip native-only
   `PatchProposal` contract regressions explicitly.
+- Coding eval reports now include behavioral gates for first action tool calls,
+  model schema failures, duplicate tool calls, invalid argument repair,
+  patch+verify evidence, and grounded success. Reports are written
+  incrementally after each task so long real-model runs preserve partial
+  results.
+- Real native coding gate matrix ran against local Ollama `qwen3:8b`,
+  `hermes3:8b`, `deepseek-coder:6.7b-instruct`,
+  `opencoder:8b-instruct-q8_0`, and `yi-coder:9b-chat`. Raw reports are under
+  `var/evals/model-matrix/20260702-001412`; summary is in
+  `docs/evals/2026-07-01-real-model-matrix.md`. `yi-coder:9b-chat` was the
+  strongest candidate but still failed overall Synode gates; OpenHands was
+  skipped because the deployed backend is disabled.
 - Structured run reports are now the intended chat/run-detail presentation
   surface. New runs should persist `run_report` artifacts and `run_report`
   thread messages instead of technical `Synode run summary:` text.

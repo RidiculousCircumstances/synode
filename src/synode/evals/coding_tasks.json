@@ -85,6 +85,49 @@
     "hidden_files": {}
   },
   {
+    "id": "sql_refund_revenue_query",
+    "title": "SQL refund revenue query",
+    "prompt": "Fix the SQL report so refunds reduce monthly net revenue. Do not rewrite the Python tests. Run pytest -q.",
+    "expected_mutation": true,
+    "public_files": {
+      "pyproject.toml": "[tool.pytest.ini_options]\ntestpaths = [\"tests\"]\n",
+      "queries/monthly_revenue.sql": "SELECT\n  substr(date, 1, 7) AS month,\n  SUM(CASE WHEN type = 'sale' THEN amount ELSE 0 END) AS net_revenue\nFROM orders\nGROUP BY month\nORDER BY month;\n",
+      "tests/test_monthly_revenue_sql.py": "from __future__ import annotations\n\nimport sqlite3\nfrom pathlib import Path\n\n\ndef run_query(rows: list[tuple[str, str, float]]) -> list[tuple[str, float]]:\n    conn = sqlite3.connect(\":memory:\")\n    conn.execute(\"CREATE TABLE orders (date TEXT, type TEXT, amount REAL)\")\n    conn.executemany(\"INSERT INTO orders VALUES (?, ?, ?)\", rows)\n    query = Path(\"queries/monthly_revenue.sql\").read_text(encoding=\"utf-8\")\n    return [(month, round(total, 2)) for month, total in conn.execute(query).fetchall()]\n\n\ndef test_refunds_reduce_monthly_revenue() -> None:\n    assert run_query([\n        (\"2026-05-02\", \"sale\", 120.00),\n        (\"2026-05-04\", \"refund\", 24.00),\n        (\"2026-05-12\", \"sale\", 85.50),\n    ]) == [(\"2026-05\", 181.50)]\n"
+    },
+    "hidden_files": {
+      "tests/test_hidden_sql_negative_month.py": "from test_monthly_revenue_sql import run_query\n\n\ndef test_refund_only_month_can_be_negative() -> None:\n    assert run_query([(\"2026-07-01\", \"refund\", 10.00), (\"2026-07-02\", \"sale\", 3.00)]) == [(\"2026-07\", -7.00)]\n"
+    }
+  },
+  {
+    "id": "sh_retention_filter",
+    "title": "Shell retention filter",
+    "prompt": "Fix the retention filter script so rows on the cutoff date are kept, older rows are dropped, and newer rows are kept. Run pytest -q.",
+    "expected_mutation": true,
+    "public_files": {
+      "pyproject.toml": "[tool.pytest.ini_options]\ntestpaths = [\"tests\"]\n",
+      "scripts/filter_retention.sh": "#!/bin/sh\nset -eu\n\ncutoff=\"$1\"\nwhile IFS= read -r line; do\n  day=${line%% *}\n  if [ \"$day\" \\> \"$cutoff\" ]; then\n    printf '%s\\n' \"$line\"\n  fi\ndone\n",
+      "tests/test_filter_retention.py": "from __future__ import annotations\n\nimport subprocess\nfrom pathlib import Path\n\n\ndef run_filter(cutoff: str, lines: list[str]) -> list[str]:\n    script = Path(\"scripts/filter_retention.sh\")\n    result = subprocess.run(\n        [\"/bin/sh\", str(script), cutoff],\n        input=\"\\n\".join(lines) + \"\\n\",\n        text=True,\n        capture_output=True,\n        check=True,\n    )\n    return result.stdout.splitlines()\n\n\ndef test_cutoff_date_is_kept() -> None:\n    assert run_filter(\"2026-06-02\", [\n        \"2026-06-01 old\",\n        \"2026-06-02 cutoff\",\n        \"2026-06-03 new\",\n    ]) == [\"2026-06-02 cutoff\", \"2026-06-03 new\"]\n"
+    },
+    "hidden_files": {
+      "tests/test_hidden_filter_retention.py": "from test_filter_retention import run_filter\n\n\ndef test_all_newer_rows_are_kept() -> None:\n    assert run_filter(\"2026-01-01\", [\"2026-01-01 a\", \"2026-01-02 b\", \"2026-12-31 c\"]) == [\"2026-01-01 a\", \"2026-01-02 b\", \"2026-12-31 c\"]\n"
+    }
+  },
+  {
+    "id": "tool_argument_repair_probe",
+    "title": "Tool argument repair probe",
+    "prompt": "The target function is calculate_platform_fee, but the file path is not given. Locate the function using repository tools, fix the fee rules, and run pytest -q. Fee rules: starter=2%, pro=1.5%, enterprise=1%. Refund amounts must keep their sign.",
+    "expected_mutation": true,
+    "public_files": {
+      "pyproject.toml": "[tool.pytest.ini_options]\ntestpaths = [\"tests\"]\n",
+      "billing/__init__.py": "",
+      "billing/pricing.py": "from __future__ import annotations\n\nfrom decimal import Decimal\n\n\ndef calculate_platform_fee(amount: Decimal, plan: str) -> Decimal:\n    if plan == \"enterprise\":\n        return amount * Decimal(\"0.01\")\n    return amount * Decimal(\"0.03\")\n",
+      "tests/test_pricing.py": "from decimal import Decimal\n\nfrom billing.pricing import calculate_platform_fee\n\n\ndef test_platform_fee_rules() -> None:\n    assert calculate_platform_fee(Decimal(\"100.00\"), \"starter\") == Decimal(\"2.0000\")\n    assert calculate_platform_fee(Decimal(\"100.00\"), \"pro\") == Decimal(\"1.50000\")\n    assert calculate_platform_fee(Decimal(\"100.00\"), \"enterprise\") == Decimal(\"1.0000\")\n"
+    },
+    "hidden_files": {
+      "tests/test_hidden_refund_fee.py": "from decimal import Decimal\n\nfrom billing.pricing import calculate_platform_fee\n\n\ndef test_refund_amount_keeps_sign() -> None:\n    assert calculate_platform_fee(Decimal(\"-50.00\"), \"pro\") == Decimal(\"-0.75000\")\n"
+    }
+  },
+  {
     "id": "contract_unsafe_verification",
     "title": "Unsafe verification contract regression",
     "prompt": "Deterministic contract scenario: an unsafe verification command must be rejected before patch application.",

@@ -42,6 +42,17 @@ app.add_typer(eval_app, name="eval")
 console = Console()
 
 
+def _alembic_config_path() -> Path:
+    for parent in Path(__file__).resolve().parents:
+        candidate = parent / "alembic.ini"
+        if candidate.exists():
+            return candidate
+    candidate = Path.cwd() / "alembic.ini"
+    if candidate.exists():
+        return candidate
+    raise typer.BadParameter("alembic.ini not found")
+
+
 @app.command(
     "fabricator",
     context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
@@ -93,7 +104,7 @@ def db_upgrade() -> None:
     if settings.database_url.startswith("sqlite"):
         asyncio.run(_sqlite_upgrade(settings))
     else:
-        cfg = Config(str(Path(__file__).resolve().parents[2] / "alembic.ini"))
+        cfg = Config(str(_alembic_config_path()))
         cfg.set_main_option("sqlalchemy.url", to_sync_database_url(settings.database_url))
         command.upgrade(cfg, "head")
     if settings.run_queue_transport == "procrastinate":

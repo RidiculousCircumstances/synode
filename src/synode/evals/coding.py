@@ -7,7 +7,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from importlib import resources
 from pathlib import Path, PurePosixPath
@@ -39,6 +39,29 @@ class CodingEvalTask:
 
 
 @dataclass
+class BehaviorMetrics:
+    first_action_kind: str | None = None
+    first_action_tool_name: str | None = None
+    first_action_tool_call_pass: bool | None = None
+    schema_valid_json_pass: bool = True
+    schema_validation_failures: int = 0
+    schema_recovered_after_validation_error: bool | None = None
+    duplicate_tool_call_pass: bool = True
+    duplicate_tool_calls: list[str] = field(default_factory=list)
+    invalid_arg_errors: int = 0
+    invalid_arg_repair_applicable: bool = False
+    invalid_arg_repair_pass: bool | None = None
+    patch_seen: bool = False
+    verify_seen: bool = False
+    patch_verify_applicable: bool = False
+    patch_verify_pass: bool | None = None
+    grounded_success_pass: bool = True
+    ungrounded_success: bool = False
+    evidence_summary: dict[str, Any] = field(default_factory=dict)
+    notes: list[str] = field(default_factory=list)
+
+
+@dataclass
 class CodingEvalResult:
     task_id: str
     title: str
@@ -54,6 +77,7 @@ class CodingEvalResult:
     functional_pass: bool = False
     safety_pass: bool = False
     contract_pass: bool = False
+    behavior_pass: bool = False
     ok: bool = False
     approvals_seen: int = 0
     operator_requests_seen: int = 0
@@ -61,6 +85,7 @@ class CodingEvalResult:
     failure_category: str | None = None
     verification_stdout: str = ""
     verification_stderr: str = ""
+    behavior: BehaviorMetrics = field(default_factory=BehaviorMetrics)
     notes: list[str] = field(default_factory=list)
 
 
@@ -172,32 +197,72 @@ def run_coding_eval(
         backend=backend,
         graph_name_suffix=graph_name_suffix,
     )
-    results = [
-        run_task_eval(
-            client=client,
-            task=task,
-            output_root=output_root,
-            workspace_root=workspace_root,
-            api_workspace_root=api_workspace_root,
+    results: list[CodingEvalResult] = []
+    report: dict[str, Any] | None = None
+    for task in tasks:
+        results.append(
+            run_task_eval(
+                client=client,
+                task=task,
+                output_root=output_root,
+                workspace_root=workspace_root,
+                api_workspace_root=api_workspace_root,
+                profile_id=profile["id"],
+                graph_id=graph["id"],
+                backend=backend,
+                timeout_seconds=timeout_seconds,
+                approve_mutations=approve_mutations,
+                skip_contract_only_for_openhands=skip_contract_only_for_openhands,
+            )
+        )
+        report = write_coding_eval_report(
+            output_root,
+            api_url=api_url,
+            model=model,
+            backend=backend,
             profile_id=profile["id"],
             graph_id=graph["id"],
-            backend=backend,
-            timeout_seconds=timeout_seconds,
-            approve_mutations=approve_mutations,
-            skip_contract_only_for_openhands=skip_contract_only_for_openhands,
+            workspace_root=workspace_root,
+            api_workspace_root=api_workspace_root,
+            results=results,
         )
-        for task in tasks
-    ]
+    if report is None:
+        report = write_coding_eval_report(
+            output_root,
+            api_url=api_url,
+            model=model,
+            backend=backend,
+            profile_id=profile["id"],
+            graph_id=graph["id"],
+            workspace_root=workspace_root,
+            api_workspace_root=api_workspace_root,
+            results=results,
+        )
+    return report
+
+
+def write_coding_eval_report(
+    output_root: Path,
+    *,
+    api_url: str,
+    model: str,
+    backend: EvalBackend,
+    profile_id: str,
+    graph_id: str,
+    workspace_root: Path,
+    api_workspace_root: str | None,
+    results: list[CodingEvalResult],
+) -> dict[str, Any]:
     report = {
         "created_at": datetime.now(UTC).isoformat(),
         "api_url": api_url,
         "model": model,
         "backend": backend,
-        "profile_id": profile["id"],
-        "graph_id": graph["id"],
+        "profile_id": profile_id,
+        "graph_id": graph_id,
         "workspace_root": str(workspace_root),
         "api_workspace_root": api_workspace_root,
-        "results": [result.__dict__ for result in results],
+        "results": [asdict(result) for result in results],
         "summary": summarize_results(results),
     }
     (output_root / "report.json").write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
@@ -236,11 +301,18 @@ def run_task_eval(
         result.notes.append(result.skip_reason)
         return result
     if task.contract_only:
+        result.behavior_pass = True
         result.runtime_pass = True
         result.contract_pass = True
         result.safety_pass = not changed_files(workspace)
         result.functional_pass = run_workspace_tests(workspace, task).returncode == 0
-        result.ok = result.runtime_pass and result.contract_pass and result.safety_pass and result.functional_pass
+        result.ok = (
+            result.runtime_pass
+            and result.contract_pass
+            and result.safety_pass
+            and result.functional_pass
+            and result.behavior_pass
+        )
         return result
 
     thread = client.post(
@@ -268,10 +340,26 @@ def run_task_eval(
         result.verification_stdout = verification.stdout
         result.verification_stderr = verification.stderr
         result.functional_pass = verification.returncode == 0
+    result.behavior = collect_behavior_metrics(
+        client,
+        run_id,
+        task=task,
+        backend=backend,
+        status=result.status,
+        changed_file_count=len(result.changed_files),
+        hidden_tests_pass=result.functional_pass if not task.expected_operator else None,
+    )
     result.runtime_pass = runtime_pass(task, result)
     result.safety_pass = safety_pass(task, result)
     result.contract_pass = result.status in TERMINAL_STATUSES or result.operator_requests_seen > 0
-    result.ok = result.runtime_pass and result.functional_pass and result.safety_pass and result.contract_pass
+    result.behavior_pass = behavior_pass(task, result)
+    result.ok = (
+        result.runtime_pass
+        and result.functional_pass
+        and result.safety_pass
+        and result.contract_pass
+        and result.behavior_pass
+    )
     return result
 
 
@@ -317,6 +405,19 @@ def poll_run(
                 return
         time.sleep(2)
     result.notes.append(f"timeout after {timeout_seconds:.0f}s")
+    try:
+        client.post(f"/runs/{run_id}/stop", {"reason": "Coding eval timed out."})
+    except EvalApiError as exc:
+        result.notes.append(f"stop after timeout failed: HTTP {exc.status}")
+        return
+    stop_deadline = time.monotonic() + 30
+    while time.monotonic() < stop_deadline:
+        run = client.get(f"/runs/{run_id}")
+        result.status = run["status"]
+        if run["status"] in TERMINAL_STATUSES:
+            return
+        time.sleep(1)
+    result.notes.append("run did not reach terminal status after timeout stop")
 
 
 def ensure_profile(client: SynodeApiClient, *, model: str, ollama_base_url: str) -> dict[str, Any]:
@@ -398,6 +499,294 @@ def latest_pending_operator_request(client: SynodeApiClient, run_id: str) -> dic
     return pending[-1] if pending else None
 
 
+def collect_behavior_metrics(
+    client: SynodeApiClient,
+    run_id: str,
+    *,
+    task: CodingEvalTask,
+    backend: EvalBackend,
+    status: str | None,
+    changed_file_count: int,
+    hidden_tests_pass: bool | None,
+) -> BehaviorMetrics:
+    events = fetch_run_events(client, run_id)
+    audit = fetch_tool_audit(client, run_id)
+    artifacts = fetch_artifacts(client, run_id)
+    traces = [artifact for artifact in artifacts if artifact.get("kind") == "native_loop_trace"]
+
+    metrics = BehaviorMetrics()
+    metrics.evidence_summary = {
+        "tool_audit_count": len(audit),
+        "successful_tool_audit_count": sum(1 for item in audit if item.get("status") == "ok"),
+        "patch_audit_count": sum(1 for item in audit if item.get("tool_name") == "native.patch_apply"),
+        "verify_audit_count": sum(1 for item in audit if item.get("tool_name") == "native.verify"),
+        "patch_artifact_count": sum(
+            1 for item in artifacts if item.get("kind") in {"patch_proposal", "patch_repair_proposal"}
+        ),
+        "verify_event_count": sum(1 for item in events if item.get("event_type") == "verification_completed"),
+        "run_report_seen": any(item.get("kind") == "run_report" for item in artifacts),
+        "final_answer_seen": any(item.get("kind") == "final_answer" for item in artifacts),
+        "changed_file_count": changed_file_count,
+        "hidden_tests_pass": hidden_tests_pass,
+    }
+
+    trace_steps = native_loop_steps(traces)
+    first_step = next((step for step in trace_steps if step.get("action")), None)
+    if task.contract_only or task.expected_operator:
+        metrics.first_action_tool_call_pass = None
+    elif backend == "openhands":
+        first_audit = audit[0] if audit else None
+        metrics.first_action_kind = "tool_audit" if first_audit else None
+        metrics.first_action_tool_name = str(first_audit.get("tool_name")) if first_audit else None
+        metrics.first_action_tool_call_pass = bool(first_audit)
+    elif first_step:
+        metrics.first_action_kind = str(first_step.get("action") or "")
+        raw_tool_call = first_step.get("tool_call")
+        tool_call = raw_tool_call if isinstance(raw_tool_call, dict) else {}
+        metrics.first_action_tool_name = str(tool_call.get("name")) if tool_call.get("name") else None
+        metrics.first_action_tool_call_pass = metrics.first_action_kind == "tool_call"
+    else:
+        metrics.first_action_tool_call_pass = False
+        metrics.notes.append("no native loop action trace found")
+
+    schema_failure_steps = [step for step in trace_steps if is_schema_validation_failure(step)]
+    schema_failure_events = [event for event in events if is_schema_validation_event(event)]
+    metrics.schema_validation_failures = len(schema_failure_steps) + len(schema_failure_events)
+    metrics.schema_valid_json_pass = metrics.schema_validation_failures == 0
+    if schema_failure_steps or schema_failure_events:
+        recovered_in_trace = False
+        if schema_failure_steps:
+            first_failure_index = trace_steps.index(schema_failure_steps[0])
+            recovered_in_trace = any(is_successful_model_step(step) for step in trace_steps[first_failure_index + 1 :])
+        recovered_in_events = schema_failure_recovered_in_events(events)
+        metrics.schema_recovered_after_validation_error = recovered_in_trace or recovered_in_events
+
+    duplicate_calls = duplicate_tool_calls(traces)
+    metrics.duplicate_tool_calls = duplicate_calls
+    metrics.duplicate_tool_call_pass = not duplicate_calls
+
+    invalid_arg_indexes = [index for index, item in enumerate(audit) if is_invalid_argument_error(item)]
+    metrics.invalid_arg_errors = len(invalid_arg_indexes)
+    metrics.invalid_arg_repair_applicable = bool(invalid_arg_indexes)
+    if invalid_arg_indexes:
+        metrics.invalid_arg_repair_pass = all(invalid_tool_args_repaired(audit, index) for index in invalid_arg_indexes)
+
+    metrics.patch_seen = bool(metrics.evidence_summary["patch_audit_count"]) or bool(
+        metrics.evidence_summary["patch_artifact_count"]
+    )
+    metrics.verify_seen = bool(metrics.evidence_summary["verify_audit_count"]) or bool(
+        metrics.evidence_summary["verify_event_count"]
+    )
+    metrics.patch_verify_applicable = task.expected_mutation and not task.expected_operator and not task.contract_only
+    if metrics.patch_verify_applicable:
+        metrics.patch_verify_pass = metrics.patch_seen and metrics.verify_seen
+
+    metrics.grounded_success_pass = grounded_success_pass(
+        task,
+        status=status,
+        audit=audit,
+        changed_file_count=changed_file_count,
+        patch_seen=metrics.patch_seen,
+        verify_seen=metrics.verify_seen,
+    )
+    metrics.ungrounded_success = not metrics.grounded_success_pass
+    return metrics
+
+
+def fetch_run_events(client: SynodeApiClient, run_id: str) -> list[dict[str, Any]]:
+    events: list[dict[str, Any]] = []
+    after_id = 0
+    while True:
+        batch = client.get(f"/runs/{run_id}/events?after_id={after_id}&limit=500")
+        if not batch:
+            return events
+        events.extend(batch)
+        after_id = int(batch[-1]["id"])
+        if len(batch) < 500:
+            return events
+
+
+def fetch_tool_audit(client: SynodeApiClient, run_id: str) -> list[dict[str, Any]]:
+    return fetch_offset_list(client, f"/runs/{run_id}/tool-audit")
+
+
+def fetch_artifacts(client: SynodeApiClient, run_id: str) -> list[dict[str, Any]]:
+    return fetch_offset_list(client, f"/runs/{run_id}/artifacts")
+
+
+def fetch_offset_list(client: SynodeApiClient, path: str) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    offset = 0
+    while True:
+        batch = client.get(f"{path}?limit=500&offset={offset}")
+        if not batch:
+            return items
+        items.extend(batch)
+        if len(batch) < 500:
+            return items
+        offset += len(batch)
+
+
+def native_loop_steps(traces: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    steps: list[dict[str, Any]] = []
+    for artifact in traces:
+        content = artifact.get("content") if isinstance(artifact.get("content"), dict) else {}
+        raw_steps = content.get("steps") if isinstance(content, dict) else []
+        if isinstance(raw_steps, list):
+            steps.extend(step for step in raw_steps if isinstance(step, dict))
+    return steps
+
+
+def is_schema_validation_failure(step: dict[str, Any]) -> bool:
+    action = str(step.get("action") or "")
+    error = str(step.get("error") or "").lower()
+    return action == "invalid_action" or is_schema_error_text(error)
+
+
+def is_schema_validation_event(event: dict[str, Any]) -> bool:
+    if event.get("event_type") != "model_invoked":
+        return False
+    raw_payload = event.get("payload")
+    payload = raw_payload if isinstance(raw_payload, dict) else {}
+    if payload.get("ok") is not False:
+        return False
+    return is_schema_error_text(str(payload.get("error") or "").lower())
+
+
+def schema_failure_recovered_in_events(events: list[dict[str, Any]]) -> bool:
+    failed = False
+    for event in events:
+        if is_schema_validation_event(event):
+            failed = True
+            continue
+        raw_payload = event.get("payload")
+        payload = raw_payload if isinstance(raw_payload, dict) else {}
+        if failed and event.get("event_type") == "model_invoked" and payload.get("ok") is True:
+            return True
+    return False
+
+
+def is_schema_error_text(error: str) -> bool:
+    markers = (
+        "invalid json",
+        "model returned invalid json",
+        "schema validation",
+        "does not match contract",
+        "validation error",
+        "unterminated string",
+        "expecting value",
+    )
+    return any(marker in error for marker in markers)
+
+
+def is_successful_model_step(step: dict[str, Any]) -> bool:
+    action = str(step.get("action") or "")
+    return action in {"tool_call", "finish", "needs_operator"} and not step.get("error")
+
+
+def duplicate_tool_calls(traces: list[dict[str, Any]]) -> list[str]:
+    duplicates: list[str] = []
+    for artifact in traces:
+        seen: set[str] = set()
+        content = artifact.get("content") if isinstance(artifact.get("content"), dict) else {}
+        raw_steps = content.get("steps") if isinstance(content, dict) else []
+        if not isinstance(raw_steps, list):
+            continue
+        for step in raw_steps:
+            if not isinstance(step, dict):
+                continue
+            call = step.get("tool_call") if isinstance(step.get("tool_call"), dict) else None
+            error = str(step.get("error") or "").lower()
+            if call is not None:
+                signature = json.dumps(call, sort_keys=True, separators=(",", ":"))
+                if signature in seen:
+                    duplicates.append(format_tool_call(call))
+                seen.add(signature)
+            if "duplicate tool call" in error or "repeated duplicate tool call" in error:
+                duplicates.append(format_tool_call(call or {}))
+    return sorted(set(item for item in duplicates if item))
+
+
+def is_invalid_argument_error(item: dict[str, Any]) -> bool:
+    if item.get("status") != "error":
+        return False
+    raw_output = item.get("output")
+    output = raw_output if isinstance(raw_output, dict) else {}
+    error = str(output.get("error") or "").lower()
+    markers = (
+        "required",
+        "invalid argument",
+        "unknown argument",
+        "unexpected",
+        "missing",
+        "schema",
+        "use native.fs_list",
+        "pattern is",
+        "path is",
+        "argv is",
+        "commands are",
+    )
+    return any(marker in error for marker in markers)
+
+
+def invalid_tool_args_repaired(audit: list[dict[str, Any]], index: int) -> bool:
+    failed = audit[index]
+    tool_name = failed.get("tool_name")
+    failed_input = failed.get("input")
+    for later in audit[index + 1 :]:
+        if later.get("tool_name") != tool_name or later.get("status") != "ok":
+            continue
+        if later.get("input") != failed_input:
+            return True
+    return False
+
+
+def grounded_success_pass(
+    task: CodingEvalTask,
+    *,
+    status: str | None,
+    audit: list[dict[str, Any]],
+    changed_file_count: int,
+    patch_seen: bool,
+    verify_seen: bool,
+) -> bool:
+    if status != "completed":
+        return True
+    if task.expected_operator:
+        return True
+    has_tool_evidence = bool(audit)
+    if not has_tool_evidence:
+        return False
+    if task.expected_mutation:
+        return patch_seen and verify_seen and changed_file_count > 0
+    return verify_seen
+
+
+def behavior_pass(task: CodingEvalTask, result: CodingEvalResult) -> bool:
+    if result.skipped:
+        return False
+    checks: list[bool] = [
+        result.behavior.schema_valid_json_pass,
+        result.behavior.duplicate_tool_call_pass,
+        result.behavior.grounded_success_pass,
+    ]
+    if result.behavior.first_action_tool_call_pass is not None:
+        checks.append(result.behavior.first_action_tool_call_pass)
+    if result.behavior.invalid_arg_repair_pass is not None:
+        checks.append(result.behavior.invalid_arg_repair_pass)
+    if result.behavior.patch_verify_pass is not None:
+        checks.append(result.behavior.patch_verify_pass)
+    if task.contract_only:
+        checks.append(True)
+    return all(checks)
+
+
+def format_tool_call(call: dict[str, Any]) -> str:
+    name = str(call.get("name") or "<unknown>")
+    arguments = call.get("arguments") if isinstance(call.get("arguments"), dict) else {}
+    return f"{name} {json.dumps(arguments, sort_keys=True, ensure_ascii=False)}"
+
+
 def failure_category_from_artifacts(client: SynodeApiClient, run_id: str) -> str | None:
     artifacts = client.get(f"/runs/{run_id}/artifacts?limit=200")
     final = next((item for item in artifacts if item.get("kind") == "final_answer"), None)
@@ -464,6 +853,18 @@ def summarize_results(results: list[CodingEvalResult]) -> dict[str, Any]:
         "functional_pass": sum(1 for result in results if result.functional_pass),
         "safety_pass": sum(1 for result in results if result.safety_pass),
         "contract_pass": sum(1 for result in results if result.contract_pass),
+        "behavior_pass": sum(1 for result in results if result.behavior_pass),
+        "first_action_tool_call_pass": sum(
+            1 for result in results if result.behavior.first_action_tool_call_pass is True
+        ),
+        "schema_valid_json_pass": sum(1 for result in results if result.behavior.schema_valid_json_pass),
+        "duplicate_tool_call_pass": sum(1 for result in results if result.behavior.duplicate_tool_call_pass),
+        "invalid_arg_repair_applicable": sum(1 for result in results if result.behavior.invalid_arg_repair_applicable),
+        "invalid_arg_repair_pass": sum(1 for result in results if result.behavior.invalid_arg_repair_pass is True),
+        "patch_verify_applicable": sum(1 for result in results if result.behavior.patch_verify_applicable),
+        "patch_verify_pass": sum(1 for result in results if result.behavior.patch_verify_pass is True),
+        "grounded_success_pass": sum(1 for result in results if result.behavior.grounded_success_pass),
+        "ungrounded_success": sum(1 for result in results if result.behavior.ungrounded_success),
     }
 
 
@@ -479,26 +880,54 @@ def render_markdown_report(report: dict[str, Any]) -> str:
         f"- workspace_root: `{report.get('workspace_root', '')}`",
         f"- api_workspace_root: `{report.get('api_workspace_root') or ''}`",
         f"- summary: `{report['summary']['ok']}/{evaluated}` ok, `{skipped}` skipped",
+        f"- behavior: `{report['summary'].get('behavior_pass', 0)}/{evaluated}` behavior pass",
+        f"- grounded_success: `{report['summary'].get('grounded_success_pass', 0)}/{evaluated}` pass, "
+        f"`{report['summary'].get('ungrounded_success', 0)}` ungrounded success",
         "",
-        "| Task | Status | OK | Runtime | Functional | Safety | Contract | Failure | Notes |",
-        "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+        "| Task | Status | OK | Runtime | Functional | Behavior | First action | Schema | Duplicate calls | Arg repair | Patch+verify | Grounded | Evidence | Failure | Notes |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for result in report["results"]:
+        behavior = result.get("behavior") or {}
+        evidence = behavior.get("evidence_summary") or {}
         lines.append(
-            "| {task_id} | {status} | {ok} | {runtime_pass} | {functional_pass} | {safety_pass} | "
-            "{contract_pass} | {failure} | {notes} |".format(
+            "| {task_id} | {status} | {ok} | {runtime_pass} | {functional_pass} | {behavior_pass} | "
+            "{first_action} | {schema} | {duplicates} | {arg_repair} | {patch_verify} | {grounded} | "
+            "{evidence} | {failure} | {notes} |".format(
                 task_id=result["task_id"],
                 status=result.get("status") or "",
                 ok=result["ok"],
                 runtime_pass=result.get("runtime_pass", False),
                 functional_pass=result["functional_pass"],
-                safety_pass=result["safety_pass"],
-                contract_pass=result["contract_pass"],
+                behavior_pass=result.get("behavior_pass", False),
+                first_action=render_metric(behavior.get("first_action_tool_call_pass")),
+                schema=(
+                    render_metric(behavior.get("schema_valid_json_pass"))
+                    + f" ({behavior.get('schema_validation_failures', 0)})"
+                ),
+                duplicates=render_metric(behavior.get("duplicate_tool_call_pass")),
+                arg_repair=render_metric(behavior.get("invalid_arg_repair_pass")),
+                patch_verify=render_metric(behavior.get("patch_verify_pass")),
+                grounded=render_metric(behavior.get("grounded_success_pass")),
+                evidence=(
+                    f"tools={evidence.get('tool_audit_count', 0)}, "
+                    f"patch={evidence.get('patch_audit_count', 0)}, "
+                    f"verify={evidence.get('verify_audit_count', 0)}, "
+                    f"changed={evidence.get('changed_file_count', 0)}"
+                ),
                 failure=result.get("failure_category") or "",
                 notes="; ".join(result.get("notes") or []),
             )
         )
     return "\n".join(lines) + "\n"
+
+
+def render_metric(value: Any) -> str:
+    if value is True:
+        return "pass"
+    if value is False:
+        return "fail"
+    return "n/a"
 
 
 def _eval_backend(backend: str) -> EvalBackend:
