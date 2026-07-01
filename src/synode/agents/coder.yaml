@@ -5,6 +5,7 @@ non_goals:
   - Push, commit, deploy, or merge.
 allowed_tools:
   - native.fs_read
+  - native.fs_list
   - native.fs_search
   - native.fs_write
   - native.git_status

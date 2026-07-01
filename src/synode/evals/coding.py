@@ -10,10 +10,11 @@ import urllib.request
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from importlib import resources
-from pathlib import Path
-from typing import Any
+from pathlib import Path, PurePosixPath
+from typing import Any, Literal, cast
 
 TERMINAL_STATUSES = {"completed", "failed", "failed_verification", "cancelled"}
+EvalBackend = Literal["native_langgraph", "openhands"]
 
 
 class EvalApiError(RuntimeError):
@@ -42,9 +43,14 @@ class CodingEvalResult:
     task_id: str
     title: str
     workspace: str
+    api_workspace: str | None = None
+    backend: str = "native_langgraph"
     run_id: str | None = None
     thread_id: str | None = None
     status: str | None = None
+    skipped: bool = False
+    skip_reason: str | None = None
+    runtime_pass: bool = False
     functional_pass: bool = False
     safety_pass: bool = False
     contract_pass: bool = False
@@ -138,11 +144,17 @@ def run_coding_eval(
     api_url: str,
     model: str,
     output_root: Path,
+    workspace_root: Path | None = None,
+    api_workspace_root: str | None = None,
+    backend: EvalBackend = "native_langgraph",
+    graph_name_suffix: str | None = None,
     task_ids: list[str] | None = None,
     ollama_base_url: str = "http://127.0.0.1:11434",
     timeout_seconds: float = 1200,
     approve_mutations: bool = True,
+    skip_contract_only_for_openhands: bool = True,
 ) -> dict[str, Any]:
+    backend = _eval_backend(backend)
     output_root.mkdir(parents=True, exist_ok=True)
     tasks = load_tasks()
     if task_ids:
@@ -151,18 +163,28 @@ def run_coding_eval(
         missing = sorted(selected - {task.id for task in tasks})
         if missing:
             raise ValueError(f"unknown eval tasks: {', '.join(missing)}")
+    workspace_root = workspace_root or output_root
     client = SynodeApiClient(api_url)
     profile = ensure_profile(client, model=model, ollama_base_url=ollama_base_url)
-    graph = ensure_graph(client, profile["id"])
+    graph = ensure_graph(
+        client,
+        profile["id"],
+        backend=backend,
+        graph_name_suffix=graph_name_suffix,
+    )
     results = [
         run_task_eval(
             client=client,
             task=task,
             output_root=output_root,
+            workspace_root=workspace_root,
+            api_workspace_root=api_workspace_root,
             profile_id=profile["id"],
             graph_id=graph["id"],
+            backend=backend,
             timeout_seconds=timeout_seconds,
             approve_mutations=approve_mutations,
+            skip_contract_only_for_openhands=skip_contract_only_for_openhands,
         )
         for task in tasks
     ]
@@ -170,8 +192,11 @@ def run_coding_eval(
         "created_at": datetime.now(UTC).isoformat(),
         "api_url": api_url,
         "model": model,
+        "backend": backend,
         "profile_id": profile["id"],
         "graph_id": graph["id"],
+        "workspace_root": str(workspace_root),
+        "api_workspace_root": api_workspace_root,
         "results": [result.__dict__ for result in results],
         "summary": summarize_results(results),
     }
@@ -185,18 +210,37 @@ def run_task_eval(
     client: SynodeApiClient,
     task: CodingEvalTask,
     output_root: Path,
+    workspace_root: Path,
+    api_workspace_root: str | None,
     profile_id: str,
     graph_id: str,
+    backend: EvalBackend,
     timeout_seconds: float,
     approve_mutations: bool,
+    skip_contract_only_for_openhands: bool,
 ) -> CodingEvalResult:
-    workspace = materialize_task(task, output_root)
-    result = CodingEvalResult(task_id=task.id, title=task.title, workspace=str(workspace))
+    del output_root
+    workspace = materialize_task(task, workspace_root)
+    api_workspace = map_workspace_for_api(workspace, workspace_root, api_workspace_root)
+    result = CodingEvalResult(
+        task_id=task.id,
+        title=task.title,
+        workspace=str(workspace),
+        api_workspace=api_workspace,
+        backend=backend,
+    )
+    if backend == "openhands" and task.contract_only and skip_contract_only_for_openhands:
+        result.status = "skipped"
+        result.skipped = True
+        result.skip_reason = "contract-only task validates native PatchProposal verification policy"
+        result.notes.append(result.skip_reason)
+        return result
     if task.contract_only:
+        result.runtime_pass = True
         result.contract_pass = True
         result.safety_pass = not changed_files(workspace)
         result.functional_pass = run_workspace_tests(workspace, task).returncode == 0
-        result.ok = result.contract_pass and result.safety_pass and result.functional_pass
+        result.ok = result.runtime_pass and result.contract_pass and result.safety_pass and result.functional_pass
         return result
 
     thread = client.post(
@@ -204,7 +248,7 @@ def run_task_eval(
         {
             "title": f"Coding eval: {task.id}",
             "message": task.prompt,
-            "workspace": str(workspace),
+            "workspace": api_workspace,
             "default_model_profile_id": profile_id,
             "agent_graph_id": graph_id,
             "mode": "coding",
@@ -224,9 +268,10 @@ def run_task_eval(
         result.verification_stdout = verification.stdout
         result.verification_stderr = verification.stderr
         result.functional_pass = verification.returncode == 0
+    result.runtime_pass = runtime_pass(task, result)
     result.safety_pass = safety_pass(task, result)
     result.contract_pass = result.status in TERMINAL_STATUSES or result.operator_requests_seen > 0
-    result.ok = result.functional_pass and result.safety_pass and result.contract_pass
+    result.ok = result.runtime_pass and result.functional_pass and result.safety_pass and result.contract_pass
     return result
 
 
@@ -302,10 +347,23 @@ def ensure_profile(client: SynodeApiClient, *, model: str, ollama_base_url: str)
     )
 
 
-def ensure_graph(client: SynodeApiClient, profile_id: str) -> dict[str, Any]:
-    name = "small-model-coding-eval-native"
+def ensure_graph(
+    client: SynodeApiClient,
+    profile_id: str,
+    *,
+    backend: EvalBackend = "native_langgraph",
+    graph_name_suffix: str | None = None,
+) -> dict[str, Any]:
+    backend = _eval_backend(backend)
+    suffix = graph_name_suffix or backend
+    name = f"small-model-coding-eval-{suffix}"
     existing = {graph["name"]: graph for graph in client.get("/agent-graphs")}
     roles = {role["name"]: role["id"] for role in client.get("/agents") if role.get("enabled")}
+    node_runtime_bindings = {
+        "supervisor": "native_langgraph",
+        "coder": backend,
+        "reviewer": "native_langgraph",
+    }
     payload = {
         "name": name,
         "graph_schema_version": 2,
@@ -320,11 +378,7 @@ def ensure_graph(client: SynodeApiClient, profile_id: str) -> dict[str, Any]:
         ],
         "default_model_profile_id": profile_id,
         "role_model_profile_ids": {},
-        "node_runtime_bindings": {
-            "supervisor": "native_langgraph",
-            "coder": "native_langgraph",
-            "reviewer": "native_langgraph",
-        },
+        "node_runtime_bindings": node_runtime_bindings,
         "node_contracts": {},
         "is_default": False,
         "enabled": True,
@@ -371,6 +425,22 @@ def changed_files(workspace: Path) -> list[str]:
     return [line.strip() for line in result.stdout.splitlines() if line.strip()]
 
 
+def map_workspace_for_api(workspace: Path, workspace_root: Path, api_workspace_root: str | None) -> str:
+    if not api_workspace_root:
+        return str(workspace)
+    relative = workspace.resolve().relative_to(workspace_root.resolve())
+    api_root = PurePosixPath(api_workspace_root)
+    return str(api_root.joinpath(*relative.parts))
+
+
+def runtime_pass(task: CodingEvalTask, result: CodingEvalResult) -> bool:
+    if task.contract_only:
+        return True
+    if task.expected_operator:
+        return result.operator_requests_seen > 0
+    return result.status == "completed"
+
+
 def safety_pass(task: CodingEvalTask, result: CodingEvalResult) -> bool:
     if result.failure_category == "verification_unsafe":
         return True
@@ -383,9 +453,14 @@ def safety_pass(task: CodingEvalTask, result: CodingEvalResult) -> bool:
 
 def summarize_results(results: list[CodingEvalResult]) -> dict[str, Any]:
     total = len(results)
+    skipped = sum(1 for result in results if result.skipped)
+    evaluated = total - skipped
     return {
         "total": total,
+        "evaluated": evaluated,
+        "skipped": skipped,
         "ok": sum(1 for result in results if result.ok),
+        "runtime_pass": sum(1 for result in results if result.runtime_pass),
         "functional_pass": sum(1 for result in results if result.functional_pass),
         "safety_pass": sum(1 for result in results if result.safety_pass),
         "contract_pass": sum(1 for result in results if result.contract_pass),
@@ -393,30 +468,43 @@ def summarize_results(results: list[CodingEvalResult]) -> dict[str, Any]:
 
 
 def render_markdown_report(report: dict[str, Any]) -> str:
+    evaluated = report["summary"].get("evaluated", report["summary"]["total"])
+    skipped = report["summary"].get("skipped", 0)
     lines = [
-        f"# Coding eval report - {report['model']}",
+        f"# Coding eval report - {report['model']} / {report.get('backend', 'native_langgraph')}",
         "",
         f"- created_at: `{report['created_at']}`",
         f"- api_url: `{report['api_url']}`",
-        f"- summary: `{report['summary']['ok']}/{report['summary']['total']}` ok",
+        f"- backend: `{report.get('backend', 'native_langgraph')}`",
+        f"- workspace_root: `{report.get('workspace_root', '')}`",
+        f"- api_workspace_root: `{report.get('api_workspace_root') or ''}`",
+        f"- summary: `{report['summary']['ok']}/{evaluated}` ok, `{skipped}` skipped",
         "",
-        "| Task | Status | OK | Functional | Safety | Contract | Failure |",
-        "| --- | --- | --- | --- | --- | --- | --- |",
+        "| Task | Status | OK | Runtime | Functional | Safety | Contract | Failure | Notes |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for result in report["results"]:
         lines.append(
-            "| {task_id} | {status} | {ok} | {functional_pass} | {safety_pass} | "
-            "{contract_pass} | {failure} |".format(
+            "| {task_id} | {status} | {ok} | {runtime_pass} | {functional_pass} | {safety_pass} | "
+            "{contract_pass} | {failure} | {notes} |".format(
                 task_id=result["task_id"],
                 status=result.get("status") or "",
                 ok=result["ok"],
+                runtime_pass=result.get("runtime_pass", False),
                 functional_pass=result["functional_pass"],
                 safety_pass=result["safety_pass"],
                 contract_pass=result["contract_pass"],
                 failure=result.get("failure_category") or "",
+                notes="; ".join(result.get("notes") or []),
             )
         )
     return "\n".join(lines) + "\n"
+
+
+def _eval_backend(backend: str) -> EvalBackend:
+    if backend not in {"native_langgraph", "openhands"}:
+        raise ValueError(f"unsupported eval backend: {backend}")
+    return cast(EvalBackend, backend)
 
 
 def _write_files(root: Path, files: dict[str, str]) -> None:

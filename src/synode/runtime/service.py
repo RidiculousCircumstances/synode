@@ -33,7 +33,11 @@ from synode.registry import RoleRegistry, RoleSpec
 from synode.runtime.capabilities import validate_backend_contract
 from synode.runtime.contracts import default_contract_for_role, default_contract_registry
 from synode.runtime.execution import ExecutionBackendRegistry, build_execution_backend_registry
-from synode.runtime.graph import GraphDependencies, build_graph
+from synode.runtime.graph import (
+    GraphDependencies,
+    build_graph,
+    resume_native_coding_after_patch_approval,
+)
 from synode.runtime.operator import ApprovalRequired, OperatorInterrupt, OperatorRejected
 from synode.runtime.queue import (
     MissingRunQueueTransport,
@@ -704,7 +708,10 @@ class OrchestrationService:
                 input_payload={"task": task, "workspace": workspace, "mode": mode},
                 metadata={"run_id": run_id, "model_provider": model_provider},
             ):
-                if resume_payload is None:
+                approved_patch_resume = await self._approved_native_patch_resume_id(run_id, mode)
+                if approved_patch_resume is not None and resume_payload is None:
+                    final_state = await self._resume_native_coding_after_patch_approval(run_id, state)
+                elif resume_payload is None:
                     if checkpoint_thread_id == run_id:
                         final_state = await self._invoke_graph(run_id, state)
                     else:
@@ -845,6 +852,50 @@ class OrchestrationService:
                         metadata={"status": RunStatus.FAILED.value},
                     )
             raise
+
+    async def _approved_native_patch_resume_id(self, run_id: str, mode: str) -> str | None:
+        if mode != RunMode.CODING.value:
+            return None
+        async with self.database.session() as session:
+            repo = Repository(session)
+            if await repo.count_approvals(run_id, status=ApprovalStatus.PENDING):
+                return None
+            approvals = await repo.list_approvals(run_id=run_id, status=ApprovalStatus.APPROVED)
+            audits = await repo.list_tool_audit(run_id)
+        for approval in approvals:
+            if approval.tool_name != "native.patch_apply":
+                continue
+            already_executed = any(
+                audit.approval_id == approval.id and audit.status in {"ok", "error"}
+                for audit in audits
+            )
+            if not already_executed:
+                return approval.id
+        return None
+
+    async def _resume_native_coding_after_patch_approval(
+        self,
+        run_id: str,
+        state: dict[str, Any],
+    ) -> dict[str, Any]:
+        roles = self._role_registry_for_state(state)
+        tool_executor = ToolExecutor(
+            self.database,
+            roles,
+            self.tools,
+            self.settings,
+            self.observability,
+        )
+        deps = GraphDependencies(
+            database=self.database,
+            roles=roles,
+            models=self.models,
+            tool_executor=tool_executor,
+            observability=self.observability,
+            secret_cipher=self.secret_cipher,
+            execution_backends=self.execution_backends,
+        )
+        return await resume_native_coding_after_patch_approval(deps, state)
 
     async def approve(self, approval_id: str, reason: str | None = None) -> None:
         async with self.database.session() as session:

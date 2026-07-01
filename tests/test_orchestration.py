@@ -16,14 +16,16 @@ from synode.observability import Observability
 from synode.persistence.models import ApprovalRecord
 from synode.persistence.repository import Repository
 from synode.runtime.contracts import WORKER_AGENT_OUTPUT_CONTRACT
-from synode.runtime.decisions import FilePatch, PatchProposal
+from synode.runtime.decisions import NativeLoopAction, PatchProposal
 from synode.runtime.graph import (
     GraphDependencies,
     ResolvedModelProvider,
     _build_coding_context_packet,
+    _fallback_coding_inspection_from_loop_error,
+    _invalid_operator_request_reason,
     _invoke_model,
-    _normalize_patch_proposal,
-    _patch_proposal_validation_errors,
+    _patch_proposal_prompt,
+    _route_after_coding_inspect,
     _route_after_patch_propose,
     _route_after_patch_repair,
     _route_after_verify,
@@ -44,6 +46,7 @@ from synode.schemas import (
     RoleName,
     RunMode,
     RunStatus,
+    ToolResult,
 )
 
 
@@ -73,8 +76,10 @@ class ScriptedLoopProvider(FakeModelProvider):
     def __init__(self, actions: list[dict[str, object]]) -> None:
         self.actions = actions
         self.index = 0
+        self.requests: list[ModelRequest] = []
 
     async def invoke(self, request: ModelRequest) -> ModelResponse:
+        self.requests.append(request)
         if self.index >= len(self.actions):
             action = self.actions[-1]
         else:
@@ -152,75 +157,237 @@ def test_route_after_patch_propose_handles_action_states() -> None:
     assert _route_after_patch_propose({"patch_repair_error": "invalid"}) == "reviewer"
 
 
-def test_patch_proposal_normalizer_aligns_unique_indented_old_text() -> None:
-    content = "def total(rows):\n    for row in rows:\n        value += row.amount\n    return value\n"
-    proposal = PatchProposal(
-        summary="Patch total.",
-        patches=[
-            FilePatch(
-                path="ledger.py",
-                expected_sha256="0" * 64,
-                old_text="for row in rows:\nvalue += row.amount",
-                new_text="for row in rows:\n        value -= row.amount",
-            )
+def test_route_after_coding_inspect_handles_contract_failure() -> None:
+    assert _route_after_coding_inspect({"coding_failure_category": "contract_invalid"}) == "reviewer"
+    assert _route_after_coding_inspect({"coding_inspection": {"summary": "ok"}}) == "coding_patch_propose"
+
+
+def test_native_loop_action_accepts_needs_operator_question_alias() -> None:
+    action = NativeLoopAction.model_validate(
+        {
+            "action": "needs_operator",
+            "summary": "Need clarification.",
+            "question": "Which behavior should be implemented?",
+        }
+    )
+
+    assert action.operator_question == "Which behavior should be implemented?"
+
+
+def test_native_loop_action_uses_summary_for_needs_operator_question() -> None:
+    action = NativeLoopAction.model_validate(
+        {
+            "action": "needs_operator",
+            "summary": "Need operator intent to proceed.",
+        }
+    )
+
+    assert action.operator_question == "Need operator intent to proceed."
+
+
+def test_patch_proposal_accepts_needs_operator_question_alias() -> None:
+    proposal = PatchProposal.model_validate(
+        {
+            "action": "needs_operator",
+            "summary": "Ambiguous behavior.",
+            "prompt": "Should refunds affect revenue and customer totals?",
+        }
+    )
+
+    assert proposal.operator_question == "Should refunds affect revenue and customer totals?"
+
+
+def test_native_loop_action_wraps_top_level_finish_payload() -> None:
+    action = NativeLoopAction.model_validate(
+        {
+            "action": "finish",
+            "summary": "Propose a patch.",
+            "patches": [],
+            "verification_commands": [["pytest", "-q"]],
+        }
+    )
+
+    assert action.payload == {"patches": [], "verification_commands": [["pytest", "-q"]]}
+
+
+def test_native_loop_action_wraps_proposal_finish_payload() -> None:
+    action = NativeLoopAction.model_validate(
+        {
+            "action": "finish",
+            "summary": "Propose a patch.",
+            "proposal": {
+                "action": "no_change",
+                "summary": "Already correct.",
+                "verification_commands": [["pytest", "-q"]],
+            },
+        }
+    )
+
+    assert action.payload["action"] == "no_change"
+
+
+def test_native_loop_action_wraps_flat_tool_call_payload() -> None:
+    action = NativeLoopAction.model_validate(
+        {
+            "action": "tool_call",
+            "summary": "List Python files.",
+            "name": "native.fs_list",
+            "payload": {"glob": "*.py"},
+        }
+    )
+
+    assert action.tool_call is not None
+    assert action.tool_call.name == "native.fs_list"
+    assert action.tool_call.arguments == {"glob": "*.py"}
+
+
+def test_native_loop_action_wraps_flat_tool_call_tool_name_payload() -> None:
+    action = NativeLoopAction.model_validate(
+        {
+            "action": "tool_call",
+            "summary": "List Python files.",
+            "tool_name": "native.fs_list",
+            "payload": {"glob": "*.py"},
+        }
+    )
+
+    assert action.tool_call is not None
+    assert action.tool_call.name == "native.fs_list"
+    assert action.tool_call.arguments == {"glob": "*.py"}
+
+
+def test_native_loop_action_wraps_flat_tool_call_arguments() -> None:
+    action = NativeLoopAction.model_validate(
+        {
+            "action": "tool_call",
+            "summary": "List Python files.",
+            "tool_name": "native.fs_list",
+            "arguments": {"glob": "*.py"},
+        }
+    )
+
+    assert action.tool_call is not None
+    assert action.tool_call.name == "native.fs_list"
+    assert action.tool_call.arguments == {"glob": "*.py"}
+
+
+def test_native_loop_action_wraps_payload_tool_name_arguments() -> None:
+    action = NativeLoopAction.model_validate(
+        {
+            "action": "tool_call",
+            "summary": "List Python files.",
+            "payload": {"tool_name": "native.fs_list", "arguments": {"glob": "*.py"}},
+        }
+    )
+
+    assert action.tool_call is not None
+    assert action.tool_call.name == "native.fs_list"
+    assert action.tool_call.arguments == {"glob": "*.py"}
+
+
+def test_native_loop_action_infers_fs_list_from_glob_payload() -> None:
+    action = NativeLoopAction.model_validate(
+        {
+            "action": "tool_call",
+            "summary": "List Python files.",
+            "payload": {"glob": "*.py"},
+        }
+    )
+
+    assert action.tool_call is not None
+    assert action.tool_call.name == "native.fs_list"
+    assert action.tool_call.arguments == {"glob": "*.py"}
+
+
+def test_native_loop_action_infers_fs_search_from_pattern_payload() -> None:
+    action = NativeLoopAction.model_validate(
+        {
+            "action": "tool_call",
+            "summary": "Search refund logic.",
+            "payload": {"pattern": "refund|sale", "glob": "*.py"},
+        }
+    )
+
+    assert action.tool_call is not None
+    assert action.tool_call.name == "native.fs_search"
+    assert action.tool_call.arguments == {"pattern": "refund|sale", "glob": "*.py"}
+
+
+def test_native_loop_action_schema_allows_flat_tool_aliases() -> None:
+    schema = NativeLoopAction.model_json_schema()
+    tool_schema = next(value for key, value in schema["$defs"].items() if key.endswith("ToolCallAction"))
+
+    assert "tool_call" in tool_schema["required"]
+    assert "tool_name" in tool_schema["properties"]
+    assert "arguments" in tool_schema["properties"]
+
+
+def test_native_loop_action_schema_requires_finish_payload_for_local_models() -> None:
+    schema = NativeLoopAction.model_json_schema()
+    finish_schema = next(value for key, value in schema["$defs"].items() if key.endswith("FinishAction"))
+
+    assert "payload" in finish_schema["required"]
+    assert finish_schema["properties"]["payload"]["minProperties"] == 1
+
+
+def test_patch_proposal_prompt_uses_direct_patch_proposal_terms() -> None:
+    prompt = _patch_proposal_prompt(repair=False)
+
+    assert "Return one PatchProposal JSON object directly" in prompt
+    assert "Choose exactly one PatchProposal action: patch, no_change, or needs_operator" in prompt
+    assert "outer action=finish" not in prompt
+
+
+def test_patch_operator_request_rejects_delegated_work() -> None:
+    action = NativeLoopAction.model_validate(
+        {
+            "action": "needs_operator",
+            "summary": "Delegate work",
+            "operator_question": (
+                "Please review the net_revenue_by_month function, make the necessary changes, "
+                "and run the tests."
+            ),
+        }
+    )
+
+    assert _invalid_operator_request_reason(action, contract_id="coding_patch_proposal") is not None
+
+
+def test_patch_operator_request_allows_specific_question() -> None:
+    action = NativeLoopAction.model_validate(
+        {
+            "action": "needs_operator",
+            "summary": "Refund policy ambiguity",
+            "operator_question": "Should refunds without matching sales create negative monthly revenue?",
+        }
+    )
+
+    assert _invalid_operator_request_reason(action, contract_id="coding_patch_proposal") is None
+
+
+def test_fallback_coding_inspection_extracts_relative_files_from_tool_results() -> None:
+    inspection = _fallback_coding_inspection_from_loop_error(
+        {
+            "workspace": "/workspace/project",
+            "task": "Run pytest -q after the patch.",
+        },
+        "native loop repeated duplicate tool call after feedback: native.fs_search",
+        [
+            ToolResult(
+                tool_name="native.fs_read",
+                ok=True,
+                output={"path": "/workspace/project/ledger_app/ledger.py", "content": "def total(): ..."},
+            ),
+            ToolResult(
+                tool_name="native.fs_search",
+                ok=True,
+                output={"matches": [{"path": "tests/test_ledger.py"}]},
+            ),
         ],
-        verification_commands=[["pytest", "-q"]],
     )
 
-    normalized = _normalize_patch_proposal(
-        proposal,
-        [{"path": "ledger.py", "sha256": "1" * 64, "content": content}],
-    )
-
-    assert normalized.patches[0].expected_sha256 == "1" * 64
-    assert normalized.patches[0].old_text == "    for row in rows:\n        value += row.amount"
-
-
-def test_patch_proposal_validation_rejects_unsafe_verification_command() -> None:
-    content = "def total(rows):\n    return sum(row.amount for row in rows)\n"
-    proposal = PatchProposal(
-        summary="Patch total.",
-        patches=[
-            FilePatch(
-                path="ledger.py",
-                expected_sha256="1" * 64,
-                old_text="return sum(row.amount for row in rows)",
-                new_text="return sum(row.net_amount for row in rows)",
-            )
-        ],
-        verification_commands=[["git", "add", "."]],
-    )
-
-    errors = _patch_proposal_validation_errors(
-        proposal,
-        [{"path": "ledger.py", "sha256": "1" * 64, "content": content}],
-    )
-
-    assert "verification command 0 is unsafe: ['git', 'add', '.']" in errors
-
-
-def test_patch_proposal_validation_rejects_commands_outside_catalog() -> None:
-    content = "def total(rows):\n    return sum(row.amount for row in rows)\n"
-    proposal = PatchProposal(
-        summary="Patch total.",
-        patches=[
-            FilePatch(
-                path="ledger.py",
-                expected_sha256="1" * 64,
-                old_text="return sum(row.amount for row in rows)",
-                new_text="return sum(row.net_amount for row in rows)",
-            )
-        ],
-        verification_commands=[["python", "-m", "pytest"]],
-    )
-
-    errors = _patch_proposal_validation_errors(
-        proposal,
-        [{"path": "ledger.py", "sha256": "1" * 64, "content": content}],
-        allowed_verification_commands=[["pytest", "-q"]],
-    )
-
-    assert "verification command 0 is not in allowed command catalog: ['python', '-m', 'pytest']" in errors
+    assert inspection.relevant_files == ["ledger_app/ledger.py", "tests/test_ledger.py"]
+    assert inspection.proposed_test_commands == [["pytest", "-q"]]
 
 
 def test_no_change_patch_proposal_uses_verification_without_patches() -> None:
@@ -483,6 +650,126 @@ async def test_native_worker_loop_retries_invalid_final_payload(
     assert "does not match contract" in result.trace[0]["error"]
 
 
+async def test_native_worker_loop_rejects_duplicate_tool_call_without_reexecution(
+    settings,
+    database,
+    tool_executor,
+    tmp_path: pathlib.Path,
+) -> None:
+    (tmp_path / "README.md").write_text("# Demo\n", encoding="utf-8")
+    duplicate_call = {"name": "native.fs_list", "arguments": {"glob": "*.md"}}
+    models = ModelProviderRegistry()
+    models.register(
+        ScriptedLoopProvider(
+            [
+                {
+                    "action": "tool_call",
+                    "summary": "Search markdown files.",
+                    "tool_call": duplicate_call,
+                },
+                {
+                    "action": "tool_call",
+                    "summary": "Repeat the same search.",
+                    "tool_call": duplicate_call,
+                },
+                {
+                    "action": "finish",
+                    "summary": "Finish after duplicate feedback.",
+                    "payload": {
+                        "role": "data_analyst",
+                        "summary": "Used the first search result.",
+                        "tool_results": [],
+                        "risks": [],
+                    },
+                },
+            ]
+        )
+    )
+    deps = GraphDependencies(
+        database=database,
+        roles=tool_executor.roles,
+        models=models,
+        tool_executor=tool_executor,
+        observability=Observability(settings),
+    )
+
+    result = await _run_native_loop(
+        deps,
+        {
+            "run_id": "run-duplicate-tool",
+            "thread_id": "thread-duplicate-tool",
+            "task": "Analyze.",
+            "mode": RunMode.GENERAL.value,
+            "model_provider": "scripted_loop",
+            "workspace": str(tmp_path),
+        },
+        role=RoleName.DATA_ANALYST.value,
+        node_id="data_analyst",
+        contract_id=WORKER_AGENT_OUTPUT_CONTRACT,
+        prompt="Return a valid worker output.",
+        context={},
+    )
+
+    assert result.payload["summary"] == "Used the first search result."
+    assert len(result.tool_results) == 1
+    assert result.tool_results[0].tool_name == "native.fs_list"
+    assert "duplicate tool call" in result.trace[1]["error"]
+
+
+async def test_native_worker_loop_includes_tool_catalog(
+    settings,
+    database,
+    tool_executor,
+    tmp_path: pathlib.Path,
+) -> None:
+    provider = ScriptedLoopProvider(
+        [
+            {
+                "action": "finish",
+                "summary": "Finish with catalog context.",
+                "payload": {
+                    "role": "data_analyst",
+                    "summary": "Catalog was available.",
+                    "tool_results": [],
+                    "risks": [],
+                },
+            }
+        ]
+    )
+    models = ModelProviderRegistry()
+    models.register(provider)
+    deps = GraphDependencies(
+        database=database,
+        roles=tool_executor.roles,
+        models=models,
+        tool_executor=tool_executor,
+        observability=Observability(settings),
+    )
+
+    result = await _run_native_loop(
+        deps,
+        {
+            "run_id": "run-tool-catalog",
+            "thread_id": "thread-tool-catalog",
+            "task": "Analyze.",
+            "mode": RunMode.GENERAL.value,
+            "model_provider": "scripted_loop",
+            "workspace": str(tmp_path),
+        },
+        role=RoleName.DATA_ANALYST.value,
+        node_id="data_analyst",
+        contract_id=WORKER_AGENT_OUTPUT_CONTRACT,
+        prompt="Return a valid worker output.",
+        context={},
+    )
+
+    assert result.payload["summary"] == "Catalog was available."
+    catalog = {tool["name"]: tool for tool in provider.requests[0].context["tool_catalog"]}
+    assert catalog["native.fs_list"]["examples"][0]["glob"] == "*.py"
+    assert catalog["native.fs_search"]["input_schema"]["required"] == ["pattern"]
+    assert "native.fs_write" not in catalog
+
+
 async def test_coding_workflow_requires_approval_then_applies_patch(service, database, tmp_path: pathlib.Path) -> None:
     run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
     (tmp_path / "README.md").write_text("# Demo\n", encoding="utf-8")
@@ -521,6 +808,9 @@ async def test_coding_workflow_requires_approval_then_applies_patch(service, dat
     assert "Synode coding workflow smoke." in (tmp_path / "README.md").read_text(encoding="utf-8")
     assert second.final_answer is not None
     assert "[verification]" in second.final_answer
+    async with database.session() as session:
+        artifacts = await Repository(session).list_artifacts(first.id)
+    assert len([artifact for artifact in artifacts if artifact.kind == "supervisor_decision"]) == 1
 
 
 async def test_coding_workflow_failed_tests_set_failed_verification(

@@ -4,7 +4,7 @@ import hashlib
 import json
 import time
 from dataclasses import dataclass, replace
-from typing import Any
+from typing import Any, cast
 
 from langgraph.constants import END, START
 from langgraph.errors import GraphInterrupt
@@ -56,6 +56,15 @@ from synode.schemas import (
 from synode.security import SecretCipher
 from synode.tools.base import ToolExecutor
 from synode.tools.shell import is_safe_command
+from synode.validation.operator import invalid_operator_question_text_reason
+from synode.validation.patches import (
+    categorize_patch_validation_failure,
+    dedupe_file_patches,
+    extract_required_patch_symbols,
+    normalize_patch_proposal,
+    required_patch_targets,
+    validate_patch_proposal,
+)
 
 
 @dataclass(frozen=True)
@@ -85,6 +94,19 @@ class NativeLoopResult:
     trace: list[dict[str, Any]]
 
 
+class NativeLoopContractError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        trace: list[dict[str, Any]] | None = None,
+        tool_results: list[ToolResult] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.trace = list(trace or [])
+        self.tool_results = list(tool_results or [])
+
+
 def build_graph(deps: GraphDependencies, checkpointer: Any | None = None) -> Any:
     builder = StateGraph(SynodeState)
     builder.add_node("intake", _observed_node("intake", deps, _intake_node(deps)))
@@ -107,7 +129,7 @@ def build_graph(deps: GraphDependencies, checkpointer: Any | None = None) -> Any
     builder.add_edge("intake", "supervisor")
     builder.add_conditional_edges("supervisor", _route_after_supervisor)
     builder.add_edge("graph_workers", "reviewer")
-    builder.add_edge("coding_inspect", "coding_patch_propose")
+    builder.add_conditional_edges("coding_inspect", _route_after_coding_inspect)
     builder.add_conditional_edges("coding_patch_propose", _route_after_patch_propose)
     builder.add_edge("patch_apply", "verify")
     builder.add_conditional_edges(
@@ -121,6 +143,84 @@ def build_graph(deps: GraphDependencies, checkpointer: Any | None = None) -> Any
     builder.add_edge("reviewer", "synthesizer")
     builder.add_edge("synthesizer", END)
     return builder.compile(checkpointer=checkpointer)
+
+
+async def resume_native_coding_after_patch_approval(
+    deps: GraphDependencies,
+    state: SynodeState | dict[str, Any],
+) -> dict[str, Any]:
+    resumed_state: dict[str, Any] = {
+        **state,
+        **await _hydrate_coding_state_from_artifacts(deps, str(state["run_id"])),
+    }
+    patch_result = await _observed_node("patch_apply", deps, _patch_apply_node(deps))(resumed_state)
+    resumed_state.update(patch_result)
+    verification_result = await _observed_node("verify", deps, _verify_node(deps))(resumed_state)
+    resumed_state.update(verification_result)
+
+    repair_limit = max(0, int(deps.tool_executor.settings.coding_repair_attempts))
+    while _route_after_verify(cast(SynodeState, resumed_state), repair_attempts=repair_limit) == "coding_patch_repair":
+        repair_result = await _observed_node(
+            "coding_patch_repair",
+            deps,
+            _coding_patch_propose_node(deps, repair_verification=True),
+        )(resumed_state)
+        resumed_state.update(repair_result)
+        if _route_after_patch_repair(cast(SynodeState, resumed_state)) == "reviewer":
+            break
+        patch_result = await _observed_node("patch_apply", deps, _patch_apply_node(deps))(resumed_state)
+        resumed_state.update(patch_result)
+        verification_result = await _observed_node("verify", deps, _verify_node(deps))(resumed_state)
+        resumed_state.update(verification_result)
+
+    review_result = await _observed_node("reviewer", deps, _reviewer_node(deps))(resumed_state)
+    resumed_state.update(review_result)
+    synthesis_result = await _observed_node("synthesizer", deps, _synthesizer_node(deps))(resumed_state)
+    resumed_state.update(synthesis_result)
+    return resumed_state
+
+
+async def _hydrate_coding_state_from_artifacts(deps: GraphDependencies, run_id: str) -> dict[str, Any]:
+    async with deps.database.session() as session:
+        repo = Repository(session)
+        supervisor = await repo.get_latest_artifact(run_id, "supervisor_decision")
+        inspection = await repo.get_latest_artifact(run_id, "coding_inspection")
+        context_packet = await repo.get_latest_artifact(run_id, "coding_context_packet")
+        candidates = await repo.get_latest_artifact(run_id, "patch_candidates")
+        repair_proposal = await repo.get_latest_artifact(run_id, "patch_repair_proposal")
+        proposal_artifact = repair_proposal or await repo.get_latest_artifact(run_id, "patch_proposal")
+
+    hydrated: dict[str, Any] = {"worker_outputs": []}
+    if supervisor is not None:
+        decision = SupervisorDecision.model_validate(supervisor.content)
+        role_tool_calls = {
+            step.role: [call.model_dump(mode="json") for call in step.tool_calls]
+            for step in decision.plan
+        }
+        hydrated.update(
+            {
+                "selected_roles": decision.selected_roles,
+                "role_tool_calls": role_tool_calls,
+                "plan": [
+                    {"role": step.role, "task": step.task, "tool_calls": role_tool_calls[step.role]}
+                    for step in decision.plan
+                ],
+            }
+        )
+    if inspection is not None:
+        hydrated["coding_inspection"] = inspection.content
+    if context_packet is not None:
+        hydrated["coding_context_packet"] = context_packet.content
+    if candidates is not None:
+        hydrated["patch_candidates"] = candidates.content.get("candidates", [])
+    if proposal_artifact is None:
+        raise RuntimeError("cannot resume approved patch: patch_proposal artifact is missing")
+    proposal = PatchProposal.model_validate(proposal_artifact.content)
+    hydrated["patch_proposal"] = proposal.model_dump(mode="json")
+    hydrated["coding_action"] = proposal.action
+    if proposal_artifact.kind == "patch_repair_proposal":
+        hydrated["coding_repair_attempts"] = 1
+    return hydrated
 
 
 def _observed_node(name: str, deps: GraphDependencies, handler: Any):
@@ -306,6 +406,12 @@ def _route_after_supervisor(state: SynodeState) -> str:
     return "graph_workers"
 
 
+def _route_after_coding_inspect(state: SynodeState) -> str:
+    if state.get("patch_repair_error") or state.get("coding_failure_category"):
+        return "reviewer"
+    return "coding_patch_propose"
+
+
 def _route_after_verify(state: SynodeState, *, repair_attempts: int = 2) -> str:
     verification = state.get("verification_result") or {}
     if (
@@ -378,17 +484,25 @@ async def _run_worker_role(deps: GraphDependencies, state: SynodeState, role: st
             tool_results=backend_output.tool_results,
             risks=backend_output.risks,
         )
-    loop_result = await _run_native_loop(
-        deps,
-        state,
-        role=role,
-        node_id=node_input.node_id,
-        contract_id=node_input.contract_id,
-        prompt=f"Complete worker node for task: {node_input.plan_task or state['task']}",
-        context={},
-        plan_task=node_input.plan_task,
-        planned_tool_calls=node_input.planned_tool_calls,
-    )
+    try:
+        loop_result = await _run_native_loop(
+            deps,
+            state,
+            role=role,
+            node_id=node_input.node_id,
+            contract_id=node_input.contract_id,
+            prompt=f"Complete worker node for task: {node_input.plan_task or state['task']}",
+            context={},
+            plan_task=node_input.plan_task,
+            planned_tool_calls=node_input.planned_tool_calls,
+        )
+    except NativeLoopContractError as exc:
+        return AgentOutput(
+            role=role,
+            summary=f"Worker failed to satisfy contract: {exc}",
+            tool_results=[],
+            risks=[str(exc)],
+        )
     if node_input.contract_id == WORKER_AGENT_OUTPUT_CONTRACT:
         payload_output = AgentOutput.model_validate(loop_result.payload)
         raw_summary = payload_output.summary
@@ -462,10 +576,12 @@ async def _run_native_loop(
     provider = await _provider_for_role(deps, state, role)
     contract = default_contract_registry().get(contract_id)
     allowed_tools = deps.tool_executor.allowed_tool_names(role)
+    tool_catalog = deps.tool_executor.tool_catalog(role)
     max_steps = max(1, int(deps.tool_executor.settings.native_loop_max_steps))
     tool_results: list[ToolResult] = []
     trace: list[dict[str, Any]] = []
     validation_errors: list[str] = []
+    seen_tool_calls: dict[str, int] = {}
     base_context = _trim_loop_context(
         {
             "task": state["task"],
@@ -480,6 +596,7 @@ async def _run_native_loop(
             "upstream_outputs": state.get("worker_outputs", []),
             "role_spec": _role_spec_for_role_with_state(state, role),
             "allowed_tools": allowed_tools,
+            "tool_catalog": tool_catalog,
             "planned_tool_calls": planned_tool_calls or [],
             **context,
         },
@@ -544,6 +661,48 @@ async def _run_native_loop(
                     }
                 )
                 continue
+            call_signature = _tool_call_signature(call)
+            repeat_count = seen_tool_calls.get(call_signature, 0)
+            if repeat_count == 1:
+                seen_tool_calls[call_signature] = 2
+                validation_errors = [
+                    "duplicate tool call repeated without new information: "
+                    f"{call.name} with the same arguments. Use the prior observation from loop_history, "
+                    "call a different tool, or finish with the contract payload."
+                ]
+                trace.append(
+                    {
+                        "step": step_index + 1,
+                        "action": action.action,
+                        "summary": action.summary,
+                        "tool_call": call.model_dump(mode="json"),
+                        "error": validation_errors[0],
+                    }
+                )
+                continue
+            if repeat_count >= 2:
+                error = f"native loop repeated duplicate tool call after feedback: {call.name}"
+                trace.append(
+                    {
+                        "step": step_index + 1,
+                        "action": action.action,
+                        "summary": action.summary,
+                        "tool_call": call.model_dump(mode="json"),
+                        "error": error,
+                    }
+                )
+                await _persist_native_loop_trace(
+                    deps,
+                    state,
+                    role=role,
+                    node_id=node_id,
+                    contract_id=contract_id,
+                    status="failed",
+                    trace=trace,
+                    error=error,
+                )
+                raise NativeLoopContractError(error, trace=trace, tool_results=tool_results)
+            seen_tool_calls[call_signature] = 1
             try:
                 result = await _execute_native_tool(deps, state, role, call)
             except ApprovalRequired as exc:
@@ -584,6 +743,19 @@ async def _run_native_loop(
             continue
 
         if action.action == "needs_operator":
+            operator_error = _invalid_operator_request_reason(action, contract_id=contract_id)
+            if operator_error:
+                validation_errors = [operator_error]
+                trace.append(
+                    {
+                        "step": step_index + 1,
+                        "action": action.action,
+                        "summary": action.summary,
+                        "operator_question": action.operator_question,
+                        "error": operator_error,
+                    }
+                )
+                continue
             response = _request_operator(
                 state,
                 kind=OperatorRequestKind.AMBIGUITY,
@@ -658,7 +830,12 @@ async def _run_native_loop(
         trace=trace,
         error=error,
     )
-    raise RuntimeError(error)
+    raise NativeLoopContractError(error, trace=trace, tool_results=tool_results)
+
+
+def _invalid_operator_request_reason(action: NativeLoopAction, *, contract_id: str) -> str | None:
+    text = str(action.operator_question or action.summary or "").strip()
+    return invalid_operator_question_text_reason(text, contract_id=contract_id)
 
 
 def _native_loop_prompt(prompt: str, *, contract_id: str) -> str:
@@ -668,10 +845,41 @@ def _native_loop_prompt(prompt: str, *, contract_id: str) -> str:
         f"Final contract: {contract_id}\n"
         "Choose exactly one action: tool_call, needs_operator, or finish.\n"
         "Use only allowed_tools for tool_call. Do not invent tool names.\n"
-        "Use needs_operator when the task is ambiguous or blocked by missing operator intent.\n"
-        "Use finish only when payload validates against the final contract schema.\n"
+        "Before every tool_call, read tool_catalog and use the exact input schema.\n"
+        "Do not pass unknown arguments. Do not pass workspace root/cwd/path unless the schema asks for path.\n"
+        "Use native.fs_list to list files. Use native.fs_search only for regex text search inside files.\n"
+        'For tool_call return {"action":"tool_call","summary":"why","tool_call":{"name":"native.fs_list","arguments":{"glob":"*.py"}},"payload":{}}.\n'
+        "Do not put tool arguments directly in payload for tool_call unless you cannot emit tool_call.name.\n"
+        "Do not repeat an identical tool_call after its observation appears in loop_history.\n"
+        "Use needs_operator when the task is ambiguous or blocked by missing operator intent. "
+        "Do not use needs_operator to ask the operator to do your implementation, review, patching, or verification work. "
+        'For needs_operator return {"action":"needs_operator","summary":"why blocked","operator_question":"specific question"}.\n'
+        "Use finish only when payload validates against the final contract schema. "
+        "Never return finish with only summary; finish MUST include a payload object.\n"
+        f"{_native_loop_finish_example(contract_id)}"
         "Return only the requested structured JSON."
     )
+
+
+def _native_loop_finish_example(contract_id: str) -> str:
+    if contract_id == CODING_PATCH_PROPOSAL_CONTRACT:
+        return (
+            'For coding_patch_proposal finish shape: {"action":"finish","summary":"patch ready",'
+            '"payload":{"action":"patch","summary":"minimal fix","patches":[{"path":"file.py",'
+            '"expected_sha256":"64_hex_chars","old_text":"exact old block","new_text":"replacement block"}],'
+            '"verification_commands":[["pytest","-q"]]}}.\n'
+        )
+    if contract_id == CODING_INSPECTION_CONTRACT:
+        return (
+            'For coding_inspection finish shape: {"action":"finish","summary":"inspection complete",'
+            '"payload":{"summary":"evidence summary","relevant_files":["file.py"],'
+            '"observed_failures":[],"proposed_test_commands":[["pytest","-q"]]}}.\n'
+        )
+    return 'For finish shape: {"action":"finish","summary":"done","payload":{...contract fields...}}.\n'
+
+
+def _tool_call_signature(call: ToolCall) -> str:
+    return json.dumps(call.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
 
 
 async def _persist_native_loop_trace(
@@ -739,19 +947,43 @@ def _coding_inspect_node(deps: GraphDependencies):
         results: list[ToolResult] = []
         for call in seed_calls:
             results.append(await _execute_native_tool(deps, state, RoleName.CODER.value, call))
-        loop_result = await _run_native_loop(
-            deps,
-            state,
-            role=RoleName.CODER.value,
-            node_id="coding_inspect",
-            contract_id=CODING_INSPECTION_CONTRACT,
-            prompt="Inspect repository evidence and identify files/tests needed for the coding task.",
-            context={
-                "seed_tool_results": [result.model_dump(mode="json") for result in results],
-            },
-            plan_task=state["task"],
-            planned_tool_calls=[],
-        )
+        try:
+            loop_result = await _run_native_loop(
+                deps,
+                state,
+                role=RoleName.CODER.value,
+                node_id="coding_inspect",
+                contract_id=CODING_INSPECTION_CONTRACT,
+                prompt="Inspect repository evidence and identify files/tests needed for the coding task.",
+                context={
+                    "seed_tool_results": [result.model_dump(mode="json") for result in results],
+                },
+                plan_task=state["task"],
+                planned_tool_calls=[],
+            )
+        except NativeLoopContractError as exc:
+            error = str(exc)
+            inspection = _fallback_coding_inspection_from_loop_error(state, error, [*results, *exc.tool_results])
+            async with deps.database.session() as session:
+                repo = Repository(session)
+                await repo.add_artifact(
+                    state["run_id"],
+                    "coding_inspection_error",
+                    {"error": error, "category": "contract_invalid"},
+                )
+                await repo.add_artifact(state["run_id"], "coding_inspection", inspection.model_dump(mode="json"))
+            if inspection.relevant_files:
+                inspection = _augment_inspection_with_search_matches(inspection, [*results, *exc.tool_results])
+                inspection = await _augment_inspection_with_pre_patch_verification(deps, state, inspection)
+                async with deps.database.session() as session:
+                    repo = Repository(session)
+                    await repo.add_artifact(state["run_id"], "coding_inspection_fallback", inspection.model_dump(mode="json"))
+                return {"coding_inspection": inspection.model_dump(mode="json")}
+            return {
+                "coding_inspection": inspection.model_dump(mode="json"),
+                "coding_failure_category": "contract_invalid",
+                "patch_repair_error": error,
+            }
         inspection = CodingInspection.model_validate(loop_result.payload)
         inspection = _augment_inspection_with_search_matches(inspection, results)
         inspection = await _augment_inspection_with_pre_patch_verification(deps, state, inspection)
@@ -818,6 +1050,7 @@ def _coding_patch_propose_node(deps: GraphDependencies, *, repair_verification: 
         context = {"coding_context_packet": context_packet}
         if state["model_provider"] == "fake" or provider.provider.name == "fake":
             context["fake_patch_proposal"] = _fake_patch_proposal(file_context)
+        required_patch_symbols = extract_required_patch_symbols(context_packet, file_context)
         proposal = None
         validation_errors: list[str] = []
         candidates: list[dict[str, Any]] = []
@@ -825,29 +1058,59 @@ def _coding_patch_propose_node(deps: GraphDependencies, *, repair_verification: 
         max_candidates = max(1, int(deps.tool_executor.settings.coding_patch_candidates))
         for attempt in range(max_candidates):
             proposal_context = dict(context)
+            if required_patch_symbols:
+                proposal_context["required_patch_symbols"] = required_patch_symbols
+                proposal_context["required_patch_targets"] = required_patch_targets(
+                    required_patch_symbols,
+                    file_context,
+                )
             if validation_errors:
                 proposal_context["previous_patch_validation_errors"] = validation_errors
                 proposal_context["previous_patch_proposal"] = proposal.model_dump(mode="json") if proposal else {}
-            loop_result = await _run_native_loop(
-                deps,
-                state,
-                role=RoleName.CODER.value,
-                node_id="coding_patch_repair" if repair_verification else "coding_patch_propose",
-                contract_id=CODING_PATCH_PROPOSAL_CONTRACT,
-                prompt=_patch_proposal_prompt(
-                    repair=bool(validation_errors),
-                    repair_verification=repair_verification,
-                ),
-                context=proposal_context,
-                plan_task=state["task"],
-                planned_tool_calls=[],
+            try:
+                proposal = await _invoke_structured(
+                    deps,
+                    state,
+                    provider,
+                    PatchProposal,
+                    ModelRequest(
+                        role=RoleName.CODER.value,
+                        prompt=_patch_proposal_prompt(
+                            repair=bool(validation_errors),
+                            repair_verification=repair_verification,
+                        ),
+                        context=proposal_context,
+                        response_schema=PatchProposal,
+                        model_options=provider.model_options or {},
+                    ),
+                )
+            except (StructuredOutputValidationError, ValidationError) as exc:
+                validation_errors = [f"patch proposal validation failed before deterministic checks: {exc}"]
+                candidates.append(
+                    {
+                        "attempt": attempt + 1,
+                        "proposal": None,
+                        "validation_errors": validation_errors,
+                        "score": {
+                            "valid": False,
+                            "score": 0,
+                            "changed_bytes": 0,
+                            "patch_count": 0,
+                            "action": "contract_error",
+                        },
+                    }
+                )
+                continue
+            proposal = normalize_patch_proposal(
+                proposal,
+                file_context,
+                required_patch_symbols=required_patch_symbols,
             )
-            proposal = PatchProposal.model_validate(loop_result.payload)
-            proposal = _normalize_patch_proposal(proposal, file_context)
-            validation_errors = _patch_proposal_validation_errors(
+            validation_errors = validate_patch_proposal(
                 proposal,
                 file_context,
                 allowed_verification_commands=allowed_commands,
+                required_patch_symbols=required_patch_symbols,
             )
             candidates.append(
                 {
@@ -858,6 +1121,23 @@ def _coding_patch_propose_node(deps: GraphDependencies, *, repair_verification: 
                 }
             )
             candidate_models.append((proposal, validation_errors, _score_patch_proposal(proposal, validation_errors)))
+        if required_patch_symbols and not any(not errors for _, errors, _ in candidate_models):
+            focused_candidate = await _focused_required_symbol_patch_candidate(
+                deps,
+                state,
+                provider,
+                base_context=context,
+                file_context=file_context,
+                allowed_commands=allowed_commands,
+                required_patch_symbols=required_patch_symbols,
+                previous_validation_errors=validation_errors,
+                repair_verification=repair_verification,
+                attempt=len(candidates) + 1,
+            )
+            if focused_candidate is not None:
+                focused_proposal, focused_errors, focused_score, focused_record = focused_candidate
+                candidates.append(focused_record)
+                candidate_models.append((focused_proposal, focused_errors, focused_score))
         valid_candidates = [
             (candidate, errors, score)
             for candidate, errors, score in candidate_models
@@ -870,7 +1150,7 @@ def _coding_patch_propose_node(deps: GraphDependencies, *, repair_verification: 
             )
         if proposal is None or validation_errors:
             if repair_verification:
-                category = _failure_category_from_validation_errors(validation_errors)
+                category = categorize_patch_validation_failure(validation_errors)
                 error = f"patch repair proposal validation failed: {validation_errors}"
                 async with deps.database.session() as session:
                     repo = Repository(session)
@@ -890,7 +1170,7 @@ def _coding_patch_propose_node(deps: GraphDependencies, *, repair_verification: 
                     "patch_candidates": candidates,
                     "patch_repair_error": error,
                 }
-            category = _failure_category_from_validation_errors(validation_errors)
+            category = categorize_patch_validation_failure(validation_errors)
             async with deps.database.session() as session:
                 repo = Repository(session)
                 await repo.add_artifact(state["run_id"], "patch_candidates", {"candidates": candidates})
@@ -956,6 +1236,149 @@ def _coding_patch_propose_node(deps: GraphDependencies, *, repair_verification: 
         return proposal_result
 
     return node
+
+
+async def _focused_required_symbol_patch_candidate(
+    deps: GraphDependencies,
+    state: SynodeState,
+    provider: ResolvedModelProvider,
+    *,
+    base_context: dict[str, Any],
+    file_context: list[dict[str, Any]],
+    allowed_commands: list[list[str]],
+    required_patch_symbols: list[str],
+    previous_validation_errors: list[str],
+    repair_verification: bool,
+    attempt: int,
+) -> tuple[PatchProposal, list[str], dict[str, Any], dict[str, Any]] | None:
+    focused_records: list[dict[str, Any]] = []
+    patches: list[FilePatch] = []
+    verification_commands: list[list[str]] = []
+    focused_errors: list[str] = []
+    for symbol in required_patch_symbols:
+        symbol_errors = list(previous_validation_errors)
+        accepted = False
+        for focused_attempt in range(2):
+            proposal_context = dict(base_context)
+            proposal_context.update(
+                {
+                    "all_required_patch_symbols": required_patch_symbols,
+                    "required_patch_symbols": [symbol],
+                    "required_patch_targets": required_patch_targets([symbol], file_context),
+                    "patch_focus": {
+                        "symbol": symbol,
+                        "attempt": focused_attempt + 1,
+                        "instruction": (
+                            f"Patch only the source function {symbol}. "
+                            "A proposal that does not modify this function is invalid."
+                        ),
+                    },
+                }
+            )
+            if symbol_errors:
+                proposal_context["previous_patch_validation_errors"] = symbol_errors
+            try:
+                focused = await _invoke_structured(
+                    deps,
+                    state,
+                    provider,
+                    PatchProposal,
+                    ModelRequest(
+                        role=RoleName.CODER.value,
+                        prompt=_patch_proposal_prompt(
+                            repair=bool(symbol_errors),
+                            repair_verification=repair_verification,
+                            focused_symbol=symbol,
+                        ),
+                        context=proposal_context,
+                        response_schema=PatchProposal,
+                        model_options=provider.model_options or {},
+                    ),
+                )
+            except (StructuredOutputValidationError, ValidationError) as exc:
+                errors = [f"focused patch proposal for {symbol} failed before deterministic checks: {exc}"]
+                focused_records.append(
+                    {
+                        "symbol": symbol,
+                        "attempt": focused_attempt + 1,
+                        "proposal": None,
+                        "validation_errors": errors,
+                        "score": {
+                            "valid": False,
+                            "score": 0,
+                            "changed_bytes": 0,
+                            "patch_count": 0,
+                            "action": "contract_error",
+                        },
+                    }
+                )
+                symbol_errors = errors
+                continue
+            focused = normalize_patch_proposal(
+                focused,
+                file_context,
+                required_patch_symbols=[symbol],
+            )
+            errors = validate_patch_proposal(
+                focused,
+                file_context,
+                allowed_verification_commands=allowed_commands,
+                required_patch_symbols=[symbol],
+            )
+            focused_records.append(
+                {
+                    "symbol": symbol,
+                    "attempt": focused_attempt + 1,
+                    "proposal": focused.model_dump(mode="json"),
+                    "validation_errors": errors,
+                    "score": _score_patch_proposal(focused, errors),
+                }
+            )
+            if errors:
+                symbol_errors = [f"{symbol}: {error}" for error in errors]
+                continue
+            patches.extend(focused.patches)
+            verification_commands.extend(focused.verification_commands)
+            accepted = True
+            break
+        if not accepted:
+            focused_errors.extend(symbol_errors)
+    if not patches:
+        return None
+    proposal = PatchProposal(
+        action="patch",
+        summary="Merged focused patches for required failing source functions.",
+        patches=dedupe_file_patches(patches),
+        verification_commands=_dedupe_commands(verification_commands) or allowed_commands[:1] or [["pytest", "-q"]],
+    )
+    proposal = normalize_patch_proposal(
+        proposal,
+        file_context,
+        required_patch_symbols=required_patch_symbols,
+    )
+    validation_errors = [
+        *focused_errors,
+        *validate_patch_proposal(
+            proposal,
+            file_context,
+            allowed_verification_commands=allowed_commands,
+            required_patch_symbols=required_patch_symbols,
+        ),
+    ]
+    score = _score_patch_proposal(proposal, validation_errors)
+    return (
+        proposal,
+        validation_errors,
+        score,
+        {
+            "attempt": attempt,
+            "mode": "focused_required_symbols",
+            "proposal": proposal.model_dump(mode="json"),
+            "focused": focused_records,
+            "validation_errors": validation_errors,
+            "score": score,
+        },
+    )
 
 
 def _patch_apply_node(deps: GraphDependencies):
@@ -1675,11 +2098,57 @@ async def _read_relevant_files(deps: GraphDependencies, state: SynodeState) -> l
                     "path": path,
                     "sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
                     "content": content,
+                    "truncated": bool(result.output.get("truncated")),
                 }
             )
     if not files:
         raise FileNotFoundError("coding inspection did not produce readable relevant files")
     return files
+
+
+def _fallback_coding_inspection_from_loop_error(
+    state: SynodeState | dict[str, Any],
+    error: str,
+    tool_results: list[ToolResult],
+) -> CodingInspection:
+    relevant_files: list[str] = []
+    observed_failures = [error]
+    workspace = str(state.get("workspace") or "")
+    for result in tool_results:
+        output = result.output or {}
+        if result.error:
+            observed_failures.append(result.error)
+        if not result.ok or not isinstance(output, dict):
+            continue
+        if result.tool_name == "native.fs_read":
+            path = _workspace_relative_path(workspace, str(output.get("path") or ""))
+            if path:
+                relevant_files.append(path)
+        matches = output.get("matches")
+        if isinstance(matches, list):
+            for match in matches:
+                if not isinstance(match, dict):
+                    continue
+                path = str(match.get("path") or "")
+                if path and (path.endswith(".py") or _looks_like_test_path(path)):
+                    relevant_files.append(path)
+    commands = [["pytest", "-q"]] if "pytest" in str(state.get("task") or "").lower() else []
+    return CodingInspection(
+        summary=f"Fallback inspection from native loop observations after contract failure: {error}",
+        relevant_files=_dedupe(relevant_files)[:5],
+        observed_failures=_dedupe(observed_failures),
+        proposed_test_commands=commands,
+    )
+
+
+def _workspace_relative_path(workspace: str, path: str) -> str:
+    if not path:
+        return ""
+    if workspace and path.startswith(workspace.rstrip("/") + "/"):
+        return path[len(workspace.rstrip("/")) + 1 :]
+    if path.startswith("/"):
+        return ""
+    return path
 
 
 def _augment_inspection_with_search_matches(
@@ -1868,25 +2337,45 @@ def _looks_like_test_path(path: str) -> bool:
     return path.startswith("tests/") or "/tests/" in path or path.startswith("test_") or "/test_" in path
 
 
-def _patch_proposal_prompt(*, repair: bool, repair_verification: bool = False) -> str:
+def _patch_proposal_prompt(
+    *,
+    repair: bool,
+    repair_verification: bool = False,
+    focused_symbol: str | None = None,
+) -> str:
     base = (
         "Use the coding_context_packet as the only repository evidence. "
-        "Choose exactly one action: patch, no_change, or needs_operator. "
-        "For patch action, propose a minimal patch using only provided file contents. "
+        "Return one PatchProposal JSON object directly. "
+        "Choose exactly one PatchProposal action: patch, no_change, or needs_operator. "
+        "For action=patch, propose a minimal patch using only provided file contents. "
         "Each patch old_text MUST be a non-empty exact substring from the target file and occur exactly once. "
         "Use complete function or method blocks when changing logic. "
         "new_text MUST be the full replacement for old_text, not a detached snippet. "
         "verification_commands MUST be copied from allowed_verification_commands. "
         "Patch all root causes shown by the failing tests, not only the first failure. "
+        "If required_patch_symbols is present, include a patch inside or replacing every listed source function. "
+        "Use required_patch_targets to find those function bodies. "
+        "For dictionary accumulators initialized as {}, avoid direct totals[key] +=/-= unless the key is "
+        "already initialized; prefer totals.get(key, default) +/- amount. "
+        "For refund workflows, do not skip refund rows; make amount negative before the same accumulator update. "
         "Do not hard-code fixture-specific customers, names, dates, paths, or expected totals; fix the underlying implementation. "
-        "Use no_change if no mutation is needed. Use needs_operator with operator_question if the requirement is ambiguous."
+        "Use no_change if no mutation is needed. "
+        "Use needs_operator only for one concrete ambiguity question ending with '?'. "
+        "Do not use needs_operator to ask the operator to review, implement, patch, or run tests."
     )
+    if focused_symbol:
+        base += (
+            f" Focused patch mode: patch only source function {focused_symbol}. "
+            f"The patch must modify {focused_symbol}; do not patch other required functions in this focused call."
+        )
     if repair_verification:
         return (
             base
             + " The previous patch was already applied and verification failed. "
             "Propose a follow-up patch against the CURRENT file contents only. "
-            "Use failed_verification and current_diff to repair the implementation, preferably by replacing complete affected functions."
+            "Do not repeat previous_patch_proposal or old_text that no longer exists. "
+            "Use failed_verification and current_diff to repair the currently failing implementation only, "
+            "preferably by replacing complete affected functions."
         )
     if repair:
         return (
@@ -1894,47 +2383,6 @@ def _patch_proposal_prompt(*, repair: bool, repair_verification: bool = False) -
             + " The previous proposal failed deterministic validation; repair it using previous_patch_validation_errors."
         )
     return base
-
-
-def _patch_proposal_validation_errors(
-    proposal: PatchProposal,
-    file_context: list[dict[str, Any]],
-    *,
-    allowed_verification_commands: list[list[str]] | None = None,
-) -> list[str]:
-    errors: list[str] = []
-    content_by_path = {str(item["path"]): str(item["content"]) for item in file_context}
-    sha_by_path = {str(item["path"]): str(item["sha256"]) for item in file_context}
-    if proposal.action in {"no_change", "needs_operator"} and proposal.patches:
-        errors.append(f"{proposal.action} action must not include patches")
-    for index, patch in enumerate(proposal.patches):
-        content = content_by_path.get(patch.path)
-        if content is None:
-            errors.append(f"patch {index} targets a file outside provided context: {patch.path}")
-            continue
-        if patch.expected_sha256 != sha_by_path[patch.path]:
-            errors.append(f"patch {index} checksum does not match provided file context: {patch.path}")
-        if not patch.old_text:
-            errors.append(f"patch {index} old_text is empty: {patch.path}")
-            continue
-        occurrences = content.count(patch.old_text)
-        if occurrences != 1:
-            errors.append(f"patch {index} old_text must occur exactly once in {patch.path}; occurrences={occurrences}")
-        if patch.old_text == patch.new_text:
-            errors.append(f"patch {index} new_text is identical to old_text: {patch.path}")
-    allowed_keys = {
-        _command_key([str(part) for part in command])
-        for command in (allowed_verification_commands or [])
-    }
-    for index, command in enumerate(proposal.verification_commands):
-        argv = [str(part) for part in command]
-        if not argv:
-            errors.append(f"verification command {index} is empty")
-        elif not is_safe_command(argv):
-            errors.append(f"verification command {index} is unsafe: {argv}")
-        elif allowed_keys and _command_key(argv) not in allowed_keys:
-            errors.append(f"verification command {index} is not in allowed command catalog: {argv}")
-    return errors
 
 
 def _score_patch_proposal(proposal: PatchProposal, validation_errors: list[str]) -> dict[str, Any]:
@@ -1962,77 +2410,6 @@ def _no_change_patch_result() -> dict[str, Any]:
         "error": None,
         "approval_id": None,
     }
-
-
-def _failure_category_from_validation_errors(validation_errors: list[str]) -> str:
-    joined = "\n".join(validation_errors)
-    if "verification command" in joined and ("unsafe" in joined or "not in allowed" in joined):
-        return "verification_unsafe"
-    if "operator" in joined:
-        return "needs_operator"
-    if validation_errors:
-        return "patch_invalid"
-    return "contract_invalid"
-
-
-def _normalize_patch_proposal(
-    proposal: PatchProposal,
-    file_context: list[dict[str, Any]],
-) -> PatchProposal:
-    content_by_path = {str(item["path"]): str(item["content"]) for item in file_context}
-    sha_by_path = {str(item["path"]): str(item["sha256"]) for item in file_context}
-    patches: list[FilePatch] = []
-    for patch in proposal.patches:
-        content = content_by_path.get(patch.path)
-        old_text = patch.old_text
-        if content is not None and content.count(old_text) != 1:
-            old_text = _align_old_text_to_content(content, old_text)
-        patches.append(
-            FilePatch(
-                path=patch.path,
-                expected_sha256=sha_by_path.get(patch.path, patch.expected_sha256),
-                old_text=old_text,
-                new_text=patch.new_text,
-            )
-        )
-    return proposal.model_copy(update={"patches": patches})
-
-
-def _align_old_text_to_content(content: str, old_text: str) -> str:
-    simple_candidates = [
-        old_text.strip("\n"),
-        old_text.strip(),
-        old_text.replace("\r\n", "\n"),
-        old_text.replace("\r\n", "\n").strip("\n"),
-        old_text.replace("\r\n", "\n").strip(),
-    ]
-    for candidate in simple_candidates:
-        if candidate and content.count(candidate) == 1:
-            return candidate
-
-    stripped_lines = [line.strip() for line in old_text.strip().splitlines()]
-    if not stripped_lines or any(not line for line in stripped_lines):
-        return old_text
-    content_lines = content.splitlines(keepends=True)
-    matches: list[str] = []
-    width = len(stripped_lines)
-    for start in range(0, len(content_lines) - width + 1):
-        window = content_lines[start : start + width]
-        if [line.strip() for line in window] != stripped_lines:
-            continue
-        candidate = "".join(window)
-        if candidate:
-            matches.append(candidate)
-        trimmed = candidate.rstrip("\n")
-        if trimmed and trimmed != candidate:
-            matches.append(trimmed)
-    exact_matches = list(dict.fromkeys(candidate for candidate in matches if content.count(candidate) == 1))
-    if len(exact_matches) == 1:
-        return exact_matches[0]
-    equivalent_matches = {candidate.rstrip("\n") for candidate in exact_matches}
-    if len(equivalent_matches) == 1:
-        return next(iter(equivalent_matches))
-    return old_text
 
 
 def _dedupe(values: list[str]) -> list[str]:

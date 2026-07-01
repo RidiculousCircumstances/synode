@@ -300,35 +300,47 @@ def maintenance_cleanup() -> None:
 def eval_coding(
     api_url: str = typer.Option("http://127.0.0.1:8787", "--api-url"),
     model: str = typer.Option("llama3.1:8b", "--model"),
+    backend: str = typer.Option("native_langgraph", "--backend"),
+    graph_name_suffix: str | None = typer.Option(None, "--graph-name-suffix"),
     output_dir: Path = typer.Option(Path("var/evals/coding"), "--output-dir"),
+    workspace_host_dir: Path = typer.Option(Path("var/workspaces/evals"), "--workspace-host-dir"),
+    api_workspace_dir: str | None = typer.Option("/workspace/evals", "--api-workspace-dir"),
     tasks: str | None = typer.Option(None, "--tasks", help="Comma-separated task ids"),
     ollama_base_url: str = typer.Option("http://127.0.0.1:11434", "--ollama-base-url"),
     timeout_seconds: float = typer.Option(1200.0, "--timeout-seconds"),
+    skip_contract_only_for_openhands: bool = typer.Option(True, "--skip-contract-only-for-openhands/--include-contract-only-for-openhands"),
     list_tasks: bool = typer.Option(False, "--list-tasks"),
     dry_run: bool = typer.Option(False, "--dry-run"),
 ) -> None:
-    from synode.evals.coding import load_tasks, materialize_task, run_coding_eval
+    from synode.evals.coding import _eval_backend, load_tasks, materialize_task, run_coding_eval
 
     available = load_tasks()
+    eval_backend = _eval_backend(backend)
     selected_ids = [item.strip() for item in tasks.split(",") if item.strip()] if tasks else None
     if list_tasks:
         for task in available:
             console.print(f"{task.id}\t{task.title}")
         return
     if dry_run:
-        root = output_dir / "dry-run"
+        root = workspace_host_dir / "dry-run"
         selected = available if selected_ids is None else [task for task in available if task.id in selected_ids]
         for task in selected:
             workspace = materialize_task(task, root)
             console.print(f"{task.id}: {workspace}")
         return
+    stamp = datetime_stamp()
     report = run_coding_eval(
         api_url=api_url,
         model=model,
-        output_root=output_dir / datetime_stamp(),
+        output_root=output_dir / stamp,
+        workspace_root=workspace_host_dir / stamp,
+        api_workspace_root=f"{api_workspace_dir.rstrip('/')}/{stamp}" if api_workspace_dir else None,
+        backend=eval_backend,
+        graph_name_suffix=graph_name_suffix,
         task_ids=selected_ids,
         ollama_base_url=ollama_base_url,
         timeout_seconds=timeout_seconds,
+        skip_contract_only_for_openhands=skip_contract_only_for_openhands,
     )
     console.print_json(data=report)
 

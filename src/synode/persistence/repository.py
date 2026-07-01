@@ -1490,16 +1490,36 @@ class Repository:
             model=ollama_model,
         )
         for role in builtin_roles:
+            mission = str(role["mission"])
+            non_goals = list(role.get("non_goals", []))
+            allowed_tools = list(role.get("allowed_tools", []))
+            requires_approval_for = list(role.get("requires_approval_for", []))
+            output_contract = str(role.get("output_contract", ""))
+            values = {
+                "mission": mission,
+                "non_goals": non_goals,
+                "allowed_tools": allowed_tools,
+                "requires_approval_for": requires_approval_for,
+                "output_contract": output_contract,
+                "builtin": True,
+                "enabled": True,
+            }
             record = await self.get_agent_role_by_name(str(role["name"]))
             if record is None:
                 record = await self.create_agent_role(
                     name=str(role["name"]),
-                    mission=str(role["mission"]),
-                    non_goals=list(role.get("non_goals", [])),
-                    allowed_tools=list(role.get("allowed_tools", [])),
-                    requires_approval_for=list(role.get("requires_approval_for", [])),
-                    output_contract=str(role.get("output_contract", "")),
+                    mission=mission,
+                    non_goals=non_goals,
+                    allowed_tools=allowed_tools,
+                    requires_approval_for=requires_approval_for,
+                    output_contract=output_contract,
                     builtin=True,
+                    enabled=True,
+                )
+            else:
+                await self.update_agent_role(
+                    record.id,
+                    values,
                 )
         if await self.get_default_agent_graph() is None:
             by_name = {role.name: role for role in await self.list_agent_roles(enabled_only=True, limit=1000)}

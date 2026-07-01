@@ -96,6 +96,29 @@ async def test_custom_graph_and_model_profile_drive_run(service, tmp_path: pathl
     assert "data_analyst" in (result.final_answer or "")
 
 
+async def test_default_configuration_syncs_existing_builtin_roles(settings, database) -> None:
+    builtin_roles = RoleRegistry.load_builtin()
+    async with database.session() as session:
+        repo = Repository(session)
+        await repo.create_agent_role(
+            name="coder",
+            mission="old coder mission",
+            allowed_tools=["native.fs_read"],
+            builtin=True,
+        )
+        await repo.ensure_default_configuration(
+            builtin_roles=builtin_roles.as_public(),
+            ollama_base_url=settings.ollama_base_url,
+            ollama_model=settings.ollama_model,
+        )
+        coder = await repo.get_agent_role_by_name("coder")
+
+    assert coder is not None
+    assert coder.mission == builtin_roles.get("coder").mission
+    assert "native.fs_list" in coder.allowed_tools
+    assert coder.builtin is True
+
+
 async def test_graph_runtime_bindings_reject_disabled_openhands(service, tmp_path: pathlib.Path) -> None:
     roles = {role.name: role for role in await service.list_agent_roles()}
     graph = await service.create_agent_graph(

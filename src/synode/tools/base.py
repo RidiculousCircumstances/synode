@@ -16,6 +16,7 @@ from synode.persistence.models import ApprovalRecord
 from synode.persistence.repository import Repository
 from synode.registry import RoleRegistry
 from synode.schemas import ApprovalStatus, ToolCall, ToolResult, ToolRisk
+from synode.tools.catalog import tool_catalog_entry, tool_catalog_for, tool_input_schema
 from synode.tools.sandbox import SandboxRunner, SandboxUnavailable
 from synode.tools.workspace import WorkspacePolicy
 
@@ -91,6 +92,9 @@ class ToolGateway:
     def allowed_tool_names(self, role_name: str) -> list[str]:
         role = self.roles.get(role_name)
         return [name for name in self.tools.list_names() if role.allows_tool(name)]
+
+    def tool_catalog(self, role_name: str) -> list[dict[str, Any]]:
+        return tool_catalog_for(self.allowed_tool_names(role_name))
 
     async def create_proxy_session(
         self,
@@ -176,8 +180,8 @@ class ToolGateway:
                 "tools": [
                     {
                         "name": name,
-                        "description": f"Synode governed tool {name}",
-                        "inputSchema": {"type": "object", "additionalProperties": True},
+                        "description": str(tool_catalog_entry(name)["description"]),
+                        "inputSchema": tool_input_schema(name),
                     }
                     for name in sorted(record.allowed_tools or [])
                     if name in self.tools.list_names()
@@ -341,7 +345,15 @@ class ToolGateway:
                     )
                     return result
 
-            result = await tool.run(context, call.arguments)
+            try:
+                result = await tool.run(context, call.arguments)
+            except Exception as exc:
+                result = ToolResult(
+                    tool_name=call.name,
+                    ok=False,
+                    risk=risk,
+                    error=f"tool execution failed ({exc.__class__.__name__}): {exc}",
+                )
             async with self.database.session() as session:
                 repo = Repository(session)
                 await repo.add_tool_audit(

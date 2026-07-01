@@ -9,6 +9,7 @@ from synode.tools.sandbox import (
     SandboxRunner,
     SandboxUnavailable,
     _docker_container_config,
+    _sandbox_command_env,
     _split_docker_logs,
 )
 
@@ -67,6 +68,22 @@ def test_docker_container_config_applies_isolation_and_resource_limits() -> None
     assert host_config["Tmpfs"] == {"/tmp": "rw,noexec,nosuid,size=16m"}
     assert {"Name": "cpu", "Soft": 7, "Hard": 8} in host_config["Ulimits"]
     assert {"Name": "nofile", "Soft": 128, "Hard": 128} in host_config["Ulimits"]
+
+
+def test_sandbox_command_env_adds_workspace_pythonpath(tmp_path: Path) -> None:
+    settings = Settings(sandbox_backend="process")
+
+    env = _sandbox_command_env(settings, tmp_path, None)
+
+    assert env["PYTHONPATH"] == str(tmp_path)
+
+
+def test_sandbox_command_env_uses_container_workspace_for_docker() -> None:
+    settings = Settings(sandbox_backend="docker", sandbox_docker_workdir="/workspace")
+
+    env = _sandbox_command_env(settings, Path("/container/workspaces/thread-a"), {"PYTHONPATH": "/extra"})
+
+    assert env["PYTHONPATH"] == "/workspace:/extra"
 
 
 def test_split_docker_logs_demultiplexes_stdout_and_stderr() -> None:

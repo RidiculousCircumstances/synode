@@ -99,19 +99,20 @@ class SandboxRunner:
         if not argv:
             return SandboxResult(ok=False, argv=argv, returncode=None, stdout="", stderr="", error="argv is required")
         before_size = _directory_size(cwd)
+        command_env = _sandbox_command_env(self.settings, cwd, env)
         if self.settings.sandbox_backend == "docker":
             return await self._run_docker_command(
                 argv,
                 cwd=cwd,
                 timeout=timeout,
-                env=env,
+                env=command_env,
                 before_size=before_size,
             )
         return await self._run_process_command(
             argv,
             cwd=cwd,
             timeout=timeout,
-            env=env,
+            env=command_env,
             before_size=before_size,
         )
 
@@ -344,6 +345,17 @@ def _limit_process(settings: Settings) -> Any:
         resource.setrlimit(resource.RLIMIT_NOFILE, (128, 128))
 
     return apply_limits
+
+
+def _sandbox_command_env(settings: Settings, cwd: Path, env: dict[str, str] | None) -> dict[str, str]:
+    command_env = dict(env or {})
+    workspace_path = settings.sandbox_docker_workdir if settings.sandbox_backend == "docker" else str(cwd)
+    existing_pythonpath = command_env.get("PYTHONPATH")
+    if existing_pythonpath:
+        command_env["PYTHONPATH"] = os.pathsep.join([workspace_path, existing_pythonpath])
+    else:
+        command_env["PYTHONPATH"] = workspace_path
+    return command_env
 
 
 def _kill_process_tree(process: asyncio.subprocess.Process) -> None:

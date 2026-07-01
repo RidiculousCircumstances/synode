@@ -5,7 +5,7 @@ from synode.tools.base import BaseTool, ToolRegistry
 from synode.tools.coding import GitDiffTool, GitStatusTool, PatchApplyTool, VerifyTool
 from synode.tools.data import DataProfileTool, PythonSandboxTool
 from synode.tools.database import DatabaseReadonlyTool
-from synode.tools.filesystem import FileReadTool, FileSearchTool, FileWriteTool
+from synode.tools.filesystem import FileListTool, FileReadTool, FileSearchTool, FileWriteTool
 from synode.tools.shell import ShellTool
 from synode.tools.web import WebFetchTool, WebSearchTool
 
@@ -14,6 +14,7 @@ async def build_tool_registry(settings: Settings, include_mcp: bool = True) -> T
     registry = ToolRegistry()
     native_tools: list[BaseTool] = [
         FileReadTool(),
+        FileListTool(),
         FileSearchTool(),
         FileWriteTool(),
         GitStatusTool(),

@@ -13,6 +13,7 @@ components:
       - Run queue adapter, Procrastinate dispatch, worker heartbeat, stale-run recovery, and exact run claims
       - AgentGraph v2 node schema, code-based node contracts, node execution state, and backend registry with native LangGraph and optional external OpenHands execution for control and worker nodes
       - Operator planning gates, ambiguity interrupts, durable operator requests, and LangGraph checkpoint resume
+      - Deterministic validation layer for operator questions, patch proposals, verification commands, and language-specific patch checks
       - Optional Langfuse trace emission
   - name: web
     path: web
@@ -151,7 +152,7 @@ critical_flows:
   - name: run-task
     description: User message becomes a thread run, Procrastinate `run_id` dispatch, exact worker claim, graph execution, audited tool calls, reviewer output, and final answer.
   - name: coding-task
-    description: Coding task flows through structured planning, inspection, patch proposal, approval, patch apply, focused verification, and review.
+    description: Coding task flows through structured planning, inspection, deterministic patch validation, approval, patch apply, focused verification, and review.
   - name: structured-decision
     description: Supervisor and reviewer model calls must return schema-valid JSON or stop with an explicit error.
   - name: configurable-agent-graph

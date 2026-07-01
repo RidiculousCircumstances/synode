@@ -169,22 +169,26 @@ class FakeModelProvider:
                 for item in history
             )
             if isinstance(planned, list) and planned and not has_tool_result:
-                return NativeLoopAction(
-                    action="tool_call",
-                    summary="Execute the first deterministic planned tool call.",
-                    tool_call=ToolCall.model_validate(planned[0]),
+                return NativeLoopAction.model_validate(
+                    {
+                        "action": "tool_call",
+                        "summary": "Execute the first deterministic planned tool call.",
+                        "tool_call": ToolCall.model_validate(planned[0]).model_dump(mode="json"),
+                    }
                 ).model_dump(mode="json")
             contract_id = str(request.context.get("contract_id") or "")
             if contract_id == CODING_INSPECTION_CONTRACT:
-                return NativeLoopAction(
-                    action="finish",
-                    summary="Finish deterministic coding inspection.",
-                    payload=CodingInspection(
-                        summary="Deterministic fake coding inspection.",
-                        relevant_files=["README.md"],
-                        observed_failures=[],
-                        proposed_test_commands=[["python", "-m", "pytest"]],
-                    ).model_dump(mode="json"),
+                return NativeLoopAction.model_validate(
+                    {
+                        "action": "finish",
+                        "summary": "Finish deterministic coding inspection.",
+                        "payload": CodingInspection(
+                            summary="Deterministic fake coding inspection.",
+                            relevant_files=["README.md"],
+                            observed_failures=[],
+                            proposed_test_commands=[["python", "-m", "pytest"]],
+                        ).model_dump(mode="json"),
+                    }
                 ).model_dump(mode="json")
             if contract_id == CODING_PATCH_PROPOSAL_CONTRACT:
                 proposal = request.context.get("fake_patch_proposal")
@@ -196,20 +200,24 @@ class FakeModelProvider:
                         summary="No deterministic fake patch fixture was provided.",
                         verification_commands=[["python", "-m", "pytest"]],
                     ).model_dump(mode="json")
-                return NativeLoopAction(
-                    action="finish",
-                    summary="Finish deterministic patch proposal.",
-                    payload=payload,
+                return NativeLoopAction.model_validate(
+                    {
+                        "action": "finish",
+                        "summary": "Finish deterministic patch proposal.",
+                        "payload": payload,
+                    }
                 ).model_dump(mode="json")
-            return NativeLoopAction(
-                action="finish",
-                summary="Finish deterministic worker loop.",
-                payload={
-                    "role": request.role,
-                    "summary": f"{request.role} completed deterministic native loop.",
-                    "tool_results": [],
-                    "risks": [],
-                },
+            return NativeLoopAction.model_validate(
+                {
+                    "action": "finish",
+                    "summary": "Finish deterministic worker loop.",
+                    "payload": {
+                        "role": request.role,
+                        "summary": f"{request.role} completed deterministic native loop.",
+                        "tool_results": [],
+                        "risks": [],
+                    },
+                }
             ).model_dump(mode="json")
         if schema is VerificationPlan:
             commands = request.context.get("commands") or [["python", "-m", "pytest"]]
@@ -258,13 +266,6 @@ class OllamaProvider:
         }
         if request.response_schema is not None:
             payload["format"] = request.response_schema.model_json_schema()
-            payload["messages"] = [
-                *messages,
-                {
-                    "role": "user",
-                    "content": "Return only JSON that validates against the provided schema.",
-                },
-            ]
         timeout = request.timeout_seconds or self.timeout_seconds
         started = time.perf_counter()
         try:

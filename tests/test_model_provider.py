@@ -56,6 +56,42 @@ async def test_ollama_provider_sends_request_context(monkeypatch: pytest.MonkeyP
     assert "Earlier request" in messages[0]["content"]
 
 
+async def test_ollama_provider_keeps_structured_task_as_final_user_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_payload: dict[str, object] = {}
+    payload = {
+        "selected_roles": [RoleName.DATA_ANALYST.value],
+        "plan": [{"role": RoleName.DATA_ANALYST.value, "task": "Analyze data", "tool_calls": []}],
+        "confidence": "high",
+        "risk_level": RiskLevel.ANALYSIS.value,
+        "reasoning_summary": "Data task.",
+    }
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        captured_payload.update(json.loads(request.content))
+        return httpx.Response(200, json={"message": {"content": json.dumps(payload)}})
+
+    _patch_async_client(monkeypatch, httpx.MockTransport(handle))
+    provider = OllamaProvider("http://ollama.test", "qwen2.5-coder:7b")
+
+    await provider.invoke(
+        ModelRequest(
+            role="supervisor",
+            prompt="Plan the actual task",
+            context={"task": "Fix refunds"},
+            response_schema=SupervisorDecision,
+        )
+    )
+
+    messages = captured_payload["messages"]
+    assert isinstance(messages, list)
+    assert len(messages) == 1
+    assert "Plan the actual task" in messages[0]["content"]
+    assert "Fix refunds" in messages[0]["content"]
+    assert "format" in captured_payload
+
+
 async def test_ollama_provider_streams_token_deltas(monkeypatch: pytest.MonkeyPatch) -> None:
     captured_payload: dict[str, object] = {}
     body = (

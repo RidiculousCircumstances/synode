@@ -5,6 +5,7 @@ non_goals:
   - Make database writes.
 allowed_tools:
   - native.fs_read
+  - native.fs_list
   - native.fs_search
   - native.data_profile
   - native.python_sandbox
@@ -14,4 +15,3 @@ requires_approval_for:
   - write
   - destructive
 output_contract: Report data sources, row counts, numeric summaries, anomalies, and confidence limits.
-

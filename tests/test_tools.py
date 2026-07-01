@@ -26,6 +26,112 @@ async def test_data_profile_tool_profiles_csv(service, tmp_path: pathlib.Path) -
     assert result.output["numeric_summary"]["value"]["mean"] == 15
 
 
+async def test_file_list_lists_workspace_files(
+    database,
+    tool_executor: ToolExecutor,
+    tmp_path: pathlib.Path,
+) -> None:
+    (tmp_path / "module.py").write_text("def add(left, right):\n    return left + right\n", encoding="utf-8")
+    (tmp_path / "README.md").write_text("# Demo\n", encoding="utf-8")
+    async with database.session() as session:
+        repo = Repository(session)
+        run = await repo.create_run("list files", model_provider="fake", workspace=str(tmp_path))
+        run_id = run.id
+
+    result = await tool_executor.execute(
+        run_id,
+        "coder",
+        str(tmp_path),
+        ToolCall(name="native.fs_list", arguments={"glob": "*.py"}),
+    )
+
+    assert result.ok
+    assert result.output["matches"] == [{"path": "module.py", "size": len("def add(left, right):\n    return left + right\n")}]
+
+
+async def test_file_search_rejects_glob_as_pattern(
+    database,
+    tool_executor: ToolExecutor,
+    tmp_path: pathlib.Path,
+) -> None:
+    (tmp_path / "module.py").write_text("def add(left, right):\n    return left + right\n", encoding="utf-8")
+    async with database.session() as session:
+        repo = Repository(session)
+        run = await repo.create_run("search files", model_provider="fake", workspace=str(tmp_path))
+        run_id = run.id
+
+    result = await tool_executor.execute(
+        run_id,
+        "coder",
+        str(tmp_path),
+        ToolCall(name="native.fs_search", arguments={"pattern": "*.py", "glob": "*.py"}),
+    )
+
+    assert not result.ok
+    assert result.error is not None
+    assert "pattern is a regex" in result.error
+    assert result.output["suggested_call"]["name"] == "native.fs_list"
+
+
+async def test_file_search_invalid_regex_returns_tool_error(
+    database,
+    tool_executor: ToolExecutor,
+    tmp_path: pathlib.Path,
+) -> None:
+    (tmp_path / "module.py").write_text("def add(left, right):\n    return left + right\n", encoding="utf-8")
+    async with database.session() as session:
+        repo = Repository(session)
+        run = await repo.create_run("search files", model_provider="fake", workspace=str(tmp_path))
+        run_id = run.id
+
+    result = await tool_executor.execute(
+        run_id,
+        "coder",
+        str(tmp_path),
+        ToolCall(name="native.fs_search", arguments={"pattern": "(", "glob": "*.py"}),
+    )
+    async with database.session() as session:
+        audits = await Repository(session).list_tool_audit(run_id)
+
+    assert not result.ok
+    assert result.error is not None
+    assert "invalid regex pattern" in result.error
+    assert audits[-1].status == "error"
+
+
+async def test_file_search_requires_pattern_and_rejects_root(
+    database,
+    tool_executor: ToolExecutor,
+    tmp_path: pathlib.Path,
+) -> None:
+    async with database.session() as session:
+        repo = Repository(session)
+        run = await repo.create_run("search files", model_provider="fake", workspace=str(tmp_path))
+        run_id = run.id
+
+    no_pattern = await tool_executor.execute(
+        run_id,
+        "coder",
+        str(tmp_path),
+        ToolCall(name="native.fs_search", arguments={"glob": "*.py"}),
+    )
+    with_root = await tool_executor.execute(
+        run_id,
+        "coder",
+        str(tmp_path),
+        ToolCall(name="native.fs_search", arguments={"root": str(tmp_path), "pattern": "def", "glob": "*.py"}),
+    )
+
+    assert not no_pattern.ok
+    assert no_pattern.error is not None
+    assert "pattern is required" in no_pattern.error
+    assert no_pattern.output["suggested_call"]["name"] == "native.fs_list"
+    assert not with_root.ok
+    assert with_root.error is not None
+    assert "unexpected arguments" in with_root.error
+    assert "root" in with_root.error
+
+
 async def test_mcp_proxy_session_enforces_token_scope_and_audit(
     database,
     tool_executor: ToolExecutor,
@@ -83,7 +189,11 @@ async def test_mcp_proxy_session_enforces_token_scope_and_audit(
     assert listed is not None
     listed_tools = {tool["name"] for tool in listed["result"]["tools"]}
     assert "native.fs_read" in listed_tools
+    assert "native.fs_list" in listed_tools
     assert "native.fs_write" not in listed_tools
+    fs_search_schema = next(tool["inputSchema"] for tool in listed["result"]["tools"] if tool["name"] == "native.fs_search")
+    assert fs_search_schema["additionalProperties"] is False
+    assert fs_search_schema["required"] == ["pattern"]
     assert denied is not None and "not allowed" in denied["error"]["message"]
     assert read is not None and read["result"]["structuredContent"]["ok"] is True
     assert read["result"]["structuredContent"]["output"]["content"] == "# Demo\n"

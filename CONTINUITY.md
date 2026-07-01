@@ -199,6 +199,9 @@
   `make eval-coding`. Tracked task templates live in
   `src/synode/evals/coding_tasks.json`; runtime workspaces/reports remain under
   ignored `var/evals`.
+- Coding evals can target `native_langgraph` or `openhands` backends. OpenHands
+  evals bind only the coder node externally and skip native-only
+  `PatchProposal` contract regressions explicitly.
 
 ### Now:
 - MVP backend and operator UI include DB-backed runtime configuration screens

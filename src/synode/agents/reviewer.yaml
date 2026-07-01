@@ -5,10 +5,10 @@ non_goals:
   - Execute mutating tools.
 allowed_tools:
   - native.fs_read
+  - native.fs_list
   - native.fs_search
   - mcp.*
 requires_approval_for:
   - write
   - destructive
 output_contract: Separate blockers from advisory risks and state whether synthesis can proceed.
-
