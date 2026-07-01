@@ -15,6 +15,7 @@ from synode.observability import Observability
 from synode.persistence.database import Database
 from synode.persistence.repository import Repository
 from synode.registry import RoleRegistry
+from synode.runtime.contracts import WORKER_AGENT_OUTPUT_CONTRACT
 from synode.runtime.decisions import (
     CodingInspection,
     FilePatch,
@@ -29,9 +30,9 @@ from synode.runtime.state import SynodeState
 from synode.schemas import (
     AgentOutput,
     EventType,
+    NodeExecutionStatus,
     RoleName,
     RunMode,
-    RuntimeBackend,
     ToolCall,
     ToolResult,
 )
@@ -65,7 +66,6 @@ def build_graph(deps: GraphDependencies, checkpointer: Any | None = None) -> Any
     builder.add_node("supervisor", _observed_node("supervisor", deps, _supervisor_node(deps)))
     builder.add_node("graph_workers", _observed_node("graph_workers", deps, _graph_workers_node(deps)))
     builder.add_node("coding_inspect", _observed_node("coding_inspect", deps, _coding_inspect_node(deps)))
-    builder.add_node("external_coder", _observed_node("external_coder", deps, _external_coder_node(deps)))
     builder.add_node(
         "coding_patch_propose",
         _observed_node("coding_patch_propose", deps, _coding_patch_propose_node(deps)),
@@ -78,7 +78,6 @@ def build_graph(deps: GraphDependencies, checkpointer: Any | None = None) -> Any
     builder.add_edge("intake", "supervisor")
     builder.add_conditional_edges("supervisor", _route_after_supervisor)
     builder.add_edge("graph_workers", "reviewer")
-    builder.add_edge("external_coder", "reviewer")
     builder.add_edge("coding_inspect", "coding_patch_propose")
     builder.add_edge("coding_patch_propose", "patch_apply")
     builder.add_edge("patch_apply", "verify")
@@ -135,7 +134,7 @@ def _node_role(name: str, state: SynodeState) -> str | None:
         return RoleName.SUPERVISOR.value
     if name == "graph_workers":
         return None
-    if name in {"coding_inspect", "coding_patch_propose", "patch_apply", "verify", "external_coder"}:
+    if name in {"coding_inspect", "coding_patch_propose", "patch_apply", "verify"}:
         return RoleName.CODER.value
     if name == "reviewer":
         return RoleName.REVIEWER.value
@@ -216,8 +215,8 @@ def _supervisor_node(deps: GraphDependencies):
 
 def _route_after_supervisor(state: SynodeState) -> str:
     if state["mode"] == RunMode.CODING.value:
-        if _role_runtime_backend(state, RoleName.CODER.value) != RuntimeBackend.NATIVE_LANGGRAPH:
-            return "external_coder"
+        if _role_runtime_backend(state, RoleName.CODER.value) != "native_langgraph":
+            return "graph_workers"
         return "coding_inspect"
     return "graph_workers"
 
@@ -249,18 +248,18 @@ def _graph_workers_node(deps: GraphDependencies):
 
 async def _run_worker_role(deps: GraphDependencies, state: SynodeState, role: str) -> AgentOutput:
     backend = _role_runtime_backend(state, role)
-    if backend != RuntimeBackend.NATIVE_LANGGRAPH:
+    if backend != "native_langgraph":
         if deps.execution_backends is None:
             raise RuntimeError("execution backend registry is not configured")
-        output = await deps.execution_backends.execute(
+        backend_output = await deps.execution_backends.execute(
             backend,
             _node_execution_input(state, role),
         )
         return AgentOutput(
-            role=output.role,
-            summary=output.summary,
-            tool_results=output.tool_results,
-            risks=output.risks,
+            role=backend_output.role,
+            summary=backend_output.summary,
+            tool_results=backend_output.tool_results,
+            risks=backend_output.risks,
         )
     calls = [ToolCall.model_validate(call) for call in state.get("role_tool_calls", {}).get(role, [])]
     results = []
@@ -285,30 +284,25 @@ async def _run_worker_role(deps: GraphDependencies, state: SynodeState, role: st
             model_options=provider.model_options or {},
         ),
     )
-    return AgentOutput(
+    output = AgentOutput(
         role=role,
         summary=_summarize_role_output(role, model_response.content, results),
         tool_results=results,
         risks=[result.error for result in results if result.error],
     )
-
-
-def _external_coder_node(deps: GraphDependencies):
-    async def node(state: SynodeState) -> SynodeState:
-        output = await _run_worker_role(deps, state, RoleName.CODER.value)
-        artifact = {
-            "role": output.role,
-            "summary": output.summary,
-            "tool_results": [result.model_dump(mode="json") for result in output.tool_results],
-            "risks": output.risks,
-            "runtime_backend": _role_runtime_backend(state, RoleName.CODER.value).value,
-        }
-        async with deps.database.session() as session:
-            repo = Repository(session)
-            await repo.add_artifact(state["run_id"], "external_coder_output", artifact)
-        return {"worker_outputs": [output.model_dump(mode="json")]}
-
-    return node
+    node = _node_for_role(state, role)
+    async with deps.database.session() as session:
+        repo = Repository(session)
+        await repo.upsert_runtime_node_state(
+            state["run_id"],
+            str(node.get("id") or role),
+            role,
+            backend,
+            _node_contract_id(state, node),
+            NodeExecutionStatus.COMPLETED,
+            external_state={"native": True},
+        )
+    return output
 
 
 def _coding_inspect_node(deps: GraphDependencies):
@@ -787,30 +781,90 @@ def _worker_role_catalog(deps: GraphDependencies, state: SynodeState | dict[str,
     return roles
 
 
-def _role_runtime_backend(state: SynodeState | dict[str, Any], role: str) -> RuntimeBackend:
+def _role_runtime_backend(state: SynodeState | dict[str, Any], role: str) -> str:
+    node = _node_for_role(state, role)
+    backend = node.get("runtime_backend")
+    if isinstance(backend, str) and backend:
+        return backend
     snapshot = state.get("agent_graph_snapshot") or {}
-    bindings = snapshot.get("role_runtime_bindings", {})
-    if not isinstance(bindings, dict):
-        return RuntimeBackend.NATIVE_LANGGRAPH
-    return RuntimeBackend(str(bindings.get(role) or RuntimeBackend.NATIVE_LANGGRAPH.value))
+    node_bindings = snapshot.get("node_runtime_bindings", {})
+    if isinstance(node_bindings, dict) and node.get("id") in node_bindings:
+        return str(node_bindings[node["id"]])
+    return "native_langgraph"
 
 
 def _node_execution_input(state: SynodeState, role: str) -> NodeExecutionInput:
+    node = _node_for_role(state, role)
+    plan_step = _plan_step_for_role(state, role)
+    node_id = str(node.get("id") or role)
+    backend_id = _role_runtime_backend(state, role)
+    contract_id = _node_contract_id(state, node)
     return NodeExecutionInput(
         run_id=state["run_id"],
         thread_id=state["thread_id"],
+        node_id=node_id,
         role=role,
+        backend_id=backend_id,
+        contract_id=contract_id,
         task=state["task"],
         workspace=state.get("workspace"),
         mode=state["mode"],
         conversation_context=state.get("conversation_context", []),
         previous_worker_outputs=state.get("worker_outputs", []),
+        upstream_outputs=state.get("worker_outputs", []),
         agent_graph_snapshot=state.get("agent_graph_snapshot", {}),
+        role_spec=_role_spec_for_role(state, role),
+        plan_task=str(plan_step.get("task") or state["task"]),
+        planned_tool_calls=[
+            call
+            for call in plan_step.get("tool_calls", [])
+            if isinstance(call, dict)
+        ],
         model_provider=state.get("model_provider"),
         default_model_profile_id=state.get("default_model_profile_id"),
         role_model_profile_ids=state.get("role_model_profile_ids", {}),
         observability_trace_id=state.get("observability_trace_id"),
     )
+
+
+def _node_for_role(state: SynodeState | dict[str, Any], role: str) -> dict[str, Any]:
+    snapshot = state.get("agent_graph_snapshot") or {}
+    nodes = snapshot.get("nodes", [])
+    if isinstance(nodes, list):
+        for node in nodes:
+            if isinstance(node, dict) and node.get("role") == role:
+                return node
+    return {"id": role, "role": role, "kind": "worker", "contract_id": WORKER_AGENT_OUTPUT_CONTRACT}
+
+
+def _node_contract_id(state: SynodeState | dict[str, Any], node: dict[str, Any]) -> str:
+    contract_id = node.get("contract_id")
+    if isinstance(contract_id, str) and contract_id:
+        return contract_id
+    snapshot = state.get("agent_graph_snapshot") or {}
+    contracts = snapshot.get("node_contracts", {})
+    node_id = node.get("id")
+    if isinstance(contracts, dict) and node_id in contracts:
+        return str(contracts[node_id])
+    return WORKER_AGENT_OUTPUT_CONTRACT
+
+
+def _plan_step_for_role(state: SynodeState | dict[str, Any], role: str) -> dict[str, Any]:
+    for step in state.get("plan", []):
+        if isinstance(step, dict) and step.get("role") == role:
+            return step
+    return {}
+
+
+def _role_spec_for_role(state: SynodeState | dict[str, Any], role: str) -> dict[str, Any]:
+    snapshot = state.get("agent_graph_snapshot") or {}
+    roles = snapshot.get("roles", [])
+    if not isinstance(roles, list):
+        return {}
+    for spec in roles:
+        if isinstance(spec, dict) and spec.get("name") == role:
+            return spec
+    return {}
 
 
 async def _provider_for_role(
@@ -875,18 +929,29 @@ def _topological_worker_order(state: SynodeState, selected_roles: list[str]) -> 
     if not selected:
         return []
     snapshot = state.get("agent_graph_snapshot") or {}
-    edges = snapshot.get("edges", [])
+    node_edges = snapshot.get("node_edges", [])
+    nodes = snapshot.get("nodes", [])
+    node_by_role = {
+        str(node.get("role")): str(node.get("id"))
+        for node in nodes
+        if isinstance(node, dict) and node.get("role") and node.get("id")
+    } if isinstance(nodes, list) else {}
+    role_by_node = {node_id: role for role, node_id in node_by_role.items()}
     graph_roles = _graph_worker_names(state)
     if not graph_roles:
         return selected_roles
+    selected_node_ids = {node_by_role[role] for role in selected if role in node_by_role}
     order = _topological_order(
         [role for role in graph_roles if role in selected],
         [
-            edge
-            for edge in edges
+            {
+                "source": role_by_node[str(edge.get("from_node"))],
+                "target": role_by_node[str(edge.get("to_node"))],
+            }
+            for edge in node_edges
             if isinstance(edge, dict)
-            and edge.get("from_role") in selected
-            and edge.get("to_role") in selected
+            and str(edge.get("from_node")) in selected_node_ids
+            and str(edge.get("to_node")) in selected_node_ids
         ],
     )
     missing = [role for role in selected_roles if role not in order]
@@ -898,8 +963,8 @@ def _topological_order(role_names: list[str], edges: list[dict[str, Any]]) -> li
     incoming: dict[str, set[str]] = {role: set() for role in role_names}
     outgoing: dict[str, set[str]] = {role: set() for role in role_names}
     for edge in edges:
-        source = str(edge.get("from_role"))
-        target = str(edge.get("to_role"))
+        source = str(edge.get("source"))
+        target = str(edge.get("target"))
         if source in remaining and target in remaining:
             incoming[target].add(source)
             outgoing[source].add(target)

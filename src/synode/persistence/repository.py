@@ -16,6 +16,7 @@ from synode.persistence.models import (
     ModelProfileRecord,
     RunEventRecord,
     RunRecord,
+    RuntimeNodeStateRecord,
     SecretRecord,
     ThreadMessageRecord,
     ThreadRecord,
@@ -23,14 +24,19 @@ from synode.persistence.models import (
     WorkerHeartbeatRecord,
     new_id,
 )
+from synode.runtime.contracts import default_contract_for_role, default_contract_registry
 from synode.schemas import (
-    AgentGraphEdge,
+    AgentGraphNode,
+    AgentGraphNodeEdge,
+    AgentGraphNodeKind,
     AgentGraphResponse,
     AgentRoleResponse,
     ApprovalStatus,
     EventType,
     ModelProfileResponse,
     ModelProviderType,
+    NodeExecutionStatus,
+    RoleName,
     RunMode,
     RunResponse,
     RunStatus,
@@ -779,6 +785,99 @@ class Repository:
             query = query.where(ToolAuditRecord.status.in_(statuses))
         return int(await self.session.scalar(query) or 0)
 
+    async def upsert_runtime_node_state(
+        self,
+        run_id: str,
+        node_id: str,
+        role: str,
+        backend_id: str,
+        contract_id: str,
+        status: NodeExecutionStatus | str,
+        *,
+        attempt: int = 1,
+        external_id: str | None = None,
+        approval_id: str | None = None,
+        external_state: dict[str, Any] | None = None,
+        last_error: str | None = None,
+    ) -> RuntimeNodeStateRecord:
+        record = await self.get_runtime_node_state(run_id, node_id, attempt=attempt)
+        now = datetime.now(UTC)
+        status_value = status.value if isinstance(status, NodeExecutionStatus) else str(status)
+        if record is None:
+            record = RuntimeNodeStateRecord(
+                id=new_id(),
+                run_id=run_id,
+                node_id=node_id,
+                role=role,
+                backend_id=backend_id,
+                contract_id=contract_id,
+                status=status_value,
+                attempt=attempt,
+                external_id=external_id,
+                approval_id=approval_id,
+                external_state=external_state or {},
+                last_error=last_error,
+            )
+            self.session.add(record)
+        else:
+            record.role = role
+            record.backend_id = backend_id
+            record.contract_id = contract_id
+            record.status = status_value
+            record.updated_at = now
+            if external_id is not None:
+                record.external_id = external_id
+            if approval_id is not None:
+                record.approval_id = approval_id
+            if external_state is not None:
+                record.external_state = external_state
+            if last_error is not None:
+                record.last_error = last_error
+        if status_value == NodeExecutionStatus.COMPLETED.value:
+            record.completed_at = now
+        await self.session.flush()
+        return record
+
+    async def get_runtime_node_state(
+        self,
+        run_id: str,
+        node_id: str,
+        *,
+        attempt: int = 1,
+    ) -> RuntimeNodeStateRecord | None:
+        result = await self.session.execute(
+            select(RuntimeNodeStateRecord).where(
+                RuntimeNodeStateRecord.run_id == run_id,
+                RuntimeNodeStateRecord.node_id == node_id,
+                RuntimeNodeStateRecord.attempt == attempt,
+            )
+        )
+        return result.scalars().first()
+
+    async def list_runtime_node_states(self, run_id: str) -> list[RuntimeNodeStateRecord]:
+        result = await self.session.execute(
+            select(RuntimeNodeStateRecord)
+            .where(RuntimeNodeStateRecord.run_id == run_id)
+            .order_by(RuntimeNodeStateRecord.created_at, RuntimeNodeStateRecord.node_id)
+        )
+        return list(result.scalars().all())
+
+    async def mark_runtime_node_approval_forwarded(self, run_id: str, node_id: str, attempt: int = 1) -> None:
+        record = await self.get_runtime_node_state(run_id, node_id, attempt=attempt)
+        if record is None:
+            return
+        record.approval_forwarded_at = datetime.now(UTC)
+        record.updated_at = datetime.now(UTC)
+        await self.session.flush()
+
+    async def mark_runtime_node_cancel_requested(self, run_id: str, node_id: str, attempt: int = 1) -> None:
+        record = await self.get_runtime_node_state(run_id, node_id, attempt=attempt)
+        if record is None:
+            return
+        record.cancel_requested_at = datetime.now(UTC)
+        record.updated_at = datetime.now(UTC)
+        await self.session.flush()
+
     async def create_secret(self, name: str, encrypted_value: str) -> SecretRecord:
         record = SecretRecord(id=new_id(), name=name, encrypted_value=encrypted_value)
         self.session.add(record)
@@ -922,32 +1021,37 @@ class Repository:
     async def create_agent_graph(
         self,
         name: str,
-        role_ids: list[str],
-        edges: list[dict[str, str]],
+        nodes: list[dict[str, Any]],
+        node_edges: list[dict[str, str]],
+        graph_schema_version: int = 2,
         default_model_profile_id: str | None = None,
         role_model_profile_ids: dict[str, str] | None = None,
-        role_runtime_bindings: Mapping[str, str | RuntimeBackend] | None = None,
+        node_runtime_bindings: Mapping[str, str | RuntimeBackend] | None = None,
+        node_contracts: Mapping[str, str] | None = None,
         is_default: bool = False,
         enabled: bool = True,
     ) -> AgentGraphRecord:
-        runtime_bindings = _runtime_bindings_as_values(role_runtime_bindings or {})
-        await self._validate_graph_refs(
-            role_ids,
-            edges,
+        graph_config = await self._normalize_graph_config(
             default_model_profile_id,
             role_model_profile_ids or {},
-            runtime_bindings,
+            graph_schema_version=graph_schema_version,
+            nodes=nodes,
+            node_edges=node_edges,
+            node_runtime_bindings=node_runtime_bindings or {},
+            node_contracts=node_contracts or {},
         )
         if is_default:
             await self._clear_default_graphs()
         record = AgentGraphRecord(
             id=new_id(),
             name=name,
-            role_ids=role_ids,
-            edges=edges,
+            graph_schema_version=graph_config["graph_schema_version"],
+            nodes=graph_config["nodes"],
+            node_edges=graph_config["node_edges"],
             default_model_profile_id=default_model_profile_id,
             role_model_profile_ids=role_model_profile_ids or {},
-            role_runtime_bindings=runtime_bindings,
+            node_runtime_bindings=graph_config["node_runtime_bindings"],
+            node_contracts=graph_config["node_contracts"],
             is_default=is_default,
             enabled=enabled,
         )
@@ -984,28 +1088,41 @@ class Repository:
         record = await self.get_agent_graph(graph_id)
         if record is None:
             raise LookupError(f"agent graph not found: {graph_id}")
-        role_ids = values.get("role_ids", record.role_ids)
-        edges = [edge.model_dump(mode="json") if isinstance(edge, AgentGraphEdge) else edge for edge in values.get("edges", record.edges)]
+        nodes = _node_dicts(values.get("nodes", record.nodes))
+        node_edges = _node_edge_dicts(values.get("node_edges", record.node_edges))
         default_model_profile_id = values.get("default_model_profile_id", record.default_model_profile_id)
         role_model_profile_ids = values.get("role_model_profile_ids", record.role_model_profile_ids)
-        role_runtime_bindings = _runtime_bindings_as_values(
-            values.get("role_runtime_bindings", record.role_runtime_bindings) or {}
-        )
-        await self._validate_graph_refs(
-            role_ids,
-            edges,
+        node_runtime_bindings = values.get("node_runtime_bindings", record.node_runtime_bindings) or {}
+        node_contracts = values.get("node_contracts", record.node_contracts) or {}
+        graph_config = await self._normalize_graph_config(
             default_model_profile_id,
             role_model_profile_ids or {},
-            role_runtime_bindings,
+            graph_schema_version=values.get("graph_schema_version", record.graph_schema_version),
+            nodes=nodes,
+            node_edges=node_edges,
+            node_runtime_bindings=node_runtime_bindings,
+            node_contracts=node_contracts,
         )
         if values.get("is_default") is True:
             await self._clear_default_graphs()
+        graph_keys = {
+            "graph_schema_version",
+            "nodes",
+            "node_edges",
+            "node_runtime_bindings",
+            "node_contracts",
+        }
+        if graph_keys.intersection(values):
+            for key in graph_keys:
+                setattr(record, key, graph_config[key])
         for key, value in values.items():
+            if key in graph_keys:
+                continue
             if value is not None or key in {"default_model_profile_id"}:
-                if key == "edges":
-                    value = edges
-                elif key == "role_runtime_bindings":
-                    value = role_runtime_bindings
+                if key == "role_model_profile_ids":
+                    value = role_model_profile_ids or {}
+                elif key == "default_model_profile_id":
+                    value = default_model_profile_id
                 setattr(record, key, value)
         record.updated_at = datetime.now(UTC)
         await self.session.flush()
@@ -1023,8 +1140,6 @@ class Repository:
             base_url=ollama_base_url,
             model=ollama_model,
         )
-        role_ids: list[str] = []
-        worker_ids: list[str] = []
         for role in builtin_roles:
             record = await self.get_agent_role_by_name(str(role["name"]))
             if record is None:
@@ -1037,22 +1152,25 @@ class Repository:
                     output_contract=str(role.get("output_contract", "")),
                     builtin=True,
                 )
-            role_ids.append(record.id)
-            if record.name not in {"supervisor", "reviewer"}:
-                worker_ids.append(record.id)
         if await self.get_default_agent_graph() is None:
             by_name = {role.name: role for role in await self.list_agent_roles(enabled_only=True, limit=1000)}
-            edges: list[dict[str, str]] = []
             supervisor = by_name.get("supervisor")
             reviewer = by_name.get("reviewer")
+            workers = [
+                role
+                for role in by_name.values()
+                if role.name not in {"supervisor", "reviewer"}
+            ]
+            nodes = _graph_nodes_from_roles([role for role in [supervisor, *workers, reviewer] if role is not None])
+            node_edges: list[dict[str, str]] = []
             if supervisor is not None and reviewer is not None:
-                for worker_id in worker_ids:
-                    edges.append({"from_role": supervisor.id, "to_role": worker_id})
-                    edges.append({"from_role": worker_id, "to_role": reviewer.id})
+                for worker in workers:
+                    node_edges.append({"from_node": _slug(supervisor.name), "to_node": _slug(worker.name)})
+                    node_edges.append({"from_node": _slug(worker.name), "to_node": _slug(reviewer.name)})
             await self.create_agent_graph(
                 name="default",
-                role_ids=role_ids,
-                edges=edges,
+                nodes=nodes,
+                node_edges=node_edges,
                 default_model_profile_id=profile.id,
                 is_default=True,
             )
@@ -1080,42 +1198,122 @@ class Repository:
         for graph in await self.list_agent_graphs(limit=1000):
             graph.is_default = False
 
-    async def _validate_graph_refs(
+    async def _normalize_graph_config(
         self,
-        role_ids: list[str],
-        edges: list[dict[str, str]],
         default_model_profile_id: str | None,
         role_model_profile_ids: dict[str, str],
-        role_runtime_bindings: dict[str, str] | None = None,
-    ) -> None:
+        *,
+        graph_schema_version: int,
+        nodes: list[dict[str, Any]],
+        node_edges: list[dict[str, str]],
+        node_runtime_bindings: Mapping[str, str | RuntimeBackend],
+        node_contracts: Mapping[str, str],
+    ) -> dict[str, Any]:
         if default_model_profile_id and await self.get_model_profile(default_model_profile_id) is None:
             raise LookupError(f"model profile not found: {default_model_profile_id}")
         for profile_id in role_model_profile_ids.values():
             if await self.get_model_profile(profile_id) is None:
                 raise LookupError(f"model profile not found: {profile_id}")
-        known_roles = set(role_ids)
-        role_names: set[str] = set()
-        for role_id in role_ids:
-            role = await self.get_agent_role(role_id)
-            if role is None:
-                raise LookupError(f"agent role not found: {role_id}")
-            role_names.add(role.name)
-        for edge in edges:
-            source = edge.get("from_role")
-            target = edge.get("to_role")
-            if source not in known_roles or target not in known_roles:
-                raise ValueError("agent graph edges must reference role_ids")
-        roles_by_key = {role.id: role for role in await self.list_agent_roles(enabled_only=False, limit=1000)}
-        roles_by_key.update({role.name: role for role in roles_by_key.values()})
-        for role_key, backend in (role_runtime_bindings or {}).items():
-            role = roles_by_key.get(role_key)
-            if role is None or (role_key not in known_roles and role_key not in role_names):
-                raise LookupError(f"agent role not found in selected graph: {role_key}")
-            runtime_backend = RuntimeBackend(backend)
-            if role.name in {"supervisor", "reviewer"} and runtime_backend != RuntimeBackend.NATIVE_LANGGRAPH:
-                raise ValueError("supervisor and reviewer runtime backends must be native_langgraph")
-        if _has_cycle(role_ids, edges):
+        if graph_schema_version != 2:
+            raise ValueError("agent graph schema version must be 2")
+
+        roles = {role.id: role for role in await self.list_agent_roles(enabled_only=False, limit=1000)}
+        raw_nodes = _node_dicts(nodes)
+        raw_node_edges = _node_edge_dicts(node_edges)
+        if not raw_nodes:
+            raise ValueError("agent graph nodes are required")
+        normalized_nodes = await self._normalize_explicit_nodes(raw_nodes, roles)
+        normalized_node_edges = raw_node_edges
+
+        node_by_id = {node["id"]: node for node in normalized_nodes}
+        role_id_to_node = {node["role_id"]: node["id"] for node in normalized_nodes}
+        if len(role_id_to_node) != len(normalized_nodes):
+            raise ValueError("agent graph cannot contain duplicate role nodes")
+        for edge in normalized_node_edges:
+            if edge["from_node"] not in node_by_id or edge["to_node"] not in node_by_id:
+                raise ValueError("agent graph node_edges must reference nodes")
+        if _has_node_cycle(list(node_by_id), normalized_node_edges):
             raise ValueError("agent graph must be acyclic")
+
+        runtime_by_node = self._resolve_node_runtime_bindings(
+            normalized_nodes,
+            roles,
+            node_runtime_bindings,
+        )
+        contracts = self._resolve_node_contracts(normalized_nodes, roles, node_contracts)
+        return {
+            "graph_schema_version": 2,
+            "nodes": normalized_nodes,
+            "node_edges": normalized_node_edges,
+            "node_runtime_bindings": runtime_by_node,
+            "node_contracts": contracts,
+        }
+
+    async def _normalize_explicit_nodes(
+        self,
+        nodes: list[dict[str, Any]],
+        roles: dict[str, AgentRoleRecord],
+    ) -> list[dict[str, str]]:
+        normalized: list[dict[str, str]] = []
+        seen_ids: set[str] = set()
+        seen_roles: set[str] = set()
+        for raw_node in nodes:
+            node = AgentGraphNode.model_validate(raw_node)
+            if node.id in seen_ids:
+                raise ValueError(f"duplicate agent graph node id: {node.id}")
+            if node.role_id in seen_roles:
+                raise ValueError(f"duplicate agent graph role node: {node.role_id}")
+            role = roles.get(node.role_id)
+            if role is None:
+                raise LookupError(f"agent role not found: {node.role_id}")
+            expected_kind = _expected_node_kind(role.name)
+            if node.kind != expected_kind:
+                raise ValueError(f"agent graph node {node.id} must be {expected_kind.value}")
+            normalized.append(node.model_dump(mode="json"))
+            seen_ids.add(node.id)
+            seen_roles.add(node.role_id)
+        return normalized
+
+    def _resolve_node_runtime_bindings(
+        self,
+        nodes: list[dict[str, str]],
+        roles: dict[str, AgentRoleRecord],
+        node_runtime_bindings: Mapping[str, str | RuntimeBackend],
+    ) -> dict[str, str]:
+        resolved = {node["id"]: RuntimeBackend.NATIVE_LANGGRAPH.value for node in nodes}
+        for node_id, backend in node_runtime_bindings.items():
+            if str(node_id) not in resolved:
+                raise LookupError(f"agent graph node not found: {node_id}")
+            resolved[str(node_id)] = _runtime_backend_as_value(backend)
+        for node in nodes:
+            role = roles[node["role_id"]]
+            backend = resolved[node["id"]]
+            if role.name in {RoleName.SUPERVISOR.value, RoleName.REVIEWER.value}:
+                if backend != RuntimeBackend.NATIVE_LANGGRAPH.value:
+                    raise ValueError("supervisor and reviewer runtime backends must be native_langgraph")
+        return resolved
+
+    def _resolve_node_contracts(
+        self,
+        nodes: list[dict[str, str]],
+        roles: dict[str, AgentRoleRecord],
+        node_contracts: Mapping[str, str],
+    ) -> dict[str, str]:
+        registry = default_contract_registry()
+        resolved: dict[str, str] = {}
+        for node in nodes:
+            role = roles[node["role_id"]]
+            contract_id = str(node_contracts.get(node["id"]) or default_contract_for_role(role.name))
+            registry.validate_binding(
+                contract_id,
+                role_name=role.name,
+                node_kind=AgentGraphNodeKind(node["kind"]),
+            )
+            resolved[node["id"]] = contract_id
+        unknown = set(node_contracts) - {node["id"] for node in nodes}
+        if unknown:
+            raise LookupError(f"agent graph node not found: {sorted(unknown)}")
+        return resolved
 
 
 def to_run_response(run: RunRecord) -> RunResponse:
@@ -1190,13 +1388,13 @@ def to_agent_graph_response(graph: AgentGraphRecord) -> AgentGraphResponse:
     return AgentGraphResponse(
         id=graph.id,
         name=graph.name,
-        role_ids=graph.role_ids or [],
-        edges=[AgentGraphEdge.model_validate(edge) for edge in (graph.edges or [])],
+        graph_schema_version=graph.graph_schema_version,
+        nodes=[AgentGraphNode.model_validate(node) for node in (graph.nodes or [])],
+        node_edges=[AgentGraphNodeEdge.model_validate(edge) for edge in (graph.node_edges or [])],
         default_model_profile_id=graph.default_model_profile_id,
         role_model_profile_ids={str(key): str(value) for key, value in (graph.role_model_profile_ids or {}).items()},
-        role_runtime_bindings={
-            str(key): RuntimeBackend(value) for key, value in (graph.role_runtime_bindings or {}).items()
-        },
+        node_runtime_bindings={str(key): str(value) for key, value in (graph.node_runtime_bindings or {}).items()},
+        node_contracts={str(key): str(value) for key, value in (graph.node_contracts or {}).items()},
         is_default=graph.is_default,
         enabled=graph.enabled,
         created_at=graph.created_at,
@@ -1242,34 +1440,82 @@ def _thread_title(value: str) -> str:
     return title[:120]
 
 
-def _has_cycle(role_ids: list[str], edges: list[dict[str, str]]) -> bool:
-    children: dict[str, list[str]] = {role_id: [] for role_id in role_ids}
+def _has_node_cycle(node_ids: list[str], edges: list[dict[str, str]]) -> bool:
+    children: dict[str, list[str]] = {node_id: [] for node_id in node_ids}
     for edge in edges:
-        source = edge.get("from_role")
-        target = edge.get("to_role")
+        source = edge.get("from_node")
+        target = edge.get("to_node")
         if source in children and target in children:
             children[source].append(target)
     visiting: set[str] = set()
     visited: set[str] = set()
 
-    def visit(role_id: str) -> bool:
-        if role_id in visiting:
+    def visit(node_id: str) -> bool:
+        if node_id in visiting:
             return True
-        if role_id in visited:
+        if node_id in visited:
             return False
-        visiting.add(role_id)
-        for child in children.get(role_id, []):
+        visiting.add(node_id)
+        for child in children.get(node_id, []):
             if visit(child):
                 return True
-        visiting.remove(role_id)
-        visited.add(role_id)
+        visiting.remove(node_id)
+        visited.add(node_id)
         return False
 
-    return any(visit(role_id) for role_id in role_ids)
+    return any(visit(node_id) for node_id in node_ids)
 
 
-def _runtime_bindings_as_values(bindings: Mapping[str, str | RuntimeBackend]) -> dict[str, str]:
-    return {str(role): RuntimeBackend(backend).value for role, backend in bindings.items() if backend}
+def _node_dicts(nodes: list[Any] | None) -> list[dict[str, str]]:
+    normalized: list[dict[str, str]] = []
+    for node in nodes or []:
+        payload = node.model_dump(mode="json") if isinstance(node, AgentGraphNode) else node
+        if not isinstance(payload, dict):
+            raise ValueError("agent graph nodes must be objects")
+        normalized.append(AgentGraphNode.model_validate(payload).model_dump(mode="json"))
+    return normalized
+
+
+def _node_edge_dicts(edges: list[Any] | None) -> list[dict[str, str]]:
+    normalized: list[dict[str, str]] = []
+    for edge in edges or []:
+        payload = edge.model_dump(mode="json") if isinstance(edge, AgentGraphNodeEdge) else edge
+        if not isinstance(payload, dict):
+            raise ValueError("agent graph node_edges must be objects")
+        normalized.append(AgentGraphNodeEdge.model_validate(payload).model_dump(mode="json"))
+    return normalized
+
+
+def _expected_node_kind(role_name: str) -> AgentGraphNodeKind:
+    if role_name in {RoleName.SUPERVISOR.value, RoleName.REVIEWER.value}:
+        return AgentGraphNodeKind.CONTROL
+    return AgentGraphNodeKind.WORKER
+
+
+def _slug(value: str) -> str:
+    slug = "".join(ch.lower() if ch.isalnum() else "_" for ch in value)
+    compact = "_".join(part for part in slug.split("_") if part)
+    return compact or "node"
+
+
+def _graph_nodes_from_roles(roles: list[AgentRoleRecord]) -> list[dict[str, str]]:
+    return [
+        {
+            "id": _slug(role.name),
+            "role_id": role.id,
+            "label": role.name,
+            "kind": _expected_node_kind(role.name).value,
+        }
+        for role in roles
+    ]
+
+
+def _runtime_backend_as_value(backend: str | RuntimeBackend) -> str:
+    value = str(backend.value if isinstance(backend, RuntimeBackend) else backend)
+    known = {RuntimeBackend.NATIVE_LANGGRAPH.value, RuntimeBackend.OPENHANDS.value}
+    if value not in known:
+        raise ValueError(f"unknown runtime backend: {value}")
+    return value
 
 
 def _truncate_json_payload(payload: dict[str, Any], max_bytes: int) -> dict[str, Any]:

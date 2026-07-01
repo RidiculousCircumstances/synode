@@ -150,6 +150,13 @@
 - Agent graph runtime bindings are implemented so worker roles can execute
   through `native_langgraph` or an optional external OpenHands backend while
   Synode keeps run state, approvals, audit, artifacts, and reviewer authority.
+- AgentGraph v2 is implemented with stable `nodes`, `node_edges`,
+  `node_runtime_bindings`, and `node_contracts`. Role-level graph fields are
+  not part of the API/runtime contract.
+- Runtime node execution is recorded in `runtime_node_states` with node id,
+  role, backend id, contract id, approval/external state, and terminal node
+  status. OpenHands worker execution now flows through the same node execution
+  envelope used by future backends.
 
 ### Now:
 - MVP backend and operator UI include DB-backed runtime configuration screens
@@ -165,7 +172,7 @@
 - Runtime diagnostics expose worker concurrency, queue backend/status, and
   whether `SYNODE_SECRETS_KEY` is configured.
 - OpenHands remains disabled by default and external to Compose. Workflows that
-  bind a worker role to OpenHands require `SYNODE_OPENHANDS_ENABLED=true` and an
+  bind a worker node to OpenHands require `SYNODE_OPENHANDS_ENABLED=true` and an
   OpenHands base URL; otherwise run creation fails explicitly. The default HTTP
   mode targets local OpenHands Agent Server, with hosted Cloud V1 available only
   by explicit `SYNODE_OPENHANDS_API_MODE`.
@@ -174,6 +181,8 @@
   Synode runtime tool policy.
 - Workflow creation is surfaced from the run/thread composers as a navigation
   action, not embedded in the task composer itself.
+- Workflows UI edits graph presets as compact tables and emits only AgentGraph
+  v2 node backend/contract fields.
 
 ### Next:
 - Tune real-model prompts against broader local workloads.

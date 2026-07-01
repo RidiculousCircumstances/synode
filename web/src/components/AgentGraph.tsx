@@ -110,11 +110,29 @@ function buildGraphModel(
 
 function runtimeBindingsForRun(run: Run | null): Record<string, string> {
   const snapshot = run?.agent_graph_snapshot ?? {};
-  const bindings = snapshot["role_runtime_bindings"];
+  const bindings = snapshot["node_runtime_bindings"];
+  const nodes = snapshot["nodes"];
   if (!bindings || typeof bindings !== "object" || Array.isArray(bindings)) {
     return {};
   }
+  if (!Array.isArray(nodes)) {
+    return {};
+  }
+  const roleByNodeId = new Map(
+    nodes.flatMap((node) => {
+      if (!node || typeof node !== "object") {
+        return [];
+      }
+      const payload = node as Record<string, unknown>;
+      return typeof payload.id === "string" && typeof payload.role === "string"
+        ? [[payload.id, payload.role]]
+        : [];
+    }),
+  );
   return Object.fromEntries(
-    Object.entries(bindings).filter(([, value]) => typeof value === "string"),
-  ) as Record<string, string>;
+    Object.entries(bindings).flatMap(([nodeId, value]) => {
+      const role = roleByNodeId.get(nodeId);
+      return role && typeof value === "string" ? [[role, value]] : [];
+    }),
+  );
 }

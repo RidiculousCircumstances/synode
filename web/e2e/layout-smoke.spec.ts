@@ -275,13 +275,17 @@ test("configuration screens edit profiles roles and graph templates", async ({ p
   await page.getByRole("button", { name: "Create graph" }).click();
   const graphCreateRequest = await graphCreatePromise;
   const graphPayload = graphCreateRequest.postDataJSON() as {
-    role_ids: string[];
-    edges: Array<{ from_role: string; to_role: string }>;
+    nodes: Array<{ id: string; role_id: string }>;
+    node_edges: Array<{ from_node: string; to_node: string }>;
   };
-  expect(graphPayload.role_ids).toEqual(["role-supervisor", "role-coder", "role-reviewer"]);
-  expect(graphPayload.edges).toEqual([
-    { from_role: "role-supervisor", to_role: "role-coder" },
-    { from_role: "role-coder", to_role: "role-reviewer" },
+  expect(graphPayload.nodes.map((node) => node.role_id)).toEqual([
+    "role-supervisor",
+    "role-coder",
+    "role-reviewer",
+  ]);
+  expect(graphPayload.node_edges).toEqual([
+    { from_node: "supervisor", to_node: "coder" },
+    { from_node: "coder", to_node: "reviewer" },
   ]);
 });
 
@@ -605,14 +609,28 @@ function agentGraphsFixture() {
     {
       id: "graph-default",
       name: "default",
-      role_ids: ["role-supervisor", "role-coder", "role-reviewer"],
-      edges: [
-        { from_role: "role-supervisor", to_role: "role-coder" },
-        { from_role: "role-coder", to_role: "role-reviewer" },
+      graph_schema_version: 2,
+      nodes: [
+        { id: "supervisor", role_id: "role-supervisor", label: "supervisor", kind: "control" },
+        { id: "coder", role_id: "role-coder", label: "coder", kind: "worker" },
+        { id: "reviewer", role_id: "role-reviewer", label: "reviewer", kind: "control" },
+      ],
+      node_edges: [
+        { from_node: "supervisor", to_node: "coder" },
+        { from_node: "coder", to_node: "reviewer" },
       ],
       default_model_profile_id: "profile-ollama",
       role_model_profile_ids: {},
-      role_runtime_bindings: {},
+      node_runtime_bindings: {
+        supervisor: "native_langgraph",
+        coder: "native_langgraph",
+        reviewer: "native_langgraph",
+      },
+      node_contracts: {
+        supervisor: "supervisor_decision",
+        coder: "worker_agent_output",
+        reviewer: "reviewer_decision",
+      },
       is_default: true,
       enabled: true,
       created_at: now,

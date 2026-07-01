@@ -2850,6 +2850,44 @@ a {
   gap: 0.65rem;
 }
 
+.graph-node-table {
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.graph-node-table table {
+  width: 100%;
+  min-width: 34rem;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+
+.graph-node-table th,
+.graph-node-table td {
+  padding: 0.45rem 0.55rem;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: middle;
+}
+
+.graph-node-table th {
+  color: var(--muted-foreground);
+  font-size: 0.72rem;
+  font-weight: 760;
+  text-transform: uppercase;
+}
+
+.graph-node-table tr:last-child td {
+  border-bottom: 0;
+}
+
+.graph-node-table select,
+.graph-node-table input {
+  width: 100%;
+  min-width: 0;
+}
+
 .workflow-table-panel .panel-header {
   align-items: center;
 }

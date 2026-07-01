@@ -11,7 +11,7 @@ components:
       - Persistence, conversational threads, agent graphs, encrypted secrets, audit log, and approval state
       - Structured run read models, SSE event stream with model deltas, run cancellation, and metrics endpoints
       - Run queue adapter, Procrastinate dispatch, worker heartbeat, stale-run recovery, and exact run claims
-      - Node execution backend registry with native LangGraph and optional external OpenHands execution
+      - AgentGraph v2 node schema, code-based node contracts, node execution state, and backend registry with native LangGraph and optional external OpenHands execution
       - Optional Langfuse trace emission
   - name: web
     path: web
@@ -79,7 +79,8 @@ rules:
   - Threads are the user-facing work unit; runs are immutable execution attempts inside threads.
   - Agent role YAML files must not name concrete model IDs.
   - DB-backed model profiles, role profile bindings, and agent graph snapshots own runtime model routing.
-  - Agent graph runtime bindings select node execution backends; missing bindings mean `native_langgraph`.
+  - AgentGraph v2 nodes have stable node ids, explicit node edges, node runtime bindings, and code-registered node contracts; role-level graph fields are not part of the API/runtime contract.
+  - Agent graph node runtime bindings select execution backends; missing bindings mean `native_langgraph`.
   - External node backends must not own Synode run state, final review, approvals, or audit authority.
   - DB secrets must be encrypted with `SYNODE_SECRETS_KEY`; missing keys are explicit errors.
   - Runtime decisions must use structured model output or fail explicitly.
@@ -149,9 +150,9 @@ critical_flows:
   - name: structured-decision
     description: Supervisor and reviewer model calls must return schema-valid JSON or stop with an explicit error.
   - name: configurable-agent-graph
-    description: Run creation resolves a DB agent graph, model profile bindings, runtime backend bindings, and role records into an immutable run snapshot before execution.
+    description: Run creation resolves a DB AgentGraph v2, model profile bindings, node runtime backend bindings, node contracts, and role records into an immutable run snapshot before execution.
   - name: node-execution-backend
-    description: Synode executes worker graph roles through the snapshot-selected backend; native roles stay in LangGraph, OpenHands worker roles execute through an external adapter with explicit agent_server/cloud_v1 API mode and normalize results back into Synode state while supervisor/reviewer remain native control-plane nodes.
+    description: Synode executes worker graph nodes through the snapshot-selected backend and records runtime_node_states; native nodes stay in LangGraph, OpenHands worker nodes execute through an external adapter with explicit agent_server/cloud_v1 API mode and normalize results back into Synode state while supervisor/reviewer remain native control-plane nodes.
   - name: approval
     description: Risky native or external runtime actions pause through Synode approval state before execution can resume.
   - name: run-cancellation

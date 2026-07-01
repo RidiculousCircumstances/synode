@@ -54,6 +54,7 @@ type GraphFormState = {
   defaultProfileId: string;
   roleProfileIds: Record<string, string>;
   roleRuntimeBindings: Record<string, RuntimeBackend>;
+  roleContracts: Record<string, string>;
   isDefault: boolean;
   enabled: boolean;
 };
@@ -78,6 +79,7 @@ const EMPTY_GRAPH_FORM: GraphFormState = {
   defaultProfileId: "",
   roleProfileIds: {},
   roleRuntimeBindings: {},
+  roleContracts: {},
   isDefault: false,
   enabled: true,
 };
@@ -120,9 +122,11 @@ export default function WorkflowConfigPage() {
   const [activeTab, setActiveTab] = useState<WorkflowTab>("workflows");
 
   const graphValidation = validateGraphForm(graphForm, agents);
-  const graphEdges = buildGraphEdges(graphForm, agents);
+  const graphNodes = buildGraphNodes(graphForm, agents);
+  const graphNodeEdges = buildGraphNodeEdges(graphForm, graphNodes);
   const graphRoleModelBindings = compactBindings(graphForm.roleProfileIds);
-  const graphRoleRuntimeBindings = compactRuntimeBindings(graphForm.roleRuntimeBindings, graphForm.workerOrder);
+  const graphNodeRuntimeBindings = roleRuntimeBindingsToNodeBindings(graphForm.roleRuntimeBindings, graphNodes);
+  const graphNodeContracts = roleContractsToNodeContracts(graphForm.roleContracts, graphNodes);
 
   const closeRoleDialog = () => {
     setRoleDialogOpen(false);
@@ -211,11 +215,18 @@ export default function WorkflowConfigPage() {
     mutationFn: async () => {
       const payload = {
         name: graphForm.name.trim(),
-        role_ids: graphForm.roleIds,
-        edges: graphEdges,
         default_model_profile_id: graphForm.defaultProfileId || null,
         role_model_profile_ids: graphRoleModelBindings,
-        role_runtime_bindings: graphRoleRuntimeBindings,
+        graph_schema_version: 2,
+        nodes: graphNodes.map((node) => ({
+          id: node.id,
+          role_id: node.role_id,
+          label: node.label,
+          kind: node.kind,
+        })),
+        node_edges: graphNodeEdges,
+        node_runtime_bindings: graphNodeRuntimeBindings,
+        node_contracts: graphNodeContracts,
         is_default: graphForm.isDefault,
         enabled: graphForm.enabled,
       };
@@ -324,7 +335,7 @@ export default function WorkflowConfigPage() {
                     </td>
                     <td>
                       <span className="table-truncate">
-                        {graph.role_ids.map((roleId) => roleNameById.get(roleId) ?? roleId.slice(0, 8)).join(" -> ")}
+                        {graph.nodes.map((node) => node.label).join(" -> ")}
                       </span>
                     </td>
                     <td>
@@ -336,7 +347,7 @@ export default function WorkflowConfigPage() {
                     </td>
                     <td>{Object.keys(graph.role_model_profile_ids).length}</td>
                     <td>
-                      <span className="table-truncate">{runtimeSummary(graph.role_runtime_bindings)}</span>
+                      <span className="table-truncate">{runtimeSummary(graph.node_runtime_bindings)}</span>
                     </td>
                     <td>
                       <div className="row-actions">
@@ -634,27 +645,65 @@ export default function WorkflowConfigPage() {
                   </label>
                 ))}
               </div>
-              <div className="graph-binding-grid">
-                {graphForm.workerOrder.map((roleId) => (
-                  <label className="field" key={`${roleId}-runtime`}>
-                    <span>{roleNameById.get(roleId) ?? roleId.slice(0, 8)} runtime</span>
-                    <select
-                      value={graphForm.roleRuntimeBindings[roleId] ?? "native_langgraph"}
-                      onChange={(event) =>
-                        setGraphForm({
-                          ...graphForm,
-                          roleRuntimeBindings: {
-                            ...graphForm.roleRuntimeBindings,
-                            [roleId]: event.target.value as RuntimeBackend,
-                          },
-                        })
-                      }
-                    >
-                      <option value="native_langgraph">native LangGraph</option>
-                      <option value="openhands">OpenHands</option>
-                    </select>
-                  </label>
-                ))}
+              <div className="graph-node-table">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Node</th>
+                      <th>Backend</th>
+                      <th>Contract</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {graphForm.roleIds.map((roleId) => {
+                      const roleName = roleNameById.get(roleId) ?? roleId.slice(0, 8);
+                      const systemRole = isSystemRole(roleName);
+                      return (
+                        <tr key={`${roleId}-node-binding`}>
+                          <td>
+                            <span className="table-primary-cell compact">
+                              <strong>{roleName}</strong>
+                              <em>{systemRole ? "control" : "worker"}</em>
+                            </span>
+                          </td>
+                          <td>
+                            <select
+                              value={graphForm.roleRuntimeBindings[roleId] ?? "native_langgraph"}
+                              onChange={(event) =>
+                                setGraphForm({
+                                  ...graphForm,
+                                  roleRuntimeBindings: {
+                                    ...graphForm.roleRuntimeBindings,
+                                    [roleId]: event.target.value,
+                                  },
+                                })
+                              }
+                              disabled={systemRole}
+                            >
+                              <option value="native_langgraph">native LangGraph</option>
+                              <option value="openhands">OpenHands</option>
+                            </select>
+                          </td>
+                          <td>
+                            <input
+                              value={graphForm.roleContracts[roleId] ?? defaultContractForRole(roleName)}
+                              onChange={(event) =>
+                                setGraphForm({
+                                  ...graphForm,
+                                  roleContracts: {
+                                    ...graphForm.roleContracts,
+                                    [roleId]: event.target.value,
+                                  },
+                                })
+                              }
+                              disabled={systemRole}
+                            />
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
               </div>
               <div className="form-grid">
                 <label className="field">
@@ -668,13 +717,15 @@ export default function WorkflowConfigPage() {
                   </select>
                 </label>
                 <div className="graph-preview">
-                  {graphEdges.map((edge) => (
-                    <span key={`${edge.from_role}-${edge.to_role}`}>
-                      {`${roleNameById.get(edge.from_role) ?? edge.from_role.slice(0, 8)} -> ${
-                        roleNameById.get(edge.to_role) ?? edge.to_role.slice(0, 8)
-                      }`}
-                    </span>
-                  ))}
+                  {graphNodeEdges.map((edge) => {
+                    const source = graphNodes.find((node) => node.id === edge.from_node);
+                    const target = graphNodes.find((node) => node.id === edge.to_node);
+                    return (
+                      <span key={`${edge.from_node}-${edge.to_node}`}>
+                        {`${source?.label ?? edge.from_node} -> ${target?.label ?? edge.to_node}`}
+                      </span>
+                    );
+                  })}
                 </div>
               </div>
               {!graphValidation.ok ? <div className="error-line">{graphValidation.error}</div> : null}
@@ -716,12 +767,14 @@ function applyTemplate(form: GraphFormState, templateId: GraphTemplateId, agents
     workerOrder,
     roleProfileIds: retainBindings(form.roleProfileIds, roleIds),
     roleRuntimeBindings: retainRuntimeBindings(form.roleRuntimeBindings, workerOrder),
+    roleContracts: retainBindings(form.roleContracts, roleIds),
   };
 }
 
 function graphToForm(graph: AgentGraphConfig, agents: AgentSpec[], mode: "edit" | "clone"): GraphFormState {
   const roleById = new Map(agents.map((agent) => [agent.id, agent]));
-  const workerOrder = graph.role_ids.filter((roleId) => {
+  const roleIds = graph.nodes.map((node) => node.role_id);
+  const workerOrder = roleIds.filter((roleId) => {
     const role = roleById.get(roleId);
     return role && !isSystemRole(role.name);
   });
@@ -729,11 +782,12 @@ function graphToForm(graph: AgentGraphConfig, agents: AgentSpec[], mode: "edit" 
     id: mode === "edit" ? graph.id : null,
     name: mode === "clone" ? `Copy of ${graph.name}` : graph.name,
     templateId: "blank",
-    roleIds: graph.role_ids,
+    roleIds,
     workerOrder,
     defaultProfileId: graph.default_model_profile_id ?? "",
     roleProfileIds: graph.role_model_profile_ids,
-    roleRuntimeBindings: retainRuntimeBindings(runtimeBindingsToRoleIds(graph.role_runtime_bindings, agents), workerOrder),
+    roleRuntimeBindings: retainRuntimeBindings(nodeBindingsToRoleIds(graph.node_runtime_bindings, graph), workerOrder),
+    roleContracts: retainBindings(nodeContractsToRoleIds(graph.node_contracts, graph), roleIds),
     isDefault: mode === "edit" ? graph.is_default : false,
     enabled: graph.enabled,
   };
@@ -752,22 +806,42 @@ function updateWorkers(form: GraphFormState, select: HTMLSelectElement, agents: 
     workerOrder,
     roleProfileIds: retainBindings(form.roleProfileIds, roleIds),
     roleRuntimeBindings: retainRuntimeBindings(form.roleRuntimeBindings, workerOrder),
+    roleContracts: retainBindings(form.roleContracts, roleIds),
   };
 }
 
-function buildGraphEdges(form: GraphFormState, agents: AgentSpec[]) {
-  const byName = new Map(agents.map((agent) => [agent.name, agent]));
-  const supervisor = byName.get("supervisor");
-  const reviewer = byName.get("reviewer");
-  if (!supervisor || !reviewer || !form.workerOrder.length) {
+function buildGraphNodes(form: GraphFormState, agents: AgentSpec[]) {
+  const roleById = new Map(agents.map((agent) => [agent.id, agent]));
+  return form.roleIds.flatMap((roleId) => {
+    const role = roleById.get(roleId);
+    if (!role) {
+      return [];
+    }
+    return [
+      {
+        id: nodeIdForRole(role.name),
+        role_id: role.id,
+        label: role.name,
+        kind: isSystemRole(role.name) ? ("control" as const) : ("worker" as const),
+      },
+    ];
+  });
+}
+
+function buildGraphNodeEdges(
+  form: GraphFormState,
+  nodes: Array<{ id: string; role_id: string }>,
+) {
+  const nodeByRoleId = new Map(nodes.map((node) => [node.role_id, node.id]));
+  if (!form.workerOrder.length) {
     return [];
   }
-  const roleIds = [supervisor.id, ...form.workerOrder, reviewer.id];
-  const edges = [];
-  for (let index = 0; index < roleIds.length - 1; index += 1) {
-    edges.push({ from_role: roleIds[index], to_role: roleIds[index + 1] });
-  }
-  return edges;
+  const roleIds = form.roleIds;
+  return roleIds.slice(0, -1).flatMap((roleId, index) => {
+    const source = nodeByRoleId.get(roleId);
+    const target = nodeByRoleId.get(roleIds[index + 1]);
+    return source && target ? [{ from_node: source, to_node: target }] : [];
+  });
 }
 
 function validateGraphForm(form: GraphFormState, agents: AgentSpec[]): { ok: true } | { ok: false; error: string } {
@@ -788,11 +862,15 @@ function compactBindings(bindings: Record<string, string>) {
   return Object.fromEntries(Object.entries(bindings).filter(([, profileId]) => Boolean(profileId)));
 }
 
-function compactRuntimeBindings(bindings: Record<string, RuntimeBackend>, allowedRoleIds: string[]) {
-  const allowed = new Set(allowedRoleIds);
-  return Object.fromEntries(
-    Object.entries(bindings).filter(([roleId, backend]) => allowed.has(roleId) && backend && backend !== "native_langgraph"),
-  );
+function roleRuntimeBindingsToNodeBindings(
+  bindings: Record<string, RuntimeBackend>,
+  nodes: Array<{ id: string; role_id: string }>,
+) {
+  return Object.fromEntries(nodes.map((node) => [node.id, bindings[node.role_id] ?? "native_langgraph"]));
+}
+
+function roleContractsToNodeContracts(bindings: Record<string, string>, nodes: Array<{ id: string; role_id: string; label: string }>) {
+  return Object.fromEntries(nodes.map((node) => [node.id, bindings[node.role_id] || defaultContractForRole(node.label)]));
 }
 
 function retainBindings(bindings: Record<string, string>, roleIds: string[]) {
@@ -805,13 +883,22 @@ function retainRuntimeBindings(bindings: Record<string, RuntimeBackend>, roleIds
   return Object.fromEntries(Object.entries(bindings).filter(([roleId]) => allowed.has(roleId)));
 }
 
-function runtimeBindingsToRoleIds(bindings: Record<string, RuntimeBackend>, agents: AgentSpec[]) {
-  const roleByName = new Map(agents.map((agent) => [agent.name, agent.id]));
-  const roleIds = new Set(agents.map((agent) => agent.id));
+function nodeBindingsToRoleIds(bindings: Record<string, RuntimeBackend>, graph: AgentGraphConfig) {
+  const roleByNodeId = new Map(graph.nodes.map((node) => [node.id, node.role_id]));
   return Object.fromEntries(
-    Object.entries(bindings).flatMap(([roleKey, backend]) => {
-      const roleId = roleIds.has(roleKey) ? roleKey : roleByName.get(roleKey);
+    Object.entries(bindings).flatMap(([nodeId, backend]) => {
+      const roleId = roleByNodeId.get(nodeId);
       return roleId ? [[roleId, backend]] : [];
+    }),
+  );
+}
+
+function nodeContractsToRoleIds(bindings: Record<string, string>, graph: AgentGraphConfig) {
+  const roleByNodeId = new Map(graph.nodes.map((node) => [node.id, node.role_id]));
+  return Object.fromEntries(
+    Object.entries(bindings).flatMap(([nodeId, contract]) => {
+      const roleId = roleByNodeId.get(nodeId);
+      return roleId ? [[roleId, contract]] : [];
     }),
   );
 }
@@ -831,4 +918,22 @@ function splitLines(value: string) {
 
 function isSystemRole(roleName: string) {
   return roleName === "supervisor" || roleName === "reviewer";
+}
+
+function nodeIdForRole(roleName: string) {
+  const slug = roleName
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  return slug || "node";
+}
+
+function defaultContractForRole(roleName: string) {
+  if (roleName === "supervisor") {
+    return "supervisor_decision";
+  }
+  if (roleName === "reviewer") {
+    return "reviewer_decision";
+  }
+  return "worker_agent_output";
 }

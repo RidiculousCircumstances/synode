@@ -17,12 +17,14 @@ roles. A run stores a snapshot of the selected graph plus the selected default
 model profile and per-role profile overrides, so later role/graph edits do not
 rewrite historical runs.
 
-Agent graphs can bind worker roles to execution backends. The default backend
-is `native_langgraph`, which preserves Synode's strict graph execution. The
-optional `openhands` backend delegates that worker node to an external
-OpenHands Agent Server while Synode keeps ownership of run state, approvals,
-audit records, artifacts, and final review. Supervisor and reviewer remain
-native control-plane nodes. If a workflow selects OpenHands while
+AgentGraph v2 stores stable node ids, node edges, node runtime bindings, and
+code-registered node contracts. The API and runtime use this node graph as the
+only graph contract. The default backend is `native_langgraph`, which preserves
+Synode's strict graph execution. The optional `openhands` backend delegates a
+worker node to an external OpenHands Agent Server while Synode keeps ownership
+of run state, approvals, audit records, artifacts, durable `runtime_node_states`,
+and final review. Supervisor and reviewer remain native control-plane nodes. If
+a workflow selects OpenHands while
 `SYNODE_OPENHANDS_ENABLED=false` or the endpoint is unavailable, the run fails
 explicitly instead of falling back to native execution.
 

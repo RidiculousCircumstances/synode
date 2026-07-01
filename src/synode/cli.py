@@ -256,7 +256,7 @@ def runtime_status(check: bool = typer.Option(False, "--check")) -> None:
                 raise typer.Exit(1)
             if check and not status.queue.available:
                 raise typer.Exit(1)
-            openhands = status.execution_backends.get(RuntimeBackend.OPENHANDS)
+            openhands = status.execution_backends.get(RuntimeBackend.OPENHANDS.value)
             if check and service.settings.openhands_enabled and (openhands is None or not openhands.available):
                 raise typer.Exit(1)
             console.print_json(data=status.model_dump(mode="json"))

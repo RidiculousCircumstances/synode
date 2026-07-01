@@ -11,7 +11,8 @@ export type RunStatus =
 
 export type RunMode = "general" | "coding";
 
-export type RuntimeBackend = "native_langgraph" | "openhands";
+export type RuntimeBackend = string;
+export type AgentGraphNodeKind = "control" | "worker";
 
 export type ModelProviderType = "fake" | "ollama" | "openai_compatible";
 
@@ -195,7 +196,7 @@ export interface QueueStatus {
 }
 
 export interface ExecutionBackendStatus {
-  backend: RuntimeBackend;
+  backend: string;
   available: boolean;
   detail: string | null;
 }
@@ -208,7 +209,7 @@ export interface RuntimeStatus {
   worker_concurrency: number;
   secrets_configured: boolean;
   queue: QueueStatus;
-  execution_backends: Partial<Record<RuntimeBackend, ExecutionBackendStatus>>;
+  execution_backends: Record<string, ExecutionBackendStatus>;
   workers: WorkerHeartbeat[];
   sandbox: SandboxStatus;
 }
@@ -279,19 +280,28 @@ export interface ModelProfileTestResult {
   checks: ModelProfileTestCheck[];
 }
 
-export interface AgentGraphEdge {
-  from_role: string;
-  to_role: string;
+export interface AgentGraphNode {
+  id: string;
+  role_id: string;
+  label: string;
+  kind: AgentGraphNodeKind;
+}
+
+export interface AgentGraphNodeEdge {
+  from_node: string;
+  to_node: string;
 }
 
 export interface AgentGraph {
   id: string;
   name: string;
-  role_ids: string[];
-  edges: AgentGraphEdge[];
+  graph_schema_version: number;
+  nodes: AgentGraphNode[];
+  node_edges: AgentGraphNodeEdge[];
   default_model_profile_id: string | null;
   role_model_profile_ids: Record<string, string>;
-  role_runtime_bindings: Record<string, RuntimeBackend>;
+  node_runtime_bindings: Record<string, RuntimeBackend>;
+  node_contracts: Record<string, string>;
   is_default: boolean;
   enabled: boolean;
   created_at: string;

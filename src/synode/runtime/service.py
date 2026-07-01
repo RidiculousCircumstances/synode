@@ -27,6 +27,7 @@ from synode.persistence.repository import (
     to_thread_response,
 )
 from synode.registry import RoleRegistry, RoleSpec
+from synode.runtime.contracts import default_contract_for_role, default_contract_registry
 from synode.runtime.execution import ExecutionBackendRegistry, build_execution_backend_registry
 from synode.runtime.graph import GraphDependencies, build_graph
 from synode.runtime.queue import (
@@ -604,8 +605,9 @@ class OrchestrationService:
             final_answer = final_state.get("final_answer", "")
             async with self.database.session() as session:
                 repo = Repository(session)
+                pending_approvals = await repo.count_approvals(run_id, status=ApprovalStatus.PENDING)
                 blockers = list(review.get("blockers", []))
-                if any("Approval required" in blocker for blocker in blockers):
+                if pending_approvals:
                     await repo.set_run_status(run_id, RunStatus.WAITING_APPROVAL, final_answer=final_answer)
                     log_event(
                         logger,
@@ -1230,11 +1232,13 @@ class OrchestrationService:
             repo = Repository(session)
             graph = await repo.create_agent_graph(
                 name=payload.name,
-                role_ids=payload.role_ids,
-                edges=[edge.model_dump(mode="json") for edge in payload.edges],
+                nodes=[node.model_dump(mode="json") for node in payload.nodes],
+                node_edges=[edge.model_dump(mode="json") for edge in payload.node_edges],
+                graph_schema_version=payload.graph_schema_version,
                 default_model_profile_id=payload.default_model_profile_id,
                 role_model_profile_ids=payload.role_model_profile_ids,
-                role_runtime_bindings=payload.role_runtime_bindings,
+                node_runtime_bindings=payload.node_runtime_bindings,
+                node_contracts=payload.node_contracts,
                 is_default=payload.is_default,
                 enabled=payload.enabled,
             )
@@ -1248,8 +1252,10 @@ class OrchestrationService:
         async with self.database.session() as session:
             repo = Repository(session)
             values = payload.model_dump(exclude_unset=True)
-            if "edges" in values:
-                values["edges"] = [edge.model_dump(mode="json") for edge in payload.edges or []]
+            if "nodes" in values:
+                values["nodes"] = [node.model_dump(mode="json") for node in payload.nodes or []]
+            if "node_edges" in values:
+                values["node_edges"] = [edge.model_dump(mode="json") for edge in payload.node_edges or []]
             graph = await repo.update_agent_graph(graph_id, values)
             return to_agent_graph_response(graph)
 
@@ -1351,13 +1357,18 @@ class OrchestrationService:
                 **role_model_profile_ids,
             },
         )
-        runtime_bindings = self._resolve_role_runtime_bindings(
-            roles_by_id,
-            roles_by_name,
-            graph.role_runtime_bindings or {},
+        node_runtime_bindings = self._resolve_node_runtime_bindings(
+            snapshot,
+            graph.node_runtime_bindings or {},
         )
-        snapshot["role_runtime_bindings"] = runtime_bindings
-        if RuntimeBackend.OPENHANDS.value in runtime_bindings.values() and not self.settings.openhands_enabled:
+        node_contracts = self._resolve_node_contracts(snapshot, graph.node_contracts or {})
+        for node in snapshot["nodes"]:
+            node_id = str(node["id"])
+            node["runtime_backend"] = node_runtime_bindings[node_id]
+            node["contract_id"] = node_contracts[node_id]
+        snapshot["node_runtime_bindings"] = node_runtime_bindings
+        snapshot["node_contracts"] = node_contracts
+        if RuntimeBackend.OPENHANDS.value in node_runtime_bindings.values() and not self.settings.openhands_enabled:
             raise ValueError("agent graph requires OpenHands but SYNODE_OPENHANDS_ENABLED is false")
         profile_id = None
         if default_model_profile_id is not None:
@@ -1398,7 +1409,11 @@ class OrchestrationService:
         roles_by_id: dict[str, Any] = {}
         roles_by_name: dict[str, Any] = {}
         roles: list[dict[str, Any]] = []
-        for role_id in graph.role_ids or []:
+        nodes: list[dict[str, Any]] = []
+        for raw_node in graph.nodes or []:
+            if not isinstance(raw_node, dict):
+                continue
+            role_id = str(raw_node.get("role_id"))
             role = await repo.get_agent_role(role_id)
             if role is None:
                 raise LookupError(f"agent role not found: {role_id}")
@@ -1418,19 +1433,34 @@ class OrchestrationService:
                     "builtin": role.builtin,
                 }
             )
-        edges: list[dict[str, str]] = []
-        for edge in graph.edges or []:
-            source = roles_by_id.get(edge.get("from_role"))
-            target = roles_by_id.get(edge.get("to_role"))
+            nodes.append(
+                {
+                    "id": str(raw_node["id"]),
+                    "role_id": role.id,
+                    "role": role.name,
+                    "label": str(raw_node.get("label") or role.name),
+                    "kind": str(raw_node.get("kind") or "worker"),
+                    "output_contract": role.output_contract,
+                }
+            )
+        if not nodes:
+            raise ValueError("agent graph nodes are required")
+        node_by_id = {str(node["id"]): node for node in nodes}
+        node_edges: list[dict[str, str]] = []
+        for raw_edge in graph.node_edges or []:
+            source = node_by_id.get(str(raw_edge.get("from_node")))
+            target = node_by_id.get(str(raw_edge.get("to_node")))
             if source is None or target is None:
-                raise ValueError("agent graph edges must reference enabled graph roles")
-            edges.append({"from_role": source.name, "to_role": target.name})
+                raise ValueError("agent graph node_edges must reference enabled graph nodes")
+            node_edges.append({"from_node": str(source["id"]), "to_node": str(target["id"])})
         return (
             {
                 "id": graph.id,
                 "name": graph.name,
+                "graph_schema_version": graph.graph_schema_version,
                 "roles": roles,
-                "edges": edges,
+                "nodes": nodes,
+                "node_edges": node_edges,
             },
             roles_by_id,
             roles_by_name,
@@ -1456,22 +1486,47 @@ class OrchestrationService:
             resolved[role.name] = profile.id
         return resolved
 
-    def _resolve_role_runtime_bindings(
+    def _resolve_node_runtime_bindings(
         self,
-        roles_by_id: dict[str, Any],
-        roles_by_name: dict[str, Any],
-        bindings: dict[str, Any],
+        snapshot: dict[str, Any],
+        node_bindings: dict[str, Any],
     ) -> dict[str, str]:
-        resolved = {role.name: RuntimeBackend.NATIVE_LANGGRAPH.value for role in roles_by_name.values()}
-        for key, backend in bindings.items():
-            role = roles_by_id.get(key) or roles_by_name.get(key)
-            if role is None:
-                raise LookupError(f"agent role not found in selected graph: {key}")
-            runtime_backend = RuntimeBackend(backend)
-            if role.name in {RoleName.SUPERVISOR.value, RoleName.REVIEWER.value} and runtime_backend != RuntimeBackend.NATIVE_LANGGRAPH:
-                raise ValueError("supervisor and reviewer runtime backends must be native_langgraph")
-            resolved[role.name] = runtime_backend.value
+        nodes = snapshot.get("nodes", [])
+        node_ids = {str(node["id"]) for node in nodes if isinstance(node, dict) and node.get("id")}
+        resolved = {node_id: RuntimeBackend.NATIVE_LANGGRAPH.value for node_id in node_ids}
+        for node_id, backend in node_bindings.items():
+            if str(node_id) not in resolved:
+                raise LookupError(f"agent graph node not found: {node_id}")
+            resolved[str(node_id)] = self._runtime_backend_id(backend)
+        for node in nodes:
+            role_name = str(node["role"])
+            backend = resolved[str(node["id"])]
+            if role_name in {RoleName.SUPERVISOR.value, RoleName.REVIEWER.value}:
+                if backend != RuntimeBackend.NATIVE_LANGGRAPH.value:
+                    raise ValueError("supervisor and reviewer runtime backends must be native_langgraph")
         return resolved
+
+    def _resolve_node_contracts(self, snapshot: dict[str, Any], node_contracts: dict[str, Any]) -> dict[str, str]:
+        registry = default_contract_registry()
+        nodes = snapshot.get("nodes", [])
+        node_ids = {str(node["id"]) for node in nodes if isinstance(node, dict) and node.get("id")}
+        unknown = set(node_contracts) - node_ids
+        if unknown:
+            raise LookupError(f"agent graph node not found: {sorted(unknown)}")
+        resolved: dict[str, str] = {}
+        for node in nodes:
+            node_id = str(node["id"])
+            role_name = str(node["role"])
+            contract_id = str(node_contracts.get(node_id) or default_contract_for_role(role_name))
+            registry.validate_binding(contract_id, role_name=role_name, node_kind=str(node["kind"]))
+            resolved[node_id] = contract_id
+        return resolved
+
+    def _runtime_backend_id(self, backend: Any) -> str:
+        value = backend.value if isinstance(backend, RuntimeBackend) else str(backend)
+        if value not in self.execution_backends.known_backend_ids():
+            raise ValueError(f"unknown runtime backend: {value}")
+        return value
 
     async def _provider_for_profile(self, repo: Repository, profile: Any) -> Any:
         api_key = None

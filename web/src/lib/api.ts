@@ -296,11 +296,13 @@ export function listAgentGraphs(): Promise<AgentGraph[]> {
 
 export function createAgentGraph(payload: {
   name: string;
-  role_ids: string[];
-  edges?: Array<{ from_role: string; to_role: string }>;
+  graph_schema_version?: number;
+  nodes?: Array<{ id: string; role_id: string; label: string; kind: "control" | "worker" }>;
+  node_edges?: Array<{ from_node: string; to_node: string }>;
   default_model_profile_id?: string | null;
   role_model_profile_ids?: Record<string, string>;
-  role_runtime_bindings?: Record<string, "native_langgraph" | "openhands">;
+  node_runtime_bindings?: Record<string, string>;
+  node_contracts?: Record<string, string>;
   is_default?: boolean;
   enabled?: boolean;
 }): Promise<AgentGraph> {
@@ -314,11 +316,13 @@ export function updateAgentGraph(
   graphId: string,
   payload: {
     name?: string;
-    role_ids?: string[];
-    edges?: Array<{ from_role: string; to_role: string }>;
+    graph_schema_version?: number;
+    nodes?: Array<{ id: string; role_id: string; label: string; kind: "control" | "worker" }>;
+    node_edges?: Array<{ from_node: string; to_node: string }>;
     default_model_profile_id?: string | null;
     role_model_profile_ids?: Record<string, string>;
-    role_runtime_bindings?: Record<string, "native_langgraph" | "openhands">;
+    node_runtime_bindings?: Record<string, string>;
+    node_contracts?: Record<string, string>;
     is_default?: boolean;
     enabled?: boolean;
   },

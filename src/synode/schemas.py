@@ -33,6 +33,18 @@ class RuntimeBackend(StrEnum):
     OPENHANDS = "openhands"
 
 
+class AgentGraphNodeKind(StrEnum):
+    CONTROL = "control"
+    WORKER = "worker"
+
+
+class NodeExecutionStatus(StrEnum):
+    COMPLETED = "completed"
+    WAITING_APPROVAL = "waiting_approval"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
 class ModelProviderType(StrEnum):
     FAKE = "fake"
     OLLAMA = "ollama"
@@ -261,18 +273,32 @@ class AgentRoleResponse(BaseModel):
     updated_at: datetime
 
 
-class AgentGraphEdge(BaseModel):
-    from_role: str = Field(min_length=1)
-    to_role: str = Field(min_length=1)
+class AgentGraphNode(BaseModel):
+    id: str = Field(min_length=1)
+    role_id: str = Field(min_length=1)
+    label: str = Field(min_length=1)
+    kind: AgentGraphNodeKind
+
+    @field_validator("id", "role_id", "label")
+    @classmethod
+    def validate_node_text(cls, value: str) -> str:
+        return _non_blank(value, "agent graph node field")
+
+
+class AgentGraphNodeEdge(BaseModel):
+    from_node: str = Field(min_length=1)
+    to_node: str = Field(min_length=1)
 
 
 class AgentGraphCreateRequest(BaseModel):
     name: str = Field(min_length=1)
-    role_ids: list[str] = Field(min_length=1)
-    edges: list[AgentGraphEdge] = Field(default_factory=list)
+    graph_schema_version: int = 2
+    nodes: list[AgentGraphNode] = Field(min_length=1)
+    node_edges: list[AgentGraphNodeEdge] = Field(default_factory=list)
     default_model_profile_id: str | None = None
     role_model_profile_ids: dict[str, str] = Field(default_factory=dict)
-    role_runtime_bindings: dict[str, RuntimeBackend] = Field(default_factory=dict)
+    node_runtime_bindings: dict[str, str] = Field(default_factory=dict)
+    node_contracts: dict[str, str] = Field(default_factory=dict)
     is_default: bool = False
     enabled: bool = True
 
@@ -284,11 +310,13 @@ class AgentGraphCreateRequest(BaseModel):
 
 class AgentGraphUpdateRequest(BaseModel):
     name: str | None = None
-    role_ids: list[str] | None = None
-    edges: list[AgentGraphEdge] | None = None
+    graph_schema_version: int | None = None
+    nodes: list[AgentGraphNode] | None = None
+    node_edges: list[AgentGraphNodeEdge] | None = None
     default_model_profile_id: str | None = None
     role_model_profile_ids: dict[str, str] | None = None
-    role_runtime_bindings: dict[str, RuntimeBackend] | None = None
+    node_runtime_bindings: dict[str, str] | None = None
+    node_contracts: dict[str, str] | None = None
     is_default: bool | None = None
     enabled: bool | None = None
 
@@ -296,11 +324,13 @@ class AgentGraphUpdateRequest(BaseModel):
 class AgentGraphResponse(BaseModel):
     id: str
     name: str
-    role_ids: list[str] = Field(default_factory=list)
-    edges: list[AgentGraphEdge] = Field(default_factory=list)
+    graph_schema_version: int = 2
+    nodes: list[AgentGraphNode] = Field(default_factory=list)
+    node_edges: list[AgentGraphNodeEdge] = Field(default_factory=list)
     default_model_profile_id: str | None = None
     role_model_profile_ids: dict[str, str] = Field(default_factory=dict)
-    role_runtime_bindings: dict[str, RuntimeBackend] = Field(default_factory=dict)
+    node_runtime_bindings: dict[str, str] = Field(default_factory=dict)
+    node_contracts: dict[str, str] = Field(default_factory=dict)
     is_default: bool
     enabled: bool
     created_at: datetime
@@ -546,7 +576,7 @@ class QueueStatusResponse(BaseModel):
 
 
 class ExecutionBackendStatusResponse(BaseModel):
-    backend: RuntimeBackend
+    backend: str
     available: bool
     detail: str | None = None
 
@@ -559,7 +589,7 @@ class RuntimeStatusResponse(BaseModel):
     worker_concurrency: int
     secrets_configured: bool
     queue: QueueStatusResponse
-    execution_backends: dict[RuntimeBackend, ExecutionBackendStatusResponse] = Field(default_factory=dict)
+    execution_backends: dict[str, ExecutionBackendStatusResponse] = Field(default_factory=dict)
     workers: list[WorkerHeartbeatResponse] = Field(default_factory=list)
     sandbox: SandboxStatusResponse
 

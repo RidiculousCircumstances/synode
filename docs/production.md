@@ -46,13 +46,14 @@ If a worker crashes, stale `running` runs are requeued after
 
 ## Execution Backends
 
-Synode is the orchestration control plane. Agent graph worker roles execute
-through a node backend selected in the graph config. `native_langgraph` is the
-default and is the only backend that executes Synode's native role/tool loop
-directly. `openhands` delegates the selected worker node to an external
-OpenHands Agent Server and normalizes the result back into Synode
-events/artifacts. Supervisor and reviewer are native control-plane nodes and
-cannot be delegated to an external backend in this phase.
+Synode is the orchestration control plane. AgentGraph v2 stores stable node
+ids, node edges, code-registered node contracts, and node backend bindings.
+`native_langgraph` is the default and is the only backend that executes
+Synode's native role/tool loop directly. `openhands` delegates the selected
+worker node to an external OpenHands Agent Server and normalizes the result
+back into Synode events, artifacts, approvals, and `runtime_node_states`.
+Supervisor and reviewer are native control-plane nodes and cannot be delegated
+to an external backend in this phase.
 
 Relevant settings:
 

@@ -10,20 +10,27 @@ import httpx
 from synode.config import Settings
 from synode.persistence.database import Database
 from synode.persistence.repository import Repository
-from synode.schemas import ApprovalStatus, RuntimeBackend, ToolResult, ToolRisk
+from synode.schemas import ApprovalStatus, NodeExecutionStatus, RuntimeBackend, ToolResult, ToolRisk
 
 
 @dataclass(frozen=True)
 class NodeExecutionInput:
     run_id: str
     thread_id: str
+    node_id: str
     role: str
+    backend_id: str
+    contract_id: str
     task: str
     workspace: str | None
     mode: str
     conversation_context: list[dict[str, Any]] = field(default_factory=list)
     previous_worker_outputs: list[dict[str, Any]] = field(default_factory=list)
+    upstream_outputs: list[dict[str, Any]] = field(default_factory=list)
     agent_graph_snapshot: dict[str, Any] = field(default_factory=dict)
+    role_spec: dict[str, Any] = field(default_factory=dict)
+    plan_task: str | None = None
+    planned_tool_calls: list[dict[str, Any]] = field(default_factory=list)
     model_provider: str | None = None
     default_model_profile_id: str | None = None
     role_model_profile_ids: dict[str, str] = field(default_factory=dict)
@@ -31,26 +38,45 @@ class NodeExecutionInput:
 
 
 @dataclass(frozen=True)
+class ApprovalRequest:
+    tool_name: str
+    action: str
+    reason: str
+    payload: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class NodeExecutionOutput:
     role: str
     summary: str
+    status: NodeExecutionStatus = NodeExecutionStatus.COMPLETED
+    node_id: str | None = None
+    backend_id: str | None = None
+    contract_id: str | None = None
+    payload: dict[str, Any] = field(default_factory=dict)
     tool_results: list[ToolResult] = field(default_factory=list)
     risks: list[str] = field(default_factory=list)
     artifacts: list[dict[str, Any]] = field(default_factory=list)
     external_conversation_id: str | None = None
+    approval_request: ApprovalRequest | None = None
+    approval_id: str | None = None
+    external_state: dict[str, Any] = field(default_factory=dict)
+
+
+NodeExecutionResult = NodeExecutionOutput
 
 
 @dataclass(frozen=True)
 class ExecutionBackendStatus:
-    backend: RuntimeBackend
+    backend: str
     available: bool
     detail: str | None = None
 
 
 class NodeExecutionBackend(Protocol):
-    backend: RuntimeBackend
+    backend: str
 
-    async def execute(self, node_input: NodeExecutionInput) -> NodeExecutionOutput: ...
+    async def execute(self, node_input: NodeExecutionInput) -> NodeExecutionResult: ...
 
     async def status(self) -> ExecutionBackendStatus: ...
 
@@ -170,7 +196,7 @@ class HttpOpenHandsClient:
 
 
 class NativeLangGraphBackend:
-    backend = RuntimeBackend.NATIVE_LANGGRAPH
+    backend = RuntimeBackend.NATIVE_LANGGRAPH.value
 
     async def execute(self, node_input: NodeExecutionInput) -> NodeExecutionOutput:
         raise RuntimeError("native_langgraph node execution is handled by the LangGraph runtime")
@@ -190,7 +216,7 @@ class NativeLangGraphBackend:
 
 
 class OpenHandsNodeBackend:
-    backend = RuntimeBackend.OPENHANDS
+    backend = RuntimeBackend.OPENHANDS.value
 
     def __init__(self, settings: Settings, database: Database, client: OpenHandsClient | None = None):
         self.settings = settings
@@ -256,7 +282,7 @@ class OpenHandsNodeBackend:
             if approval is None:
                 raise RuntimeError(f"OpenHands approval not found: {approval_id}")
             if approval.status == ApprovalStatus.PENDING.value:
-                return _approval_output(node_input.role, approval_id, conversation_id, artifact)
+                return _approval_output(node_input, approval_id, conversation_id, artifact)
             if approval.status == ApprovalStatus.REJECTED.value:
                 raise RuntimeError(f"OpenHands action was rejected: {approval.decision_reason or 'rejected'}")
         await client.respond_to_confirmation(conversation_id, accept=True, reason="Approved in Synode")
@@ -293,9 +319,11 @@ class OpenHandsNodeBackend:
             raise RuntimeError("OpenHands is waiting for confirmation but reported no pending actions")
         pending_action = state.pending_actions[0]
         payload = {
-            "runtime_backend": self.backend.value,
+            "runtime_backend": self.backend,
             "external_conversation_id": state.conversation_id,
             "external_action_id": _action_id(pending_action),
+            "synode_node_id": node_input.node_id,
+            "synode_contract_id": node_input.contract_id,
             "synode_role": node_input.role,
             "openhands_status": state.status,
             "openhands_action": pending_action,
@@ -313,7 +341,9 @@ class OpenHandsNodeBackend:
                 node_input.run_id,
                 _artifact_kind(node_input.role),
                 {
-                    "runtime_backend": self.backend.value,
+                    "runtime_backend": self.backend,
+                    "node_id": node_input.node_id,
+                    "contract_id": node_input.contract_id,
                     "role": node_input.role,
                     "status": "waiting_approval",
                     "approval_id": approval.id,
@@ -321,7 +351,7 @@ class OpenHandsNodeBackend:
                     "pending_action": pending_action,
                 },
             )
-        return _approval_output(node_input.role, approval.id, state.conversation_id, payload)
+        return _approval_output(node_input, approval.id, state.conversation_id, payload)
 
     async def _complete_output(
         self,
@@ -330,7 +360,9 @@ class OpenHandsNodeBackend:
     ) -> NodeExecutionOutput:
         summary = _summary_from_state(state)
         content = {
-            "runtime_backend": self.backend.value,
+            "runtime_backend": self.backend,
+            "node_id": node_input.node_id,
+            "contract_id": node_input.contract_id,
             "role": node_input.role,
             "status": "completed",
             "external_conversation_id": state.conversation_id,
@@ -346,8 +378,14 @@ class OpenHandsNodeBackend:
         return NodeExecutionOutput(
             role=node_input.role,
             summary=summary,
+            status=NodeExecutionStatus.COMPLETED,
+            node_id=node_input.node_id,
+            backend_id=node_input.backend_id,
+            contract_id=node_input.contract_id,
+            payload={"role": node_input.role, "summary": summary},
             artifacts=[content],
             external_conversation_id=state.conversation_id,
+            external_state={"conversation_id": state.conversation_id, "status": state.status},
         )
 
     async def _load_node_artifact(self, node_input: NodeExecutionInput) -> dict[str, Any] | None:
@@ -364,19 +402,47 @@ class OpenHandsNodeBackend:
 
 class ExecutionBackendRegistry:
     def __init__(self, settings: Settings, database: Database, openhands_client: OpenHandsClient | None = None):
-        self._backends: dict[RuntimeBackend, NodeExecutionBackend] = {
-            RuntimeBackend.NATIVE_LANGGRAPH: NativeLangGraphBackend(),
-            RuntimeBackend.OPENHANDS: OpenHandsNodeBackend(settings, database, client=openhands_client),
+        self._database = database
+        self._backends: dict[str, NodeExecutionBackend] = {
+            RuntimeBackend.NATIVE_LANGGRAPH.value: NativeLangGraphBackend(),
+            RuntimeBackend.OPENHANDS.value: OpenHandsNodeBackend(settings, database, client=openhands_client),
         }
 
     def get(self, backend: RuntimeBackend | str) -> NodeExecutionBackend:
-        return self._backends[RuntimeBackend(backend)]
+        backend_id = _backend_id(backend)
+        try:
+            return self._backends[backend_id]
+        except KeyError as exc:
+            raise ValueError(f"unknown execution backend: {backend_id}") from exc
 
-    async def execute(self, backend: RuntimeBackend | str, node_input: NodeExecutionInput) -> NodeExecutionOutput:
-        return await self.get(backend).execute(node_input)
+    def known_backend_ids(self) -> set[str]:
+        return set(self._backends)
 
-    async def statuses(self) -> dict[RuntimeBackend, ExecutionBackendStatus]:
-        statuses: dict[RuntimeBackend, ExecutionBackendStatus] = {}
+    async def execute(self, backend: RuntimeBackend | str, node_input: NodeExecutionInput) -> NodeExecutionResult:
+        backend_id = _backend_id(backend)
+        try:
+            output = await self.get(backend_id).execute(node_input)
+        except asyncio.CancelledError:
+            await self._persist_node_state(node_input, NodeExecutionStatus.CANCELLED)
+            raise
+        except Exception as exc:
+            await self._persist_node_state(
+                node_input,
+                NodeExecutionStatus.FAILED,
+                last_error=str(exc),
+            )
+            raise
+        await self._persist_node_state(
+            node_input,
+            output.status,
+            approval_id=output.approval_id,
+            external_id=output.external_conversation_id,
+            external_state=output.external_state,
+        )
+        return output
+
+    async def statuses(self) -> dict[str, ExecutionBackendStatus]:
+        statuses: dict[str, ExecutionBackendStatus] = {}
         for backend, executor in self._backends.items():
             statuses[backend] = await executor.status()
         return statuses
@@ -385,28 +451,63 @@ class ExecutionBackendRegistry:
         backend = payload.get("runtime_backend")
         if backend is None:
             return
-        await self.get(RuntimeBackend(backend)).reject_approval(payload, reason)
+        await self.get(str(backend)).reject_approval(payload, reason)
 
     async def cancel_run(self, run_id: str) -> None:
         for executor in self._backends.values():
             await executor.cancel_run(run_id)
+
+    async def _persist_node_state(
+        self,
+        node_input: NodeExecutionInput,
+        status: NodeExecutionStatus,
+        *,
+        approval_id: str | None = None,
+        external_id: str | None = None,
+        external_state: dict[str, Any] | None = None,
+        last_error: str | None = None,
+    ) -> None:
+        async with self._database.session() as session:
+            repo = Repository(session)
+            await repo.upsert_runtime_node_state(
+                node_input.run_id,
+                node_input.node_id,
+                node_input.role,
+                node_input.backend_id,
+                node_input.contract_id,
+                status,
+                external_id=external_id,
+                approval_id=approval_id,
+                external_state=external_state,
+                last_error=last_error,
+            )
 
 
 def build_execution_backend_registry(settings: Settings, database: Database) -> ExecutionBackendRegistry:
     return ExecutionBackendRegistry(settings, database)
 
 
+def _backend_id(backend: RuntimeBackend | str) -> str:
+    return backend.value if isinstance(backend, RuntimeBackend) else str(backend)
+
+
 def _conversation_payload(node_input: NodeExecutionInput) -> dict[str, Any]:
     graph = node_input.agent_graph_snapshot or {}
     text = (
+        f"Synode node: {node_input.node_id}\n"
         f"Synode role: {node_input.role}\n"
+        f"Synode contract: {node_input.contract_id}\n"
         f"Mode: {node_input.mode}\n"
         f"Task: {node_input.task}\n"
+        f"Node task: {node_input.plan_task or node_input.task}\n"
         f"Workspace: {node_input.workspace or '<none>'}\n\n"
         "Execute only this Synode graph node. Return a concise summary, changed files, "
         "commands run, and any risks. Synode owns final review and approval state.\n\n"
+        f"Role spec: {node_input.role_spec}\n"
+        f"Planned tool calls: {node_input.planned_tool_calls}\n"
         f"Conversation context: {node_input.conversation_context}\n"
         f"Previous worker outputs: {node_input.previous_worker_outputs}\n"
+        f"Upstream outputs: {node_input.upstream_outputs}\n"
         f"Graph snapshot: {graph}\n"
     )
     payload: dict[str, Any] = {
@@ -414,7 +515,9 @@ def _conversation_payload(node_input: NodeExecutionInput) -> dict[str, Any]:
         "metadata": {
             "synode_run_id": node_input.run_id,
             "synode_thread_id": node_input.thread_id,
+            "synode_node_id": node_input.node_id,
             "synode_role": node_input.role,
+            "synode_contract_id": node_input.contract_id,
             "synode_trace_id": node_input.observability_trace_id,
         },
     }
@@ -509,7 +612,7 @@ def _action_id(action: dict[str, Any]) -> str | None:
 
 
 def _approval_output(
-    role: str,
+    node_input: NodeExecutionInput,
     approval_id: str,
     conversation_id: str,
     payload: Mapping[str, Any],
@@ -523,11 +626,18 @@ def _approval_output(
         approval_id=approval_id,
     )
     return NodeExecutionOutput(
-        role=role,
+        role=node_input.role,
         summary=f"OpenHands is waiting for Synode approval: {approval_id}",
+        status=NodeExecutionStatus.WAITING_APPROVAL,
+        node_id=node_input.node_id,
+        backend_id=node_input.backend_id,
+        contract_id=node_input.contract_id,
+        payload={"approval_id": approval_id, "external_conversation_id": conversation_id},
         tool_results=[result],
         risks=["approval required"],
         external_conversation_id=conversation_id,
+        approval_id=approval_id,
+        external_state={"conversation_id": conversation_id, "status": "waiting_approval"},
     )
 
 

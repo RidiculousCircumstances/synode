@@ -7,6 +7,7 @@ import httpx
 import pytest
 
 from synode.models.provider import ModelProviderRegistry
+from synode.persistence.repository import Repository
 from synode.registry import RoleRegistry
 from synode.runtime.execution import (
     ExecutionBackendRegistry,
@@ -28,6 +29,38 @@ from synode.schemas import (
 from synode.tools import build_tool_registry
 
 
+def _graph_payload(
+    roles: dict[str, object],
+    *,
+    name: str,
+    workers: list[str],
+    node_runtime_bindings: dict[str, RuntimeBackend] | None = None,
+    node_contracts: dict[str, str] | None = None,
+    default_model_profile_id: str | None = None,
+) -> AgentGraphCreateRequest:
+    role_names = ["supervisor", *workers, "reviewer"]
+    nodes = [
+        {
+            "id": role_name,
+            "role_id": getattr(roles[role_name], "id"),
+            "label": role_name,
+            "kind": "control" if role_name in {"supervisor", "reviewer"} else "worker",
+        }
+        for role_name in role_names
+    ]
+    return AgentGraphCreateRequest(
+        name=name,
+        nodes=nodes,
+        node_edges=[
+            {"from_node": role_names[index], "to_node": role_names[index + 1]}
+            for index in range(len(role_names) - 1)
+        ],
+        node_runtime_bindings=node_runtime_bindings or {},
+        node_contracts=node_contracts or {},
+        default_model_profile_id=default_model_profile_id,
+    )
+
+
 async def test_custom_graph_and_model_profile_drive_run(service, tmp_path: pathlib.Path) -> None:
     (tmp_path / "data.csv").write_text("date,revenue\n2026-06-01,10\n2026-06-02,20\n", encoding="utf-8")
     profile = await service.create_model_profile(
@@ -39,17 +72,10 @@ async def test_custom_graph_and_model_profile_drive_run(service, tmp_path: pathl
     )
     roles = {role.name: role for role in await service.list_agent_roles()}
     graph = await service.create_agent_graph(
-        AgentGraphCreateRequest(
+        _graph_payload(
+            roles,
             name="analysis-only test graph",
-            role_ids=[
-                roles["supervisor"].id,
-                roles["data_analyst"].id,
-                roles["reviewer"].id,
-            ],
-            edges=[
-                {"from_role": roles["supervisor"].id, "to_role": roles["data_analyst"].id},
-                {"from_role": roles["data_analyst"].id, "to_role": roles["reviewer"].id},
-            ],
+            workers=["data_analyst"],
             default_model_profile_id=profile.id,
         )
     )
@@ -66,21 +92,18 @@ async def test_custom_graph_and_model_profile_drive_run(service, tmp_path: pathl
     assert result.default_model_profile_id == profile.id
     assert result.agent_graph_id == graph.id
     assert result.agent_graph_snapshot["name"] == graph.name
-    assert result.agent_graph_snapshot["role_runtime_bindings"]["data_analyst"] == RuntimeBackend.NATIVE_LANGGRAPH
+    assert result.agent_graph_snapshot["node_runtime_bindings"]["data_analyst"] == RuntimeBackend.NATIVE_LANGGRAPH
     assert "data_analyst" in (result.final_answer or "")
 
 
 async def test_graph_runtime_bindings_reject_disabled_openhands(service, tmp_path: pathlib.Path) -> None:
     roles = {role.name: role for role in await service.list_agent_roles()}
     graph = await service.create_agent_graph(
-        AgentGraphCreateRequest(
+        _graph_payload(
+            roles,
             name="openhands disabled graph",
-            role_ids=[roles["supervisor"].id, roles["coder"].id, roles["reviewer"].id],
-            edges=[
-                {"from_role": roles["supervisor"].id, "to_role": roles["coder"].id},
-                {"from_role": roles["coder"].id, "to_role": roles["reviewer"].id},
-            ],
-            role_runtime_bindings={roles["coder"].id: RuntimeBackend.OPENHANDS},
+            workers=["coder"],
+            node_runtime_bindings={"coder": RuntimeBackend.OPENHANDS},
         )
     )
 
@@ -99,14 +122,11 @@ async def test_graph_runtime_bindings_reject_system_roles(service) -> None:
 
     with pytest.raises(ValueError, match="supervisor and reviewer"):
         await service.create_agent_graph(
-            AgentGraphCreateRequest(
+            _graph_payload(
+                roles,
                 name="invalid system runtime graph",
-                role_ids=[roles["supervisor"].id, roles["coder"].id, roles["reviewer"].id],
-                edges=[
-                    {"from_role": roles["supervisor"].id, "to_role": roles["coder"].id},
-                    {"from_role": roles["coder"].id, "to_role": roles["reviewer"].id},
-                ],
-                role_runtime_bindings={roles["reviewer"].id: RuntimeBackend.OPENHANDS},
+                workers=["coder"],
+                node_runtime_bindings={"reviewer": RuntimeBackend.OPENHANDS},
             )
         )
 
@@ -115,14 +135,11 @@ async def test_openhands_node_backend_completes_coding_run(settings, database, t
     service = await _openhands_service(settings, database, _FakeOpenHandsClient(["completed"]))
     roles = {role.name: role for role in await service.list_agent_roles()}
     graph = await service.create_agent_graph(
-        AgentGraphCreateRequest(
+        _graph_payload(
+            roles,
             name="openhands coder graph",
-            role_ids=[roles["supervisor"].id, roles["coder"].id, roles["reviewer"].id],
-            edges=[
-                {"from_role": roles["supervisor"].id, "to_role": roles["coder"].id},
-                {"from_role": roles["coder"].id, "to_role": roles["reviewer"].id},
-            ],
-            role_runtime_bindings={roles["coder"].id: RuntimeBackend.OPENHANDS},
+            workers=["coder"],
+            node_runtime_bindings={"coder": RuntimeBackend.OPENHANDS},
         )
     )
 
@@ -136,9 +153,69 @@ async def test_openhands_node_backend_completes_coding_run(settings, database, t
     artifacts = await service.list_artifacts(result.id)
 
     assert result.status == RunStatus.COMPLETED
-    assert result.agent_graph_snapshot["role_runtime_bindings"]["coder"] == RuntimeBackend.OPENHANDS
+    assert result.agent_graph_snapshot["node_runtime_bindings"]["coder"] == RuntimeBackend.OPENHANDS
     assert "OpenHands completed" in (result.final_answer or "")
     assert any(artifact.kind == "openhands_coder" for artifact in artifacts)
+
+
+async def test_agent_graph_v2_node_backend_contracts_drive_openhands(
+    settings,
+    database,
+    tmp_path: pathlib.Path,
+) -> None:
+    service = await _openhands_service(settings, database, _FakeOpenHandsClient(["completed"]))
+    roles = {role.name: role for role in await service.list_agent_roles()}
+    graph = await service.create_agent_graph(
+        _graph_payload(
+            roles,
+            name="openhands node binding graph",
+            workers=["coder"],
+            node_runtime_bindings={"coder": RuntimeBackend.OPENHANDS},
+            node_contracts={"coder": "worker_agent_output"},
+        )
+    )
+
+    result = await service.run_task(
+        "Let the coder node use its bound backend",
+        workspace=str(tmp_path),
+        model_provider="fake",
+        mode=RunMode.CODING,
+        agent_graph_id=graph.id,
+    )
+    async with database.session() as session:
+        states = await Repository(session).list_runtime_node_states(result.id)
+
+    assert result.status == RunStatus.COMPLETED
+    assert result.agent_graph_snapshot["node_runtime_bindings"]["coder"] == RuntimeBackend.OPENHANDS
+    assert result.agent_graph_snapshot["node_contracts"]["coder"] == "worker_agent_output"
+    assert any(
+        state.node_id == "coder"
+        and state.backend_id == RuntimeBackend.OPENHANDS.value
+        and state.contract_id == "worker_agent_output"
+        and state.status == "completed"
+        for state in states
+    )
+
+
+async def test_agent_graph_v2_rejects_duplicate_role_nodes(service) -> None:
+    roles = {role.name: role for role in await service.list_agent_roles()}
+
+    with pytest.raises(ValueError, match="duplicate agent graph role node"):
+        await service.create_agent_graph(
+            AgentGraphCreateRequest(
+                name="duplicate role node graph",
+                nodes=[
+                    {"id": "supervisor", "role_id": roles["supervisor"].id, "label": "supervisor", "kind": "control"},
+                    {"id": "coder_a", "role_id": roles["coder"].id, "label": "coder", "kind": "worker"},
+                    {"id": "coder_b", "role_id": roles["coder"].id, "label": "coder", "kind": "worker"},
+                    {"id": "reviewer", "role_id": roles["reviewer"].id, "label": "reviewer", "kind": "control"},
+                ],
+                node_edges=[
+                    {"from_node": "supervisor", "to_node": "coder_a"},
+                    {"from_node": "coder_a", "to_node": "reviewer"},
+                ],
+            )
+        )
 
 
 async def test_openhands_confirmation_uses_synode_approval(settings, database, tmp_path: pathlib.Path) -> None:
@@ -146,14 +223,11 @@ async def test_openhands_confirmation_uses_synode_approval(settings, database, t
     service = await _openhands_service(settings, database, client)
     roles = {role.name: role for role in await service.list_agent_roles()}
     graph = await service.create_agent_graph(
-        AgentGraphCreateRequest(
+        _graph_payload(
+            roles,
             name="openhands approval graph",
-            role_ids=[roles["supervisor"].id, roles["coder"].id, roles["reviewer"].id],
-            edges=[
-                {"from_role": roles["supervisor"].id, "to_role": roles["coder"].id},
-                {"from_role": roles["coder"].id, "to_role": roles["reviewer"].id},
-            ],
-            role_runtime_bindings={roles["coder"].id: RuntimeBackend.OPENHANDS},
+            workers=["coder"],
+            node_runtime_bindings={"coder": RuntimeBackend.OPENHANDS},
         )
     )
     first = await service.run_task(

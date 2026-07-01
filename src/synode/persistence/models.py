@@ -4,7 +4,17 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, String, Text, UniqueConstraint, func
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from sqlalchemy.types import JSON
@@ -243,19 +253,56 @@ class AgentGraphRecord(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     name: Mapped[str] = mapped_column(String(120), nullable=False)
-    role_ids: Mapped[list[str]] = mapped_column(JsonType().with_variant(JSONB, "postgresql"), default=list)
-    edges: Mapped[list[dict[str, str]]] = mapped_column(
+    graph_schema_version: Mapped[int] = mapped_column(Integer(), default=2, nullable=False)
+    nodes: Mapped[list[dict[str, str]]] = mapped_column(
+        JsonType().with_variant(JSONB, "postgresql"), default=list
+    )
+    node_edges: Mapped[list[dict[str, str]]] = mapped_column(
         JsonType().with_variant(JSONB, "postgresql"), default=list
     )
     default_model_profile_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     role_model_profile_ids: Mapped[dict[str, str]] = mapped_column(
         JsonType().with_variant(JSONB, "postgresql"), default=dict
     )
-    role_runtime_bindings: Mapped[dict[str, str]] = mapped_column(
+    node_runtime_bindings: Mapped[dict[str, str]] = mapped_column(
+        JsonType().with_variant(JSONB, "postgresql"), default=dict
+    )
+    node_contracts: Mapped[dict[str, str]] = mapped_column(
         JsonType().with_variant(JSONB, "postgresql"), default=dict
     )
     is_default: Mapped[bool] = mapped_column(Boolean(), default=False, nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean(), default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class RuntimeNodeStateRecord(Base):
+    __tablename__ = "runtime_node_states"
+    __table_args__ = (
+        UniqueConstraint("run_id", "node_id", "attempt", name="uq_runtime_node_state_attempt"),
+        Index("ix_runtime_node_states_run_id", "run_id"),
+        Index("ix_runtime_node_states_status", "status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    run_id: Mapped[str] = mapped_column(ForeignKey("runs.id", ondelete="CASCADE"), nullable=False)
+    node_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    role: Mapped[str] = mapped_column(String(80), nullable=False)
+    backend_id: Mapped[str] = mapped_column(String(80), nullable=False)
+    contract_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    status: Mapped[str] = mapped_column(String(40), nullable=False)
+    attempt: Mapped[int] = mapped_column(Integer(), default=1, nullable=False)
+    external_id: Mapped[str | None] = mapped_column(String(180), nullable=True)
+    approval_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    external_state: Mapped[dict[str, Any]] = mapped_column(
+        JsonType().with_variant(JSONB, "postgresql"), default=dict
+    )
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    approval_forwarded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    cancel_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
