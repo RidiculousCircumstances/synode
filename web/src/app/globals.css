@@ -1045,6 +1045,12 @@ a {
   align-items: start;
 }
 
+.settings-side-stack {
+  display: grid;
+  gap: 1rem;
+  min-width: 0;
+}
+
 .entity-modal-form {
   display: grid;
   gap: 0.7rem;

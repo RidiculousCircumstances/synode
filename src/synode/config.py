@@ -20,7 +20,8 @@ class Settings(BaseSettings):
     model_timeout_seconds: float = 60.0
     secrets_key: str | None = None
     workspace_allowlist: str = "/home/rd/proj,/tmp"
-    mcp_config_path: Path = Path(".mcp.json")
+    mcp_proxy_base_url: str = "http://127.0.0.1:8787"
+    mcp_proxy_session_ttl_seconds: int = 3600
     shell_timeout_seconds: float = 20.0
     sandbox_backend: Literal["process", "docker", "none"] = "process"
     sandbox_cpu_seconds: int = 30
@@ -109,6 +110,10 @@ class Settings(BaseSettings):
                 raise RuntimeError("SYNODE_OPENHANDS_POLL_INTERVAL_SECONDS must be greater than zero")
         if not self.workspace_allowlist_paths:
             raise RuntimeError("SYNODE_WORKSPACE_ALLOWLIST must include at least one path")
+        if not self.mcp_proxy_base_url.strip():
+            raise RuntimeError("SYNODE_MCP_PROXY_BASE_URL must not be blank")
+        if self.mcp_proxy_session_ttl_seconds <= 0:
+            raise RuntimeError("SYNODE_MCP_PROXY_SESSION_TTL_SECONDS must be greater than zero")
         if self.shell_timeout_seconds <= 0:
             raise RuntimeError("SYNODE_SHELL_TIMEOUT_SECONDS must be greater than zero")
         if self.worker_concurrency < 1:

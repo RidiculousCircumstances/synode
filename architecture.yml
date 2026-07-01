@@ -7,11 +7,11 @@ components:
       - LangGraph orchestration runtime
       - CLI and FastAPI application entrypoints
       - Model provider abstraction, DB-backed model profiles, Ollama provider, OpenAI-compatible provider, and optional model streaming
-      - Tool policy, native tools, and MCP bridge
+      - Tool policy, native tools, DB-backed MCP servers, and Synode MCP proxy
       - Persistence, conversational threads, agent graphs, encrypted secrets, audit log, and approval state
       - Structured run read models, SSE event stream with model deltas, run cancellation, and metrics endpoints
       - Run queue adapter, Procrastinate dispatch, worker heartbeat, stale-run recovery, and exact run claims
-      - AgentGraph v2 node schema, code-based node contracts, node execution state, and backend registry with native LangGraph and optional external OpenHands execution
+      - AgentGraph v2 node schema, code-based node contracts, node execution state, and backend registry with native LangGraph and optional external OpenHands execution for control and worker nodes
       - Optional Langfuse trace emission
   - name: web
     path: web
@@ -74,6 +74,7 @@ rules:
   - API and CLI must call the orchestration service, not duplicate graph behavior.
   - UI must consume structured API read models and events, not parse final_answer.
   - MCP tools must pass the same policy and audit path as native tools.
+  - MCP server configuration is DB-backed; nodes and external runtimes must use Synode's tool gateway or scoped HTTP MCP proxy instead of calling configured MCP servers directly.
   - Persistence owns mutable thread, run, event, approval, artifact, audit, and memory state.
   - The run queue transports only `run_id` jobs; the `runs` table remains the source of truth for execution state.
   - Threads are the user-facing work unit; runs are immutable execution attempts inside threads.
@@ -81,7 +82,8 @@ rules:
   - DB-backed model profiles, role profile bindings, and agent graph snapshots own runtime model routing.
   - AgentGraph v2 nodes have stable node ids, explicit node edges, node runtime bindings, and code-registered node contracts; role-level graph fields are not part of the API/runtime contract.
   - Agent graph node runtime bindings select execution backends; missing bindings mean `native_langgraph`.
-  - External node backends must not own Synode run state, final review, approvals, or audit authority.
+  - External node backends must not own Synode run state, final review, approvals, tool policy, or audit authority.
+  - Node backend bindings are valid only when the backend declares support for the node contract.
   - DB secrets must be encrypted with `SYNODE_SECRETS_KEY`; missing keys are explicit errors.
   - Runtime decisions must use structured model output or fail explicitly.
   - Structured model calls do not stream; unstructured model calls stream by default only when the selected provider explicitly supports streaming.
@@ -152,13 +154,13 @@ critical_flows:
   - name: configurable-agent-graph
     description: Run creation resolves a DB AgentGraph v2, model profile bindings, node runtime backend bindings, node contracts, and role records into an immutable run snapshot before execution.
   - name: node-execution-backend
-    description: Synode executes worker graph nodes through the snapshot-selected backend and records runtime_node_states; native nodes stay in LangGraph, OpenHands worker nodes execute through an external adapter with explicit agent_server/cloud_v1 API mode and normalize results back into Synode state while supervisor/reviewer remain native control-plane nodes.
+    description: Synode executes graph nodes through the snapshot-selected backend when that backend supports the node contract, records runtime_node_states, and validates external backend payloads back into Synode contracts before continuing graph execution.
   - name: approval
     description: Risky native or external runtime actions pause through Synode approval state before execution can resume.
   - name: run-cancellation
     description: Operator stop or approval rejection cancels the run, records a cancellation event, rejects pending approvals, and allows a new run in the same thread.
   - name: mcp-tool-call
-    description: MCP discovery and calls are normalized into governed tool invocations.
+    description: DB-backed MCP discovery registers tools as `mcp.<server>.<tool>`; native nodes call them through the in-process tool gateway, and external runtimes call only scoped Synode HTTP MCP proxy sessions that enforce allowlists, approvals, sandbox checks, and audit.
   - name: sandboxed-command-execution
     description: Risky shell, Python, filesystem write, and patch-apply mutations pass through the configured sandbox backend; Docker mode creates an isolated container with explicit network and resource limits.
   - name: fabricator-workflow

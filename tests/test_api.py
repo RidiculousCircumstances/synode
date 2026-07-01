@@ -194,6 +194,47 @@ async def test_api_tests_model_profile_capabilities(service: OrchestrationServic
     assert next(check for check in result["checks"] if check["name"] == "streaming")["supported"] is False
 
 
+async def test_api_manages_mcp_servers_and_refreshes_registry(
+    service: OrchestrationService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_discover(server_name: str, config: dict[str, object]) -> list[str]:
+        assert server_name == "local-tools"
+        assert config["transport"] == "stdio"
+        return ["repo_status"]
+
+    monkeypatch.setattr("synode.runtime.service.discover_mcp_tools", fake_discover)
+    app = create_app()
+    app.state.service = service
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://synode.test") as client:
+        created = (
+            await client.post(
+                "/mcp/servers",
+                json={
+                    "name": "local-tools",
+                    "transport": "stdio",
+                    "config": {"command": "python", "args": ["tools/example_mcp.py"]},
+                },
+            )
+        ).json()
+        discovered = (await client.post(f"/mcp/servers/{created['id']}/discover")).json()
+        listed = (await client.get("/mcp/servers")).json()
+        tools = (await client.get("/mcp/tools")).json()
+        disabled = (
+            await client.patch(f"/mcp/servers/{created['id']}", json={"enabled": False})
+        ).json()
+        disabled_tools = (await client.get("/mcp/tools")).json()
+        deleted = await client.delete(f"/mcp/servers/{created['id']}")
+
+    assert discovered["tools"] == ["repo_status"]
+    assert listed[0]["name"] == "local-tools"
+    assert "mcp.local-tools.repo_status" in tools["tools"]
+    assert disabled["enabled"] is False
+    assert "mcp.local-tools.repo_status" not in disabled_tools["tools"]
+    assert deleted.status_code == 204
+
+
 async def test_api_tests_disabled_model_profile_without_provider_calls(service: OrchestrationService) -> None:
     app = create_app()
     app.state.service = service

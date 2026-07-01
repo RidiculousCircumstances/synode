@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import hashlib
+import secrets
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
+from urllib.parse import urljoin
 
 from sqlalchemy import select
 
@@ -54,8 +58,20 @@ class ToolRegistry:
     def list_names(self) -> list[str]:
         return sorted(self._tools)
 
+    def unregister_prefix(self, prefix: str) -> None:
+        for name in [name for name in self._tools if name.startswith(prefix)]:
+            del self._tools[name]
 
-class ToolExecutor:
+
+@dataclass(frozen=True)
+class MCPProxySession:
+    session_id: str
+    url: str
+    token: str
+    tools: list[str]
+
+
+class ToolGateway:
     def __init__(
         self,
         database: Database,
@@ -71,6 +87,141 @@ class ToolExecutor:
         self.observability = observability or Observability(settings)
         self.workspace_policy = WorkspacePolicy(settings.workspace_allowlist_paths)
         self.sandbox = SandboxRunner(settings)
+
+    def allowed_tool_names(self, role_name: str) -> list[str]:
+        role = self.roles.get(role_name)
+        return [name for name in self.tools.list_names() if role.allows_tool(name)]
+
+    async def create_proxy_session(
+        self,
+        *,
+        run_id: str,
+        thread_id: str,
+        node_id: str,
+        role_name: str,
+        backend_id: str,
+        workspace: str | None,
+    ) -> MCPProxySession:
+        token = secrets.token_urlsafe(32)
+        token_hash = _token_hash(token)
+        expires_at = datetime.now(UTC) + timedelta(seconds=self.settings.mcp_proxy_session_ttl_seconds)
+        tools = self.allowed_tool_names(role_name)
+        async with self.database.session() as session:
+            repo = Repository(session)
+            record = await repo.create_mcp_proxy_session(
+                run_id=run_id,
+                thread_id=thread_id,
+                node_id=node_id,
+                role=role_name,
+                backend_id=backend_id,
+                workspace=workspace,
+                allowed_tools=tools,
+                token_hash=token_hash,
+                expires_at=expires_at,
+            )
+        base_url = self.settings.mcp_proxy_base_url.rstrip("/") + "/"
+        return MCPProxySession(
+            session_id=record.id,
+            url=urljoin(base_url, f"mcp/proxy/{record.id}"),
+            token=token,
+            tools=tools,
+        )
+
+    async def handle_mcp_proxy_request(
+        self,
+        *,
+        session_id: str,
+        token: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        request_id = payload.get("id")
+        method = str(payload.get("method") or "")
+        raw_params = payload.get("params")
+        params: dict[str, Any] = raw_params if isinstance(raw_params, dict) else {}
+        try:
+            result = await self._handle_proxy_method(session_id, token, method, params)
+            if request_id is None:
+                return None
+            return {"jsonrpc": "2.0", "id": request_id, "result": result}
+        except Exception as exc:
+            if request_id is None:
+                raise
+            return {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "error": {
+                    "code": _json_rpc_error_code(exc),
+                    "message": str(exc),
+                },
+            }
+
+    async def _handle_proxy_method(
+        self,
+        session_id: str,
+        token: str,
+        method: str,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        record = await self._validated_proxy_session(session_id, token)
+        if method == "initialize":
+            return {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "synode-mcp-proxy", "version": "0.1.0"},
+            }
+        if method in {"notifications/initialized", "ping"}:
+            return {}
+        if method == "tools/list":
+            return {
+                "tools": [
+                    {
+                        "name": name,
+                        "description": f"Synode governed tool {name}",
+                        "inputSchema": {"type": "object", "additionalProperties": True},
+                    }
+                    for name in sorted(record.allowed_tools or [])
+                    if name in self.tools.list_names()
+                ]
+            }
+        if method == "tools/call":
+            tool_name = str(params.get("name") or "")
+            arguments = params.get("arguments")
+            if not isinstance(arguments, dict):
+                arguments = {}
+            if tool_name not in set(record.allowed_tools or []):
+                raise PermissionError(f"tool is not allowed for proxy session: {tool_name}")
+            result = await self.execute(
+                record.run_id,
+                record.role,
+                record.workspace,
+                ToolCall(name=tool_name, arguments=arguments),
+            )
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": result.model_dump_json(),
+                    }
+                ],
+                "isError": not result.ok,
+                "structuredContent": result.model_dump(mode="json"),
+            }
+        raise LookupError(f"unsupported MCP proxy method: {method}")
+
+    async def _validated_proxy_session(self, session_id: str, token: str) -> Any:
+        if not token:
+            raise PermissionError("MCP proxy bearer token is required")
+        async with self.database.session() as session:
+            repo = Repository(session)
+            record = await repo.get_mcp_proxy_session(session_id)
+            if record is None:
+                raise LookupError(f"MCP proxy session not found: {session_id}")
+            if _is_expired(record.expires_at):
+                raise PermissionError(f"MCP proxy session expired: {session_id}")
+            if not secrets.compare_digest(record.token_hash, _token_hash(token)):
+                raise PermissionError("invalid MCP proxy token")
+            await repo.touch_mcp_proxy_session(session_id)
+            return record
 
     async def execute(
         self,
@@ -242,3 +393,26 @@ class ToolExecutor:
             if run is None:
                 raise LookupError(f"run not found: {run_id}")
             return run.observability_trace_id
+
+
+class ToolExecutor(ToolGateway):
+    pass
+
+
+def _token_hash(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _is_expired(expires_at: datetime) -> bool:
+    current = datetime.now(UTC)
+    if expires_at.tzinfo is None:
+        current = current.replace(tzinfo=None)
+    return expires_at <= current
+
+
+def _json_rpc_error_code(exc: Exception) -> int:
+    if isinstance(exc, PermissionError):
+        return -32001
+    if isinstance(exc, LookupError):
+        return -32601
+    return -32000

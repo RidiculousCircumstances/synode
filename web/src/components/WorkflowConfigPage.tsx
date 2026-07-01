@@ -678,7 +678,6 @@ export default function WorkflowConfigPage() {
                                   },
                                 })
                               }
-                              disabled={systemRole}
                             >
                               <option value="native_langgraph">native LangGraph</option>
                               <option value="openhands">OpenHands</option>

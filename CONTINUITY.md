@@ -157,6 +157,14 @@
   role, backend id, contract id, approval/external state, and terminal node
   status. OpenHands worker execution now flows through the same node execution
   envelope used by future backends.
+- Synode MCP proxy is implemented: MCP servers are DB-backed runtime config,
+  discovery populates `mcp.<server>.<tool>` registry entries, native nodes use
+  the in-process tool gateway, and external runtimes receive scoped HTTP MCP
+  proxy sessions instead of raw MCP server configs.
+- AgentGraph node backend selection now applies to control and worker nodes.
+  Backend/contract compatibility is validated through backend capabilities, and
+  external supervisor/reviewer payloads must validate against their Synode node
+  contracts before graph execution continues.
 
 ### Now:
 - MVP backend and operator UI include DB-backed runtime configuration screens
@@ -183,6 +191,9 @@
   action, not embedded in the task composer itself.
 - Workflows UI edits graph presets as compact tables and emits only AgentGraph
   v2 node backend/contract fields.
+- Settings UI manages MCP servers through a compact table and creation modal.
+- Workflows UI allows backend selection for supervisor, reviewer, and worker
+  nodes while keeping fixed control-node contracts read-only.
 
 ### Next:
 - Tune real-model prompts against broader local workloads.

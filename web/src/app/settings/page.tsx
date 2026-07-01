@@ -1,23 +1,37 @@
 "use client";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Pencil, Plus, Power, PowerOff, RefreshCw, Settings, X } from "lucide-react";
+import { Pencil, Plus, Power, PowerOff, RefreshCw, Settings, Trash2, X } from "lucide-react";
 import { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
 
-import { CompactList, CompactRow, MetricTile, PageHeader, Panel, StatusBadge } from "@/components/ui/primitives";
+import {
+  CompactList,
+  CompactRow,
+  CompactTable,
+  CompactTableShell,
+  MetricTile,
+  PageHeader,
+  Panel,
+  StatusBadge,
+} from "@/components/ui/primitives";
 import {
   clearApiBaseUrlCache,
+  createMcpServer,
   createModelProfile,
   createSecret,
+  deleteMcpServer,
+  discoverMcpServer,
   getApiBaseUrl,
   getModelHealth,
   getRuntimeStatus,
+  listMcpServers,
   listModelProfiles,
   listSecrets,
   testModelProfile,
+  updateMcpServer,
   updateModelProfile,
 } from "@/lib/api";
-import type { ModelProfile, ModelProfileTestResult, ModelProviderType } from "@/types";
+import type { MCPServerTransport, ModelProfile, ModelProfileTestResult, ModelProviderType } from "@/types";
 
 type ProfileFormMode = "create" | "edit";
 
@@ -32,6 +46,13 @@ type ProfileFormState = {
   enabled: boolean;
 };
 
+type McpFormState = {
+  name: string;
+  transport: MCPServerTransport;
+  configText: string;
+  enabled: boolean;
+};
+
 const EMPTY_PROFILE_FORM: ProfileFormState = {
   id: null,
   name: "",
@@ -40,6 +61,13 @@ const EMPTY_PROFILE_FORM: ProfileFormState = {
   model: "qwen2.5-coder:7b",
   secretId: "",
   optionsText: "{}",
+  enabled: true,
+};
+
+const EMPTY_MCP_FORM: McpFormState = {
+  name: "",
+  transport: "stdio",
+  configText: JSON.stringify({ command: "python", args: ["tools/example_mcp.py"] }, null, 2),
   enabled: true,
 };
 
@@ -54,22 +82,27 @@ export default function SettingsPage() {
   const runtimeQuery = useQuery({ queryKey: ["runtime-status"], queryFn: getRuntimeStatus, refetchInterval: 4000 });
   const profilesQuery = useQuery({ queryKey: ["model-profiles"], queryFn: listModelProfiles });
   const secretsQuery = useQuery({ queryKey: ["secrets"], queryFn: listSecrets });
+  const mcpServersQuery = useQuery({ queryKey: ["mcp-servers"], queryFn: listMcpServers });
   const [secretName, setSecretName] = useState("");
   const [secretValue, setSecretValue] = useState("");
   const [profileForm, setProfileForm] = useState<ProfileFormState>(EMPTY_PROFILE_FORM);
+  const [mcpForm, setMcpForm] = useState<McpFormState>(EMPTY_MCP_FORM);
   const [profileDialogMode, setProfileDialogMode] = useState<ProfileFormMode>("create");
   const [profileDialogOpen, setProfileDialogOpen] = useState(false);
+  const [mcpDialogOpen, setMcpDialogOpen] = useState(false);
   const [secretDialogOpen, setSecretDialogOpen] = useState(false);
   const [profileTestResults, setProfileTestResults] = useState<Record<string, ModelProfileTestResult>>({});
   const createParamHandled = useRef(false);
 
   const optionsParse = useMemo(() => parseOptionsJson(profileForm.optionsText), [profileForm.optionsText]);
+  const mcpConfigParse = useMemo(() => parseOptionsJson(mcpForm.configText), [mcpForm.configText]);
   const providerRequiresBaseUrl = profileForm.providerType === "openai_compatible";
   const profileFormValid =
     Boolean(profileForm.name.trim()) &&
     Boolean(profileForm.model.trim()) &&
     optionsParse.ok &&
     (!providerRequiresBaseUrl || Boolean(profileForm.baseUrl.trim()));
+  const mcpFormValid = Boolean(mcpForm.name.trim()) && mcpConfigParse.ok;
   const secretsUnavailable = runtimeQuery.data ? !runtimeQuery.data.secrets_configured : false;
 
   const resetSecretForm = () => {
@@ -81,6 +114,11 @@ export default function SettingsPage() {
     setProfileDialogOpen(false);
     setProfileDialogMode("create");
     setProfileForm(EMPTY_PROFILE_FORM);
+  };
+
+  const closeMcpDialog = () => {
+    setMcpDialogOpen(false);
+    setMcpForm(EMPTY_MCP_FORM);
   };
 
   const openCreateProfileDialog = () => {
@@ -147,6 +185,42 @@ export default function SettingsPage() {
       void queryClient.invalidateQueries({ queryKey: ["model-health"] });
     },
   });
+  const mcpMutation = useMutation({
+    mutationFn: () => {
+      if (!mcpConfigParse.ok) {
+        throw new Error(mcpConfigParse.error);
+      }
+      return createMcpServer({
+        name: mcpForm.name.trim(),
+        transport: mcpForm.transport,
+        config: mcpConfigParse.value,
+        enabled: mcpForm.enabled,
+      });
+    },
+    onSuccess: () => {
+      closeMcpDialog();
+      void queryClient.invalidateQueries({ queryKey: ["mcp-servers"] });
+    },
+  });
+  const toggleMcpMutation = useMutation({
+    mutationFn: ({ serverId, enabled }: { serverId: string; enabled: boolean }) =>
+      updateMcpServer(serverId, { enabled }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["mcp-servers"] });
+    },
+  });
+  const discoverMcpMutation = useMutation({
+    mutationFn: discoverMcpServer,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["mcp-servers"] });
+    },
+  });
+  const deleteMcpMutation = useMutation({
+    mutationFn: deleteMcpServer,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["mcp-servers"] });
+    },
+  });
   const toggleProfileMutation = useMutation({
     mutationFn: ({ profileId, enabled }: { profileId: string; enabled: boolean }) =>
       updateModelProfile(profileId, { enabled }),
@@ -176,6 +250,14 @@ export default function SettingsPage() {
       return;
     }
     profileMutation.mutate();
+  };
+
+  const submitMcpServer = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!mcpFormValid) {
+      return;
+    }
+    mcpMutation.mutate();
   };
 
   return (
@@ -297,35 +379,194 @@ export default function SettingsPage() {
           {profilesQuery.error ? <div className="error-line">{profilesQuery.error.message}</div> : null}
           {testProfileMutation.error ? <div className="error-line">{testProfileMutation.error.message}</div> : null}
         </Panel>
-        <Panel
-          title="Secrets"
-          action={
-            <button
-              type="button"
-              className="primary-button"
-              onClick={() => setSecretDialogOpen(true)}
-              disabled={secretsUnavailable}
-            >
-              <Plus size={15} aria-hidden />
-              New secret
-            </button>
-          }
-        >
-          {secretsUnavailable ? (
-            <div className="error-line">SYNODE_SECRETS_KEY is required before DB secrets can be created.</div>
-          ) : null}
-          <CompactList>
-            {(secretsQuery.data ?? []).map((secret) => (
-              <CompactRow key={secret.id} className="provider-row">
-                <strong>{secret.name}</strong>
-                <StatusBadge value={secret.secret_set ? "set" : "empty"} />
-                <span>{new Date(secret.updated_at).toLocaleString()}</span>
-              </CompactRow>
-            ))}
-          </CompactList>
-          {secretsQuery.error ? <div className="error-line">{secretsQuery.error.message}</div> : null}
-        </Panel>
+        <div className="settings-side-stack">
+          <Panel
+            title="MCP servers"
+            action={
+              <div className="panel-action-cluster">
+                <button
+                  type="button"
+                  className="secondary-button"
+                  onClick={() => void mcpServersQuery.refetch()}
+                >
+                  <RefreshCw size={15} aria-hidden />
+                  Refresh
+                </button>
+                <button type="button" className="primary-button" onClick={() => setMcpDialogOpen(true)}>
+                  <Plus size={15} aria-hidden />
+                  New server
+                </button>
+              </div>
+            }
+          >
+            <CompactTableShell minWidth="44rem">
+              <CompactTable>
+                <thead>
+                  <tr>
+                    <th>Server</th>
+                    <th>Status</th>
+                    <th>Transport</th>
+                    <th>Tools</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(mcpServersQuery.data ?? []).map((server) => (
+                    <tr key={server.id}>
+                      <td>
+                        <span className="table-primary-cell compact">
+                          <strong>{server.name}</strong>
+                          <em>{server.last_error ?? server.last_discovered_at ?? "not discovered"}</em>
+                        </span>
+                      </td>
+                      <td>
+                        <StatusBadge value={server.enabled ? "enabled" : "disabled"} />
+                      </td>
+                      <td>{server.transport}</td>
+                      <td>{server.tools.length}</td>
+                      <td>
+                        <div className="row-actions">
+                          <button
+                            type="button"
+                            className="secondary-button compact-control"
+                            onClick={() => discoverMcpMutation.mutate(server.id)}
+                            disabled={discoverMcpMutation.isPending}
+                          >
+                            <RefreshCw
+                              size={14}
+                              aria-hidden
+                              className={discoverMcpMutation.isPending ? "spin" : undefined}
+                            />
+                            Discover
+                          </button>
+                          <button
+                            type="button"
+                            className="secondary-button compact-control"
+                            onClick={() =>
+                              toggleMcpMutation.mutate({ serverId: server.id, enabled: !server.enabled })
+                            }
+                            disabled={toggleMcpMutation.isPending}
+                          >
+                            {server.enabled ? <PowerOff size={14} aria-hidden /> : <Power size={14} aria-hidden />}
+                            {server.enabled ? "Disable" : "Enable"}
+                          </button>
+                          <button
+                            type="button"
+                            className="secondary-button compact-control danger-button"
+                            onClick={() => deleteMcpMutation.mutate(server.id)}
+                            disabled={deleteMcpMutation.isPending}
+                          >
+                            <Trash2 size={14} aria-hidden />
+                            Delete
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </CompactTable>
+            </CompactTableShell>
+            {mcpServersQuery.error ? <div className="error-line">{mcpServersQuery.error.message}</div> : null}
+            {discoverMcpMutation.error ? <div className="error-line">{discoverMcpMutation.error.message}</div> : null}
+            {deleteMcpMutation.error ? <div className="error-line">{deleteMcpMutation.error.message}</div> : null}
+          </Panel>
+          <Panel
+            title="Secrets"
+            action={
+              <button
+                type="button"
+                className="primary-button"
+                onClick={() => setSecretDialogOpen(true)}
+                disabled={secretsUnavailable}
+              >
+                <Plus size={15} aria-hidden />
+                New secret
+              </button>
+            }
+          >
+            {secretsUnavailable ? (
+              <div className="error-line">SYNODE_SECRETS_KEY is required before DB secrets can be created.</div>
+            ) : null}
+            <CompactList>
+              {(secretsQuery.data ?? []).map((secret) => (
+                <CompactRow key={secret.id} className="provider-row">
+                  <strong>{secret.name}</strong>
+                  <StatusBadge value={secret.secret_set ? "set" : "empty"} />
+                  <span>{new Date(secret.updated_at).toLocaleString()}</span>
+                </CompactRow>
+              ))}
+            </CompactList>
+            {secretsQuery.error ? <div className="error-line">{secretsQuery.error.message}</div> : null}
+          </Panel>
+        </div>
       </div>
+      {mcpDialogOpen ? (
+        <div className="modal-layer" role="dialog" aria-modal="true" aria-labelledby="mcp-title">
+          <button type="button" className="modal-backdrop" aria-label="Close dialog" onClick={closeMcpDialog} />
+          <section className="modal-panel">
+            <header className="modal-header">
+              <h2 id="mcp-title">New MCP server</h2>
+              <button type="button" className="icon-button" aria-label="Close dialog" onClick={closeMcpDialog}>
+                <X size={16} aria-hidden />
+              </button>
+            </header>
+            <form className="entity-modal-form" onSubmit={submitMcpServer}>
+              <div className="form-grid">
+                <label className="field">
+                  <span>Name</span>
+                  <input value={mcpForm.name} onChange={(event) => setMcpForm({ ...mcpForm, name: event.target.value })} />
+                </label>
+                <label className="field">
+                  <span>Transport</span>
+                  <select
+                    value={mcpForm.transport}
+                    onChange={(event) =>
+                      setMcpForm({ ...mcpForm, transport: event.target.value as MCPServerTransport })
+                    }
+                  >
+                    <option value="stdio">stdio</option>
+                    <option value="sse">sse</option>
+                    <option value="streamable_http">streamable http</option>
+                  </select>
+                </label>
+              </div>
+              <label className="field">
+                <span>Config JSON</span>
+                <textarea
+                  value={mcpForm.configText}
+                  onChange={(event) => setMcpForm({ ...mcpForm, configText: event.target.value })}
+                  rows={7}
+                />
+              </label>
+              <label className="field">
+                <span>Enabled</span>
+                <select
+                  value={mcpForm.enabled ? "true" : "false"}
+                  onChange={(event) => setMcpForm({ ...mcpForm, enabled: event.target.value === "true" })}
+                >
+                  <option value="true">enabled</option>
+                  <option value="false">disabled</option>
+                </select>
+              </label>
+              {!mcpConfigParse.ok ? <div className="error-line">{mcpConfigParse.error}</div> : null}
+              {mcpMutation.error ? <div className="error-line">{mcpMutation.error.message}</div> : null}
+              <footer className="modal-actions">
+                <button type="button" className="secondary-button" onClick={closeMcpDialog} disabled={mcpMutation.isPending}>
+                  Cancel
+                </button>
+                <button className="primary-button" type="submit" disabled={mcpMutation.isPending || !mcpFormValid}>
+                  {mcpMutation.isPending ? (
+                    <RefreshCw size={15} aria-hidden className="spin" />
+                  ) : (
+                    <Plus size={15} aria-hidden />
+                  )}
+                  Create server
+                </button>
+              </footer>
+            </form>
+          </section>
+        </div>
+      ) : null}
       {profileDialogOpen ? (
         <div className="modal-layer" role="dialog" aria-modal="true" aria-labelledby="profile-title">
           <button type="button" className="modal-backdrop" aria-label="Close dialog" onClick={closeProfileDialog} />

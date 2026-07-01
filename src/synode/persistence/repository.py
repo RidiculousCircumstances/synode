@@ -13,6 +13,8 @@ from synode.persistence.models import (
     AgentRoleRecord,
     ApprovalRecord,
     ArtifactRecord,
+    MCPProxySessionRecord,
+    MCPServerRecord,
     ModelProfileRecord,
     RunEventRecord,
     RunRecord,
@@ -24,6 +26,7 @@ from synode.persistence.models import (
     WorkerHeartbeatRecord,
     new_id,
 )
+from synode.runtime.capabilities import validate_backend_contract
 from synode.runtime.contracts import default_contract_for_role, default_contract_registry
 from synode.schemas import (
     AgentGraphNode,
@@ -33,6 +36,8 @@ from synode.schemas import (
     AgentRoleResponse,
     ApprovalStatus,
     EventType,
+    MCPServerResponse,
+    MCPServerTransport,
     ModelProfileResponse,
     ModelProviderType,
     NodeExecutionStatus,
@@ -960,6 +965,130 @@ class Repository:
         await self.session.flush()
         return record
 
+    async def create_mcp_server(
+        self,
+        name: str,
+        transport: MCPServerTransport,
+        config: dict[str, Any],
+        enabled: bool = True,
+    ) -> MCPServerRecord:
+        record = MCPServerRecord(
+            id=new_id(),
+            name=name,
+            transport=transport.value,
+            config=config,
+            enabled=enabled,
+            tools=[],
+        )
+        self.session.add(record)
+        await self.session.flush()
+        return record
+
+    async def get_mcp_server(self, server_id: str | None) -> MCPServerRecord | None:
+        if server_id is None:
+            return None
+        return await self.session.get(MCPServerRecord, server_id)
+
+    async def list_mcp_servers(
+        self,
+        enabled_only: bool = False,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[MCPServerRecord]:
+        query = select(MCPServerRecord).order_by(MCPServerRecord.name)
+        if enabled_only:
+            query = query.where(MCPServerRecord.enabled.is_(True))
+        result = await self.session.execute(query.limit(limit).offset(offset))
+        return list(result.scalars().all())
+
+    async def update_mcp_server(self, server_id: str, values: dict[str, Any]) -> MCPServerRecord:
+        record = await self.get_mcp_server(server_id)
+        if record is None:
+            raise LookupError(f"MCP server not found: {server_id}")
+        config_changed = "config" in values or "transport" in values
+        for key, value in values.items():
+            if value is None:
+                continue
+            if key == "transport" and isinstance(value, MCPServerTransport):
+                value = value.value
+            setattr(record, key, value)
+        if config_changed:
+            record.tools = []
+            record.last_error = None
+            record.last_discovered_at = None
+        record.updated_at = datetime.now(UTC)
+        await self.session.flush()
+        return record
+
+    async def delete_mcp_server(self, server_id: str) -> None:
+        record = await self.get_mcp_server(server_id)
+        if record is None:
+            raise LookupError(f"MCP server not found: {server_id}")
+        await self.session.delete(record)
+        await self.session.flush()
+
+    async def record_mcp_discovery(
+        self,
+        server_id: str,
+        *,
+        tools: list[str] | None = None,
+        error: str | None = None,
+    ) -> MCPServerRecord:
+        record = await self.get_mcp_server(server_id)
+        if record is None:
+            raise LookupError(f"MCP server not found: {server_id}")
+        if tools is not None:
+            record.tools = sorted(set(tools))
+            record.last_error = None
+            record.last_discovered_at = datetime.now(UTC)
+        if error is not None:
+            record.last_error = error
+            record.last_discovered_at = datetime.now(UTC)
+        record.updated_at = datetime.now(UTC)
+        await self.session.flush()
+        return record
+
+    async def create_mcp_proxy_session(
+        self,
+        *,
+        run_id: str,
+        thread_id: str,
+        node_id: str,
+        role: str,
+        backend_id: str,
+        workspace: str | None,
+        allowed_tools: list[str],
+        token_hash: str,
+        expires_at: datetime,
+    ) -> MCPProxySessionRecord:
+        record = MCPProxySessionRecord(
+            id=new_id(),
+            run_id=run_id,
+            thread_id=thread_id,
+            node_id=node_id,
+            role=role,
+            backend_id=backend_id,
+            workspace=workspace,
+            allowed_tools=sorted(set(allowed_tools)),
+            token_hash=token_hash,
+            expires_at=expires_at,
+        )
+        self.session.add(record)
+        await self.session.flush()
+        return record
+
+    async def get_mcp_proxy_session(self, session_id: str | None) -> MCPProxySessionRecord | None:
+        if session_id is None:
+            return None
+        return await self.session.get(MCPProxySessionRecord, session_id)
+
+    async def touch_mcp_proxy_session(self, session_id: str) -> None:
+        record = await self.get_mcp_proxy_session(session_id)
+        if record is None:
+            raise LookupError(f"MCP proxy session not found: {session_id}")
+        record.last_used_at = datetime.now(UTC)
+        await self.session.flush()
+
     async def create_agent_role(
         self,
         name: str,
@@ -1235,12 +1364,13 @@ class Repository:
         if _has_node_cycle(list(node_by_id), normalized_node_edges):
             raise ValueError("agent graph must be acyclic")
 
+        contracts = self._resolve_node_contracts(normalized_nodes, roles, node_contracts)
         runtime_by_node = self._resolve_node_runtime_bindings(
             normalized_nodes,
-            roles,
             node_runtime_bindings,
         )
-        contracts = self._resolve_node_contracts(normalized_nodes, roles, node_contracts)
+        for node_id, backend in runtime_by_node.items():
+            validate_backend_contract(backend, contracts[node_id])
         return {
             "graph_schema_version": 2,
             "nodes": normalized_nodes,
@@ -1277,7 +1407,6 @@ class Repository:
     def _resolve_node_runtime_bindings(
         self,
         nodes: list[dict[str, str]],
-        roles: dict[str, AgentRoleRecord],
         node_runtime_bindings: Mapping[str, str | RuntimeBackend],
     ) -> dict[str, str]:
         resolved = {node["id"]: RuntimeBackend.NATIVE_LANGGRAPH.value for node in nodes}
@@ -1285,12 +1414,6 @@ class Repository:
             if str(node_id) not in resolved:
                 raise LookupError(f"agent graph node not found: {node_id}")
             resolved[str(node_id)] = _runtime_backend_as_value(backend)
-        for node in nodes:
-            role = roles[node["role_id"]]
-            backend = resolved[node["id"]]
-            if role.name in {RoleName.SUPERVISOR.value, RoleName.REVIEWER.value}:
-                if backend != RuntimeBackend.NATIVE_LANGGRAPH.value:
-                    raise ValueError("supervisor and reviewer runtime backends must be native_langgraph")
         return resolved
 
     def _resolve_node_contracts(
@@ -1365,6 +1488,21 @@ def to_model_profile_response(profile: ModelProfileRecord) -> ModelProfileRespon
         enabled=profile.enabled,
         created_at=profile.created_at,
         updated_at=profile.updated_at,
+    )
+
+
+def to_mcp_server_response(server: MCPServerRecord) -> MCPServerResponse:
+    return MCPServerResponse(
+        id=server.id,
+        name=server.name,
+        transport=MCPServerTransport(server.transport),
+        config=server.config or {},
+        enabled=server.enabled,
+        tools=list(server.tools or []),
+        last_error=server.last_error,
+        last_discovered_at=server.last_discovered_at,
+        created_at=server.created_at,
+        updated_at=server.updated_at,
     )
 
 

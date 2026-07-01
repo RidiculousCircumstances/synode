@@ -21,6 +21,9 @@ from synode.schemas import (
     ApprovalResponse,
     ApprovalStatus,
     ArtifactResponse,
+    MCPServerCreateRequest,
+    MCPServerResponse,
+    MCPServerUpdateRequest,
     ModelProfileCreateRequest,
     ModelProfileResponse,
     ModelProfileTestResponse,
@@ -507,6 +510,67 @@ def create_app() -> FastAPI:
     async def mcp_tools(request: Request) -> dict[str, list[str]]:
         service: OrchestrationService = request.app.state.service
         return {"tools": [name for name in service.tools.list_names() if name.startswith("mcp.")]}
+
+    @app.get("/mcp/servers", response_model=list[MCPServerResponse])
+    async def list_mcp_servers(
+        request: Request,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[MCPServerResponse]:
+        service: OrchestrationService = request.app.state.service
+        return await service.list_mcp_servers(limit=_page_limit(limit), offset=_page_offset(offset))
+
+    @app.post("/mcp/servers", response_model=MCPServerResponse)
+    async def create_mcp_server(payload: MCPServerCreateRequest, request: Request) -> MCPServerResponse:
+        service: OrchestrationService = request.app.state.service
+        try:
+            return await service.create_mcp_server(payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.patch("/mcp/servers/{server_id}", response_model=MCPServerResponse)
+    async def update_mcp_server(
+        server_id: str,
+        payload: MCPServerUpdateRequest,
+        request: Request,
+    ) -> MCPServerResponse:
+        service: OrchestrationService = request.app.state.service
+        try:
+            return await service.update_mcp_server(server_id, payload)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.delete("/mcp/servers/{server_id}", status_code=204)
+    async def delete_mcp_server(server_id: str, request: Request) -> None:
+        service: OrchestrationService = request.app.state.service
+        try:
+            await service.delete_mcp_server(server_id)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/mcp/servers/{server_id}/discover", response_model=MCPServerResponse)
+    async def discover_mcp_server(server_id: str, request: Request) -> MCPServerResponse:
+        service: OrchestrationService = request.app.state.service
+        try:
+            return await service.discover_mcp_server(server_id)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    @app.post("/mcp/proxy/{session_id}")
+    async def mcp_proxy(session_id: str, request: Request) -> dict[str, object] | None:
+        service: OrchestrationService = request.app.state.service
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="MCP proxy request must be a JSON object")
+        return await service.handle_mcp_proxy_request(
+            session_id=session_id,
+            authorization=request.headers.get("authorization"),
+            payload=payload,
+        )
 
     @app.get("/models/health")
     async def models_health(request: Request, limit: int = 50, offset: int = 0) -> list[dict[str, object]]:

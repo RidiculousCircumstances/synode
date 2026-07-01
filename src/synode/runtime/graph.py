@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from langgraph.constants import END, START
@@ -170,24 +170,36 @@ def _intake_node(deps: GraphDependencies):
 
 def _supervisor_node(deps: GraphDependencies):
     async def node(state: SynodeState) -> SynodeState:
-        provider = await _provider_for_role(deps, state, RoleName.SUPERVISOR.value)
-        decision = await _invoke_structured(
-            deps,
-            state,
-            provider,
-            SupervisorDecision,
-            ModelRequest(
-                role=RoleName.SUPERVISOR.value,
-                prompt=_supervisor_prompt(state, deps),
-                context={
-                    "mode": state["mode"],
-                    "task": state["task"],
-                    "conversation_context": state.get("conversation_context", []),
-                },
-                response_schema=SupervisorDecision,
-                model_options=provider.model_options or {},
-            ),
-        )
+        backend = _role_runtime_backend(state, RoleName.SUPERVISOR.value)
+        if backend != "native_langgraph":
+            if deps.execution_backends is None:
+                raise RuntimeError("execution backend registry is not configured")
+            backend_output = await deps.execution_backends.execute(
+                backend,
+                await _external_node_execution_input(deps, state, RoleName.SUPERVISOR.value),
+            )
+            if backend_output.status != NodeExecutionStatus.COMPLETED:
+                raise RuntimeError(f"external supervisor did not complete: {backend_output.status.value}")
+            decision = SupervisorDecision.model_validate(backend_output.payload)
+        else:
+            provider = await _provider_for_role(deps, state, RoleName.SUPERVISOR.value)
+            decision = await _invoke_structured(
+                deps,
+                state,
+                provider,
+                SupervisorDecision,
+                ModelRequest(
+                    role=RoleName.SUPERVISOR.value,
+                    prompt=_supervisor_prompt(state, deps),
+                    context={
+                        "mode": state["mode"],
+                        "task": state["task"],
+                        "conversation_context": state.get("conversation_context", []),
+                    },
+                    response_schema=SupervisorDecision,
+                    model_options=provider.model_options or {},
+                ),
+            )
         _validate_supervisor_decision(decision, deps, state)
         role_tool_calls = {
             step.role: [call.model_dump(mode="json") for call in step.tool_calls]
@@ -253,7 +265,7 @@ async def _run_worker_role(deps: GraphDependencies, state: SynodeState, role: st
             raise RuntimeError("execution backend registry is not configured")
         backend_output = await deps.execution_backends.execute(
             backend,
-            _node_execution_input(state, role),
+            await _external_node_execution_input(deps, state, role),
         )
         return AgentOutput(
             role=backend_output.role,
@@ -461,25 +473,44 @@ def _verify_node(deps: GraphDependencies):
 def _reviewer_node(deps: GraphDependencies):
     async def node(state: SynodeState) -> SynodeState:
         blockers, advisory = _precheck_review_findings(state)
-        provider = await _provider_for_role(deps, state, RoleName.REVIEWER.value)
-        decision = await _invoke_structured(
-            deps,
-            state,
-            provider,
-            ReviewerDecision,
-            ModelRequest(
-                role=RoleName.REVIEWER.value,
-                prompt="Review worker outputs, patch results, verification, and policy signals.",
-                context={
-                    "blockers": blockers,
-                    "advisory": advisory,
-                    "conversation_context": state.get("conversation_context", []),
-                    "state": _compact_state_for_review(state),
-                },
-                response_schema=ReviewerDecision,
-                model_options=provider.model_options or {},
-            ),
-        )
+        backend = _role_runtime_backend(state, RoleName.REVIEWER.value)
+        if backend != "native_langgraph":
+            if deps.execution_backends is None:
+                raise RuntimeError("execution backend registry is not configured")
+            backend_output = await deps.execution_backends.execute(
+                backend,
+                await _external_node_execution_input(
+                    deps,
+                    {
+                        **state,
+                        "review_precheck": {"blockers": blockers, "advisory": advisory},
+                    },
+                    RoleName.REVIEWER.value,
+                ),
+            )
+            if backend_output.status != NodeExecutionStatus.COMPLETED:
+                raise RuntimeError(f"external reviewer did not complete: {backend_output.status.value}")
+            decision = ReviewerDecision.model_validate(backend_output.payload)
+        else:
+            provider = await _provider_for_role(deps, state, RoleName.REVIEWER.value)
+            decision = await _invoke_structured(
+                deps,
+                state,
+                provider,
+                ReviewerDecision,
+                ModelRequest(
+                    role=RoleName.REVIEWER.value,
+                    prompt="Review worker outputs, patch results, verification, and policy signals.",
+                    context={
+                        "blockers": blockers,
+                        "advisory": advisory,
+                        "conversation_context": state.get("conversation_context", []),
+                        "state": _compact_state_for_review(state),
+                    },
+                    response_schema=ReviewerDecision,
+                    model_options=provider.model_options or {},
+                ),
+            )
         merged_blockers = [*blockers, *decision.blockers]
         verdict = ReviewerVerdict.BLOCK if merged_blockers else decision.verdict
         review = {
@@ -793,7 +824,34 @@ def _role_runtime_backend(state: SynodeState | dict[str, Any], role: str) -> str
     return "native_langgraph"
 
 
-def _node_execution_input(state: SynodeState, role: str) -> NodeExecutionInput:
+async def _external_node_execution_input(
+    deps: GraphDependencies,
+    state: SynodeState | dict[str, Any],
+    role: str,
+) -> NodeExecutionInput:
+    node_input = _node_execution_input(state, role)
+    if deps.execution_backends is None:
+        return node_input
+    capabilities = deps.execution_backends.capabilities(node_input.backend_id)
+    if not capabilities.supports_tool_proxy:
+        return node_input
+    proxy = await deps.tool_executor.create_proxy_session(
+        run_id=node_input.run_id,
+        thread_id=node_input.thread_id,
+        node_id=node_input.node_id,
+        role_name=node_input.role,
+        backend_id=node_input.backend_id,
+        workspace=node_input.workspace,
+    )
+    return replace(
+        node_input,
+        tool_proxy_url=proxy.url,
+        tool_proxy_token=proxy.token,
+        tool_proxy_tools=proxy.tools,
+    )
+
+
+def _node_execution_input(state: SynodeState | dict[str, Any], role: str) -> NodeExecutionInput:
     node = _node_for_role(state, role)
     plan_step = _plan_step_for_role(state, role)
     node_id = str(node.get("id") or role)
@@ -813,7 +871,7 @@ def _node_execution_input(state: SynodeState, role: str) -> NodeExecutionInput:
         previous_worker_outputs=state.get("worker_outputs", []),
         upstream_outputs=state.get("worker_outputs", []),
         agent_graph_snapshot=state.get("agent_graph_snapshot", {}),
-        role_spec=_role_spec_for_role(state, role),
+        role_spec=_role_spec_for_role_with_state(state, role),
         plan_task=str(plan_step.get("task") or state["task"]),
         planned_tool_calls=[
             call
@@ -865,6 +923,14 @@ def _role_spec_for_role(state: SynodeState | dict[str, Any], role: str) -> dict[
         if isinstance(spec, dict) and spec.get("name") == role:
             return spec
     return {}
+
+
+def _role_spec_for_role_with_state(state: SynodeState | dict[str, Any], role: str) -> dict[str, Any]:
+    spec = dict(_role_spec_for_role(state, role))
+    review_precheck = state.get("review_precheck")
+    if isinstance(review_precheck, dict):
+        spec["review_precheck"] = review_precheck
+    return spec
 
 
 async def _provider_for_role(

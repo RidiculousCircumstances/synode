@@ -117,22 +117,25 @@ async def test_graph_runtime_bindings_reject_disabled_openhands(service, tmp_pat
         )
 
 
-async def test_graph_runtime_bindings_reject_system_roles(service) -> None:
+async def test_graph_runtime_bindings_accept_control_roles_when_contract_supported(service) -> None:
     roles = {role.name: role for role in await service.list_agent_roles()}
 
-    with pytest.raises(ValueError, match="supervisor and reviewer"):
-        await service.create_agent_graph(
-            _graph_payload(
-                roles,
-                name="invalid system runtime graph",
-                workers=["coder"],
-                node_runtime_bindings={"reviewer": RuntimeBackend.OPENHANDS},
-            )
+    graph = await service.create_agent_graph(
+        _graph_payload(
+            roles,
+            name="control runtime graph",
+            workers=["coder"],
+            node_runtime_bindings={"reviewer": RuntimeBackend.OPENHANDS},
         )
+    )
+
+    assert graph.node_runtime_bindings["reviewer"] == RuntimeBackend.OPENHANDS
+    assert graph.node_contracts["reviewer"] == "reviewer_decision"
 
 
 async def test_openhands_node_backend_completes_coding_run(settings, database, tmp_path: pathlib.Path) -> None:
-    service = await _openhands_service(settings, database, _FakeOpenHandsClient(["completed"]))
+    client = _FakeOpenHandsClient(["completed"])
+    service = await _openhands_service(settings, database, client)
     roles = {role.name: role for role in await service.list_agent_roles()}
     graph = await service.create_agent_graph(
         _graph_payload(
@@ -156,6 +159,9 @@ async def test_openhands_node_backend_completes_coding_run(settings, database, t
     assert result.agent_graph_snapshot["node_runtime_bindings"]["coder"] == RuntimeBackend.OPENHANDS
     assert "OpenHands completed" in (result.final_answer or "")
     assert any(artifact.kind == "openhands_coder" for artifact in artifacts)
+    proxy_config = client.payloads[0]["mcp_servers"]["synode"]
+    assert "/mcp/proxy/" in proxy_config["url"]
+    assert proxy_config["headers"]["Authorization"].startswith("Bearer ")
 
 
 async def test_agent_graph_v2_node_backend_contracts_drive_openhands(
@@ -195,6 +201,43 @@ async def test_agent_graph_v2_node_backend_contracts_drive_openhands(
         and state.status == "completed"
         for state in states
     )
+
+
+async def test_openhands_control_nodes_use_contract_payloads(
+    settings,
+    database,
+    tmp_path: pathlib.Path,
+) -> None:
+    (tmp_path / "data.csv").write_text("date,revenue\n2026-06-01,10\n", encoding="utf-8")
+    client = _FakeOpenHandsClient(["completed", "completed"])
+    service = await _openhands_service(settings, database, client)
+    roles = {role.name: role for role in await service.list_agent_roles()}
+    graph = await service.create_agent_graph(
+        _graph_payload(
+            roles,
+            name="openhands control graph",
+            workers=["data_analyst"],
+            node_runtime_bindings={
+                "supervisor": RuntimeBackend.OPENHANDS,
+                "reviewer": RuntimeBackend.OPENHANDS,
+            },
+        )
+    )
+
+    result = await service.run_task(
+        "Analyze data with external control nodes",
+        workspace=str(tmp_path),
+        model_provider="fake",
+        agent_graph_id=graph.id,
+    )
+    async with database.session() as session:
+        states = await Repository(session).list_runtime_node_states(result.id)
+
+    assert result.status == RunStatus.COMPLETED
+    assert result.agent_graph_snapshot["node_runtime_bindings"]["supervisor"] == RuntimeBackend.OPENHANDS
+    assert result.agent_graph_snapshot["node_runtime_bindings"]["reviewer"] == RuntimeBackend.OPENHANDS
+    assert any(state.node_id == "supervisor" and state.contract_id == "supervisor_decision" for state in states)
+    assert any(state.node_id == "reviewer" and state.contract_id == "reviewer_decision" for state in states)
 
 
 async def test_agent_graph_v2_rejects_duplicate_role_nodes(service) -> None:
@@ -325,11 +368,17 @@ class _FakeOpenHandsClient:
     def __init__(self, statuses: list[str]):
         self.statuses = statuses
         self.accepted: list[str] = []
+        self.contract_id = "worker_agent_output"
+        self.payloads: list[dict] = []
 
     async def status(self) -> tuple[bool, str | None]:
         return True, "fake OpenHands ready"
 
     async def start_conversation(self, payload: dict) -> OpenHandsConversationState:
+        self.payloads.append(payload)
+        metadata = payload.get("metadata", {})
+        if isinstance(metadata, dict):
+            self.contract_id = str(metadata.get("synode_contract_id") or self.contract_id)
         return self._state()
 
     async def get_conversation(self, conversation_id: str) -> OpenHandsConversationState:
@@ -350,17 +399,47 @@ class _FakeOpenHandsClient:
 
     def _state(self) -> OpenHandsConversationState:
         status = self.statuses.pop(0) if self.statuses else "completed"
+        contract_payload = self._contract_payload()
         return OpenHandsConversationState(
             conversation_id="conv-1",
             status=status,
-            raw={"status": status, "summary": "OpenHands completed the coder node."},
+            raw={
+                "status": status,
+                "summary": "OpenHands completed the Synode node.",
+                "synode_payload": contract_payload,
+            },
             pending_actions=[
                 {"id": "action-1", "tool_name": "terminal", "command": "pytest"}
             ]
             if status == "waiting_for_confirmation"
             else [],
-            final_message="OpenHands completed the coder node." if status == "completed" else None,
+            final_message=json.dumps(contract_payload) if status == "completed" else None,
         )
+
+    def _contract_payload(self) -> dict:
+        if self.contract_id == "supervisor_decision":
+            return {
+                "selected_roles": ["data_analyst"],
+                "plan": [{"role": "data_analyst", "task": "Analyze the dataset.", "tool_calls": []}],
+                "confidence": "high",
+                "risk_level": "analysis",
+                "reasoning_summary": "Fake OpenHands supervisor decision.",
+            }
+        if self.contract_id == "reviewer_decision":
+            return {
+                "verdict": "proceed",
+                "blockers": [],
+                "advisory_risks": [],
+                "missing_evidence": [],
+                "required_next_actions": [],
+                "confidence": "high",
+            }
+        return {
+            "role": "coder",
+            "summary": "OpenHands completed the coder node.",
+            "tool_results": [],
+            "risks": [],
+        }
 
 
 def _patch_execution_async_client(monkeypatch: pytest.MonkeyPatch, transport: httpx.MockTransport) -> None:

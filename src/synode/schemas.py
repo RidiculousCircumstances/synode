@@ -33,6 +33,12 @@ class RuntimeBackend(StrEnum):
     OPENHANDS = "openhands"
 
 
+class MCPServerTransport(StrEnum):
+    STDIO = "stdio"
+    SSE = "sse"
+    STREAMABLE_HTTP = "streamable_http"
+
+
 class AgentGraphNodeKind(StrEnum):
     CONTROL = "control"
     WORKER = "worker"
@@ -204,6 +210,38 @@ class ModelProfileResponse(BaseModel):
     secret_id: str | None = None
     secret_set: bool = False
     enabled: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class MCPServerCreateRequest(BaseModel):
+    name: str = Field(min_length=1)
+    transport: MCPServerTransport = MCPServerTransport.STDIO
+    config: dict[str, Any] = Field(default_factory=dict)
+    enabled: bool = True
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str) -> str:
+        return _non_blank(value, "name")
+
+
+class MCPServerUpdateRequest(BaseModel):
+    name: str | None = None
+    transport: MCPServerTransport | None = None
+    config: dict[str, Any] | None = None
+    enabled: bool | None = None
+
+
+class MCPServerResponse(BaseModel):
+    id: str
+    name: str
+    transport: MCPServerTransport
+    config: dict[str, Any] = Field(default_factory=dict)
+    enabled: bool
+    tools: list[str] = Field(default_factory=list)
+    last_error: str | None = None
+    last_discovered_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
 

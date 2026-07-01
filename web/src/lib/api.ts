@@ -6,6 +6,8 @@ import type {
   ModelHealth,
   ModelProfile,
   ModelProfileTestResult,
+  MCPServer,
+  MCPServerTransport,
   Run,
   RunEvent,
   RunMetrics,
@@ -105,6 +107,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   if (!response.ok) {
     const text = await response.text();
     throw new Error(`${response.status} ${response.statusText}: ${text}`);
+  }
+  if (response.status === 204) {
+    return undefined as T;
   }
   return (await response.json()) as T;
 }
@@ -383,6 +388,48 @@ export function updateModelProfile(
 
 export function testModelProfile(profileId: string): Promise<ModelProfileTestResult> {
   return request<ModelProfileTestResult>(`/model-profiles/${profileId}/test`, {
+    method: "POST",
+    body: "{}",
+  });
+}
+
+export function listMcpServers(): Promise<MCPServer[]> {
+  return request<MCPServer[]>("/mcp/servers");
+}
+
+export function createMcpServer(payload: {
+  name: string;
+  transport: MCPServerTransport;
+  config: Record<string, unknown>;
+  enabled?: boolean;
+}): Promise<MCPServer> {
+  return request<MCPServer>("/mcp/servers", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function updateMcpServer(
+  serverId: string,
+  payload: {
+    name?: string;
+    transport?: MCPServerTransport;
+    config?: Record<string, unknown>;
+    enabled?: boolean;
+  },
+): Promise<MCPServer> {
+  return request<MCPServer>(`/mcp/servers/${serverId}`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function deleteMcpServer(serverId: string): Promise<void> {
+  return request<void>(`/mcp/servers/${serverId}`, { method: "DELETE" });
+}
+
+export function discoverMcpServer(serverId: string): Promise<MCPServer> {
+  return request<MCPServer>(`/mcp/servers/${serverId}/discover`, {
     method: "POST",
     body: "{}",
   });

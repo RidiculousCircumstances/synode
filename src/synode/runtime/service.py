@@ -20,6 +20,7 @@ from synode.persistence.repository import (
     Repository,
     to_agent_graph_response,
     to_agent_role_response,
+    to_mcp_server_response,
     to_model_profile_response,
     to_run_response,
     to_secret_response,
@@ -27,6 +28,7 @@ from synode.persistence.repository import (
     to_thread_response,
 )
 from synode.registry import RoleRegistry, RoleSpec
+from synode.runtime.capabilities import validate_backend_contract
 from synode.runtime.contracts import default_contract_for_role, default_contract_registry
 from synode.runtime.execution import ExecutionBackendRegistry, build_execution_backend_registry
 from synode.runtime.graph import GraphDependencies, build_graph
@@ -48,6 +50,10 @@ from synode.schemas import (
     EventType,
     ExecutionBackendStatusResponse,
     GpuMetrics,
+    MCPServerCreateRequest,
+    MCPServerResponse,
+    MCPServerTransport,
+    MCPServerUpdateRequest,
     ModelProfileCreateRequest,
     ModelProfileResponse,
     ModelProfileStructuredProbe,
@@ -84,6 +90,7 @@ from synode.schemas import (
 )
 from synode.security import SecretCipher
 from synode.tools import ToolExecutor, ToolRegistry, build_tool_registry
+from synode.tools.mcp import MCPServerRuntimeConfig, discover_mcp_tools, register_mcp_tools
 from synode.tools.sandbox import SandboxRunner
 
 logger = logging.getLogger(__name__)
@@ -1063,6 +1070,113 @@ class OrchestrationService:
             )
             return to_model_profile_response(profile)
 
+    async def list_mcp_servers(self, limit: int = 50, offset: int = 0) -> list[MCPServerResponse]:
+        async with self.database.session() as session:
+            repo = Repository(session)
+            return [
+                to_mcp_server_response(server)
+                for server in await repo.list_mcp_servers(limit=limit, offset=offset)
+            ]
+
+    async def create_mcp_server(self, payload: MCPServerCreateRequest) -> MCPServerResponse:
+        async with self.database.session() as session:
+            repo = Repository(session)
+            server = await repo.create_mcp_server(
+                name=payload.name,
+                transport=payload.transport,
+                config=self._normalize_mcp_config(payload.transport, payload.config),
+                enabled=payload.enabled,
+            )
+            response = to_mcp_server_response(server)
+        await self.refresh_mcp_tools()
+        return response
+
+    async def update_mcp_server(self, server_id: str, payload: MCPServerUpdateRequest) -> MCPServerResponse:
+        values = payload.model_dump(exclude_unset=True)
+        if "transport" in values or "config" in values:
+            transport = values.get("transport")
+            config = values.get("config")
+            if transport is None or config is None:
+                async with self.database.session() as session:
+                    repo = Repository(session)
+                    current = await repo.get_mcp_server(server_id)
+                    if current is None:
+                        raise LookupError(f"MCP server not found: {server_id}")
+                    if transport is None:
+                        transport = MCPServerTransport(current.transport)
+                    if config is None:
+                        config = current.config or {}
+            values["config"] = self._normalize_mcp_config(
+                MCPServerTransport(transport),
+                config,
+            )
+        async with self.database.session() as session:
+            repo = Repository(session)
+            server = await repo.update_mcp_server(server_id, values)
+            response = to_mcp_server_response(server)
+        await self.refresh_mcp_tools()
+        return response
+
+    async def delete_mcp_server(self, server_id: str) -> None:
+        async with self.database.session() as session:
+            repo = Repository(session)
+            await repo.delete_mcp_server(server_id)
+        await self.refresh_mcp_tools()
+
+    async def discover_mcp_server(self, server_id: str) -> MCPServerResponse:
+        async with self.database.session() as session:
+            repo = Repository(session)
+            server = await repo.get_mcp_server(server_id)
+            if server is None:
+                raise LookupError(f"MCP server not found: {server_id}")
+            server_name = server.name
+            config = server.config or {}
+        try:
+            tools = await discover_mcp_tools(server_name, config)
+        except Exception as exc:
+            async with self.database.session() as session:
+                repo = Repository(session)
+                server = await repo.record_mcp_discovery(server_id, error=str(exc))
+                response = to_mcp_server_response(server)
+            await self.refresh_mcp_tools()
+            raise RuntimeError(str(exc)) from exc
+        async with self.database.session() as session:
+            repo = Repository(session)
+            server = await repo.record_mcp_discovery(server_id, tools=tools)
+            response = to_mcp_server_response(server)
+        await self.refresh_mcp_tools()
+        return response
+
+    async def refresh_mcp_tools(self) -> None:
+        self.tools.unregister_prefix("mcp.")
+        async with self.database.session() as session:
+            repo = Repository(session)
+            servers = await repo.list_mcp_servers(enabled_only=True, limit=1000)
+            runtime_configs = [
+                MCPServerRuntimeConfig(
+                    name=server.name,
+                    config=server.config or {},
+                    tools=list(server.tools or []),
+                )
+                for server in servers
+                if server.tools
+            ]
+        register_mcp_tools(self.tools, runtime_configs)
+
+    async def handle_mcp_proxy_request(
+        self,
+        *,
+        session_id: str,
+        authorization: str | None,
+        payload: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        token = _bearer_token(authorization)
+        return await self.tool_executor.handle_mcp_proxy_request(
+            session_id=session_id,
+            token=token,
+            payload=payload,
+        )
+
     async def test_model_profile(self, profile_id: str) -> ModelProfileTestResponse:
         async with self.database.session() as session:
             repo = Repository(session)
@@ -1357,11 +1471,13 @@ class OrchestrationService:
                 **role_model_profile_ids,
             },
         )
+        node_contracts = self._resolve_node_contracts(snapshot, graph.node_contracts or {})
         node_runtime_bindings = self._resolve_node_runtime_bindings(
             snapshot,
             graph.node_runtime_bindings or {},
         )
-        node_contracts = self._resolve_node_contracts(snapshot, graph.node_contracts or {})
+        for node_id, backend in node_runtime_bindings.items():
+            validate_backend_contract(backend, node_contracts[node_id])
         for node in snapshot["nodes"]:
             node_id = str(node["id"])
             node["runtime_backend"] = node_runtime_bindings[node_id]
@@ -1498,12 +1614,6 @@ class OrchestrationService:
             if str(node_id) not in resolved:
                 raise LookupError(f"agent graph node not found: {node_id}")
             resolved[str(node_id)] = self._runtime_backend_id(backend)
-        for node in nodes:
-            role_name = str(node["role"])
-            backend = resolved[str(node["id"])]
-            if role_name in {RoleName.SUPERVISOR.value, RoleName.REVIEWER.value}:
-                if backend != RuntimeBackend.NATIVE_LANGGRAPH.value:
-                    raise ValueError("supervisor and reviewer runtime backends must be native_langgraph")
         return resolved
 
     def _resolve_node_contracts(self, snapshot: dict[str, Any], node_contracts: dict[str, Any]) -> dict[str, str]:
@@ -1541,6 +1651,26 @@ class OrchestrationService:
         if self.secret_cipher is None:
             raise RuntimeError("SYNODE_SECRETS_KEY is required for DB secrets")
         return self.secret_cipher
+
+    @staticmethod
+    def _normalize_mcp_config(transport: MCPServerTransport, config: dict[str, Any]) -> dict[str, Any]:
+        normalized = dict(config)
+        normalized["transport"] = transport.value
+        if transport == MCPServerTransport.STDIO:
+            command = str(normalized.get("command") or "").strip()
+            if not command:
+                raise ValueError("stdio MCP server config requires command")
+            args = normalized.get("args", [])
+            if args is None:
+                args = []
+            if not isinstance(args, list) or not all(isinstance(item, str) for item in args):
+                raise ValueError("stdio MCP server config args must be a list of strings")
+            normalized["args"] = args
+        else:
+            url = str(normalized.get("url") or "").strip()
+            if not url:
+                raise ValueError(f"{transport.value} MCP server config requires url")
+        return normalized
 
     async def _invoke_graph(self, run_id: str, state: dict[str, Any]) -> dict[str, Any]:
         roles = self._role_registry_for_state(state)
@@ -1651,6 +1781,8 @@ async def create_service(settings: Settings, include_mcp: bool = True) -> Orches
     try:
         await run_queue.open()
         await service.ensure_default_configuration()
+        if include_mcp:
+            await service.refresh_mcp_tools()
         return service
     except Exception:
         await service.close()
@@ -1681,6 +1813,15 @@ def _add_token_usage(existing: TokenUsage | None, item: Any) -> TokenUsage:
         output_tokens=_sum_optional(current.output_tokens, item.get("output_tokens")),
         total_tokens=_sum_optional(current.total_tokens, item.get("total_tokens")),
     )
+
+
+def _bearer_token(authorization: str | None) -> str:
+    if not authorization:
+        return ""
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() != "bearer" or not token.strip():
+        return ""
+    return token.strip()
 
 
 def _sum_optional(left: int | None, right: object) -> int | None:

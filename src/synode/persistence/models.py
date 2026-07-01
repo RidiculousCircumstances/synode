@@ -226,6 +226,24 @@ class ModelProfileRecord(Base):
     )
 
 
+class MCPServerRecord(Base):
+    __tablename__ = "mcp_servers"
+    __table_args__ = (UniqueConstraint("name", name="uq_mcp_servers_name"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    transport: Mapped[str] = mapped_column(String(40), nullable=False)
+    config: Mapped[dict[str, Any]] = mapped_column(JsonType().with_variant(JSONB, "postgresql"), default=dict)
+    enabled: Mapped[bool] = mapped_column(Boolean(), default=True, nullable=False)
+    tools: Mapped[list[str]] = mapped_column(JsonType().with_variant(JSONB, "postgresql"), default=list)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_discovered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
 class AgentRoleRecord(Base):
     __tablename__ = "agent_roles"
     __table_args__ = (UniqueConstraint("name", name="uq_agent_roles_name"),)
@@ -307,3 +325,24 @@ class RuntimeNodeStateRecord(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
+
+
+class MCPProxySessionRecord(Base):
+    __tablename__ = "mcp_proxy_sessions"
+    __table_args__ = (
+        Index("ix_mcp_proxy_sessions_run_node", "run_id", "node_id"),
+        Index("ix_mcp_proxy_sessions_expires", "expires_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    run_id: Mapped[str] = mapped_column(ForeignKey("runs.id", ondelete="CASCADE"), nullable=False)
+    thread_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    node_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    role: Mapped[str] = mapped_column(String(80), nullable=False)
+    backend_id: Mapped[str] = mapped_column(String(80), nullable=False)
+    workspace: Mapped[str | None] = mapped_column(Text, nullable=True)
+    allowed_tools: Mapped[list[str]] = mapped_column(JsonType().with_variant(JSONB, "postgresql"), default=list)
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

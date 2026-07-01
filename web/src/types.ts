@@ -13,6 +13,7 @@ export type RunMode = "general" | "coding";
 
 export type RuntimeBackend = string;
 export type AgentGraphNodeKind = "control" | "worker";
+export type MCPServerTransport = "stdio" | "sse" | "streamable_http";
 
 export type ModelProviderType = "fake" | "ollama" | "openai_compatible";
 
@@ -278,6 +279,19 @@ export interface ModelProfileTestResult {
     structured_output: boolean;
   };
   checks: ModelProfileTestCheck[];
+}
+
+export interface MCPServer {
+  id: string;
+  name: string;
+  transport: MCPServerTransport;
+  config: Record<string, unknown>;
+  enabled: boolean;
+  tools: string[];
+  last_error: string | null;
+  last_discovered_at: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface AgentGraphNode {

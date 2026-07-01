@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Protocol
@@ -10,6 +11,12 @@ import httpx
 from synode.config import Settings
 from synode.persistence.database import Database
 from synode.persistence.repository import Repository
+from synode.runtime.capabilities import (
+    DEFAULT_BACKEND_CAPABILITIES,
+    ExecutionBackendCapabilities,
+    validate_backend_contract,
+)
+from synode.runtime.contracts import default_contract_registry
 from synode.schemas import ApprovalStatus, NodeExecutionStatus, RuntimeBackend, ToolResult, ToolRisk
 
 
@@ -35,6 +42,9 @@ class NodeExecutionInput:
     default_model_profile_id: str | None = None
     role_model_profile_ids: dict[str, str] = field(default_factory=dict)
     observability_trace_id: str | None = None
+    tool_proxy_url: str | None = None
+    tool_proxy_token: str | None = None
+    tool_proxy_tools: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -359,6 +369,8 @@ class OpenHandsNodeBackend:
         state: OpenHandsConversationState,
     ) -> NodeExecutionOutput:
         summary = _summary_from_state(state)
+        payload = _contract_payload(node_input, state, summary)
+        summary = str(payload.get("summary") or summary)
         content = {
             "runtime_backend": self.backend,
             "node_id": node_input.node_id,
@@ -382,7 +394,7 @@ class OpenHandsNodeBackend:
             node_id=node_input.node_id,
             backend_id=node_input.backend_id,
             contract_id=node_input.contract_id,
-            payload={"role": node_input.role, "summary": summary},
+            payload=payload,
             artifacts=[content],
             external_conversation_id=state.conversation_id,
             external_state={"conversation_id": state.conversation_id, "status": state.status},
@@ -417,6 +429,18 @@ class ExecutionBackendRegistry:
 
     def known_backend_ids(self) -> set[str]:
         return set(self._backends)
+
+    def capabilities(self, backend: RuntimeBackend | str) -> ExecutionBackendCapabilities:
+        backend_id = _backend_id(backend)
+        if backend_id not in self._backends:
+            raise ValueError(f"unknown execution backend: {backend_id}")
+        return DEFAULT_BACKEND_CAPABILITIES[backend_id]
+
+    def validate_contract(self, backend: RuntimeBackend | str, contract_id: str) -> None:
+        backend_id = _backend_id(backend)
+        if backend_id not in self._backends:
+            raise ValueError(f"unknown execution backend: {backend_id}")
+        validate_backend_contract(backend_id, contract_id)
 
     async def execute(self, backend: RuntimeBackend | str, node_input: NodeExecutionInput) -> NodeExecutionResult:
         backend_id = _backend_id(backend)
@@ -493,6 +517,7 @@ def _backend_id(backend: RuntimeBackend | str) -> str:
 
 def _conversation_payload(node_input: NodeExecutionInput) -> dict[str, Any]:
     graph = node_input.agent_graph_snapshot or {}
+    contract_schema = default_contract_registry().get(node_input.contract_id).payload_schema.model_json_schema()
     text = (
         f"Synode node: {node_input.node_id}\n"
         f"Synode role: {node_input.role}\n"
@@ -501,14 +526,15 @@ def _conversation_payload(node_input: NodeExecutionInput) -> dict[str, Any]:
         f"Task: {node_input.task}\n"
         f"Node task: {node_input.plan_task or node_input.task}\n"
         f"Workspace: {node_input.workspace or '<none>'}\n\n"
-        "Execute only this Synode graph node. Return a concise summary, changed files, "
-        "commands run, and any risks. Synode owns final review and approval state.\n\n"
+        "Execute only this Synode graph node. Synode owns final review and approval state. "
+        "Return only a JSON object matching the Synode contract schema. Do not wrap it in Markdown.\n\n"
         f"Role spec: {node_input.role_spec}\n"
         f"Planned tool calls: {node_input.planned_tool_calls}\n"
         f"Conversation context: {node_input.conversation_context}\n"
         f"Previous worker outputs: {node_input.previous_worker_outputs}\n"
         f"Upstream outputs: {node_input.upstream_outputs}\n"
         f"Graph snapshot: {graph}\n"
+        f"Contract JSON schema: {contract_schema}\n"
     )
     payload: dict[str, Any] = {
         "initial_message": {"content": [{"type": "text", "text": text}]},
@@ -521,6 +547,16 @@ def _conversation_payload(node_input: NodeExecutionInput) -> dict[str, Any]:
             "synode_trace_id": node_input.observability_trace_id,
         },
     }
+    if node_input.tool_proxy_url and node_input.tool_proxy_token:
+        payload["mcp_servers"] = {
+            "synode": {
+                "transport": "streamable_http",
+                "url": node_input.tool_proxy_url,
+                "headers": {"Authorization": f"Bearer {node_input.tool_proxy_token}"},
+            }
+        }
+        payload["metadata"]["synode_mcp_proxy_url"] = node_input.tool_proxy_url
+        payload["metadata"]["synode_mcp_tools"] = node_input.tool_proxy_tools
     if node_input.workspace:
         payload["workspace"] = node_input.workspace
     return payload
@@ -649,6 +685,44 @@ def _summary_from_state(state: OpenHandsConversationState) -> str:
         if isinstance(value, str) and value.strip():
             return value.strip()
     return f"OpenHands conversation completed: {state.conversation_id}"
+
+
+def _contract_payload(
+    node_input: NodeExecutionInput,
+    state: OpenHandsConversationState,
+    summary: str,
+) -> dict[str, Any]:
+    payload = _structured_payload_from_state(state)
+    if payload is None:
+        raise RuntimeError(
+            f"OpenHands did not return JSON payload for Synode contract {node_input.contract_id}"
+        )
+    validated = default_contract_registry().validate_payload(node_input.contract_id, payload)
+    return validated.model_dump(mode="json")
+
+
+def _structured_payload_from_state(state: OpenHandsConversationState) -> dict[str, Any] | None:
+    for key in ("synode_payload", "structured_payload", "payload", "result"):
+        value = state.raw.get(key)
+        if isinstance(value, dict):
+            return value
+        if isinstance(value, str):
+            parsed = _parse_json_object(value)
+            if parsed is not None:
+                return parsed
+    if state.final_message:
+        parsed = _parse_json_object(state.final_message)
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _parse_json_object(value: str) -> dict[str, Any] | None:
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
 
 
 def _raw_list(raw: dict[str, Any], key: str) -> list[Any]:

@@ -26,6 +26,70 @@ async def test_data_profile_tool_profiles_csv(service, tmp_path: pathlib.Path) -
     assert result.output["numeric_summary"]["value"]["mean"] == 15
 
 
+async def test_mcp_proxy_session_enforces_token_scope_and_audit(
+    database,
+    tool_executor: ToolExecutor,
+    tmp_path: pathlib.Path,
+) -> None:
+    (tmp_path / "README.md").write_text("# Demo\n", encoding="utf-8")
+    async with database.session() as session:
+        repo = Repository(session)
+        run = await repo.create_run("read through proxy", model_provider="fake", workspace=str(tmp_path))
+        run_id = run.id
+        thread_id = run.thread_id
+
+    proxy = await tool_executor.create_proxy_session(
+        run_id=run_id,
+        thread_id=thread_id,
+        node_id="data_analyst",
+        role_name="data_analyst",
+        backend_id="openhands",
+        workspace=str(tmp_path),
+    )
+    bad = await tool_executor.handle_mcp_proxy_request(
+        session_id=proxy.session_id,
+        token="wrong",
+        payload={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+    )
+    listed = await tool_executor.handle_mcp_proxy_request(
+        session_id=proxy.session_id,
+        token=proxy.token,
+        payload={"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+    )
+    denied = await tool_executor.handle_mcp_proxy_request(
+        session_id=proxy.session_id,
+        token=proxy.token,
+        payload={
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {"name": "native.fs_write", "arguments": {"path": "x.txt", "content": "no"}},
+        },
+    )
+    read = await tool_executor.handle_mcp_proxy_request(
+        session_id=proxy.session_id,
+        token=proxy.token,
+        payload={
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "tools/call",
+            "params": {"name": "native.fs_read", "arguments": {"path": "README.md"}},
+        },
+    )
+    async with database.session() as session:
+        audits = await Repository(session).list_tool_audit(run_id)
+
+    assert bad is not None and bad["error"]["message"] == "invalid MCP proxy token"
+    assert listed is not None
+    listed_tools = {tool["name"] for tool in listed["result"]["tools"]}
+    assert "native.fs_read" in listed_tools
+    assert "native.fs_write" not in listed_tools
+    assert denied is not None and "not allowed" in denied["error"]["message"]
+    assert read is not None and read["result"]["structuredContent"]["ok"] is True
+    assert read["result"]["structuredContent"]["output"]["content"] == "# Demo\n"
+    assert [record.tool_name for record in audits] == ["native.fs_read"]
+
+
 async def test_write_tool_requires_approval_and_resumes(
     database, tool_executor: ToolExecutor, tmp_path: pathlib.Path
 ) -> None:
