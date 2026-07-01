@@ -10,17 +10,24 @@ from langgraph.constants import END, START
 from langgraph.errors import GraphInterrupt
 from langgraph.graph import StateGraph
 from langgraph.types import interrupt
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
+from synode.models.errors import StructuredOutputValidationError
 from synode.models.provider import ModelProviderRegistry, ModelRequest
 from synode.observability import Observability
 from synode.persistence.database import Database
 from synode.persistence.repository import Repository
 from synode.registry import RoleRegistry
-from synode.runtime.contracts import WORKER_AGENT_OUTPUT_CONTRACT
+from synode.runtime.contracts import (
+    CODING_INSPECTION_CONTRACT,
+    CODING_PATCH_PROPOSAL_CONTRACT,
+    WORKER_AGENT_OUTPUT_CONTRACT,
+    default_contract_registry,
+)
 from synode.runtime.decisions import (
     CodingInspection,
     FilePatch,
+    NativeLoopAction,
     PatchProposal,
     ReviewerDecision,
     ReviewerVerdict,
@@ -69,6 +76,13 @@ class GraphDependencies:
     observability: Observability
     secret_cipher: SecretCipher | None = None
     execution_backends: ExecutionBackendRegistry | None = None
+
+
+@dataclass(frozen=True)
+class NativeLoopResult:
+    payload: dict[str, Any]
+    tool_results: list[ToolResult]
+    trace: list[dict[str, Any]]
 
 
 def build_graph(deps: GraphDependencies, checkpointer: Any | None = None) -> Any:
@@ -348,6 +362,7 @@ def _graph_workers_node(deps: GraphDependencies):
 
 async def _run_worker_role(deps: GraphDependencies, state: SynodeState, role: str) -> AgentOutput:
     backend = _role_runtime_backend(state, role)
+    node_input = _node_execution_input(state, role)
     if backend != "native_langgraph":
         if deps.execution_backends is None:
             raise RuntimeError("execution backend registry is not configured")
@@ -363,44 +378,38 @@ async def _run_worker_role(deps: GraphDependencies, state: SynodeState, role: st
             tool_results=backend_output.tool_results,
             risks=backend_output.risks,
         )
-    calls = [ToolCall.model_validate(call) for call in state.get("role_tool_calls", {}).get(role, [])]
-    results = []
-    for call in calls:
-        result = await _execute_native_tool(deps, state, role, call)
-        results.append(result)
-    provider = await _provider_for_role(deps, state, role)
-    model_response = await _invoke_model(
+    loop_result = await _run_native_loop(
         deps,
         state,
-        provider,
-        ModelRequest(
-            role=role,
-            prompt=f"Summarize work for task: {state['task']}",
-            context={
-                "task": state["task"],
-                "conversation_context": state.get("conversation_context", []),
-                "tool_results": [result.model_dump(mode="json") for result in results],
-                "previous_worker_outputs": state.get("worker_outputs", []),
-            },
-            tools=[call.name for call in calls],
-            model_options=provider.model_options or {},
-        ),
+        role=role,
+        node_id=node_input.node_id,
+        contract_id=node_input.contract_id,
+        prompt=f"Complete worker node for task: {node_input.plan_task or state['task']}",
+        context={},
+        plan_task=node_input.plan_task,
+        planned_tool_calls=node_input.planned_tool_calls,
     )
+    if node_input.contract_id == WORKER_AGENT_OUTPUT_CONTRACT:
+        payload_output = AgentOutput.model_validate(loop_result.payload)
+        raw_summary = payload_output.summary
+        raw_risks = payload_output.risks
+    else:
+        raw_summary = json.dumps(loop_result.payload, ensure_ascii=False)
+        raw_risks = []
     output = AgentOutput(
         role=role,
-        summary=_summarize_role_output(role, model_response.content, results),
-        tool_results=results,
-        risks=[result.error for result in results if result.error],
+        summary=_summarize_role_output(role, raw_summary, loop_result.tool_results),
+        tool_results=loop_result.tool_results,
+        risks=[*raw_risks, *[result.error for result in loop_result.tool_results if result.error]],
     )
-    node = _node_for_role(state, role)
     async with deps.database.session() as session:
         repo = Repository(session)
         await repo.upsert_runtime_node_state(
             state["run_id"],
-            str(node.get("id") or role),
+            node_input.node_id,
             role,
             backend,
-            _node_contract_id(state, node),
+            node_input.contract_id,
             NodeExecutionStatus.COMPLETED,
             external_state={"native": True},
         )
@@ -438,6 +447,286 @@ async def _execute_external_node_with_operator_interrupt(
     raise RuntimeError(f"external node repeatedly requested operator input: {node_input.node_id}")
 
 
+async def _run_native_loop(
+    deps: GraphDependencies,
+    state: SynodeState,
+    *,
+    role: str,
+    node_id: str,
+    contract_id: str,
+    prompt: str,
+    context: dict[str, Any],
+    plan_task: str | None = None,
+    planned_tool_calls: list[dict[str, Any]] | None = None,
+) -> NativeLoopResult:
+    provider = await _provider_for_role(deps, state, role)
+    contract = default_contract_registry().get(contract_id)
+    allowed_tools = deps.tool_executor.allowed_tool_names(role)
+    max_steps = max(1, int(deps.tool_executor.settings.native_loop_max_steps))
+    tool_results: list[ToolResult] = []
+    trace: list[dict[str, Any]] = []
+    validation_errors: list[str] = []
+    base_context = _trim_loop_context(
+        {
+            "task": state["task"],
+            "node_task": plan_task or state["task"],
+            "role": role,
+            "node_id": node_id,
+            "contract_id": contract_id,
+            "contract_json_schema": contract.payload_schema.model_json_schema(),
+            "workspace": state.get("workspace"),
+            "conversation_context": state.get("conversation_context", [])[-4:],
+            "previous_worker_outputs": state.get("worker_outputs", []),
+            "upstream_outputs": state.get("worker_outputs", []),
+            "role_spec": _role_spec_for_role_with_state(state, role),
+            "allowed_tools": allowed_tools,
+            "planned_tool_calls": planned_tool_calls or [],
+            **context,
+        },
+        max_bytes=max(4000, int(deps.tool_executor.settings.native_loop_context_max_bytes)),
+    )
+
+    for step_index in range(max_steps):
+        request_context = {
+            **base_context,
+            "loop_step": step_index + 1,
+            "remaining_steps": max_steps - step_index,
+            "loop_history": trace,
+            "previous_validation_errors": validation_errors,
+        }
+        try:
+            action = await _invoke_structured(
+                deps,
+                state,
+                provider,
+                NativeLoopAction,
+                ModelRequest(
+                    role=role,
+                    prompt=_native_loop_prompt(prompt, contract_id=contract_id),
+                    context=request_context,
+                    response_schema=NativeLoopAction,
+                    model_options=provider.model_options or {},
+                ),
+            )
+        except (StructuredOutputValidationError, ValidationError) as exc:
+            validation_errors = [f"native loop action validation failed: {exc}"]
+            trace.append(
+                {
+                    "step": step_index + 1,
+                    "action": "invalid_action",
+                    "error": validation_errors[0],
+                }
+            )
+            continue
+
+        if action.action == "tool_call":
+            call = action.tool_call
+            if call is None:
+                validation_errors = ["tool_call action did not include tool_call"]
+                trace.append(
+                    {
+                        "step": step_index + 1,
+                        "action": action.action,
+                        "summary": action.summary,
+                        "error": validation_errors[0],
+                    }
+                )
+                continue
+            if call.name not in allowed_tools:
+                validation_errors = [f"tool is not allowed for role {role}: {call.name}"]
+                trace.append(
+                    {
+                        "step": step_index + 1,
+                        "action": action.action,
+                        "summary": action.summary,
+                        "tool_call": call.model_dump(mode="json"),
+                        "error": validation_errors[0],
+                    }
+                )
+                continue
+            try:
+                result = await _execute_native_tool(deps, state, role, call)
+            except ApprovalRequired as exc:
+                trace.append(
+                    {
+                        "step": step_index + 1,
+                        "action": action.action,
+                        "summary": action.summary,
+                        "tool_call": call.model_dump(mode="json"),
+                        "approval_id": exc.approval_id,
+                        "error": "approval required",
+                    }
+                )
+                await _persist_native_loop_trace(
+                    deps,
+                    state,
+                    role=role,
+                    node_id=node_id,
+                    contract_id=contract_id,
+                    status="waiting_approval",
+                    trace=trace,
+                )
+                raise
+            tool_results.append(result)
+            validation_errors = []
+            trace.append(
+                {
+                    "step": step_index + 1,
+                    "action": action.action,
+                    "summary": action.summary,
+                    "tool_call": call.model_dump(mode="json"),
+                    "observation": _compact_tool_result(
+                        result,
+                        limit=max(1000, int(deps.tool_executor.settings.native_loop_observation_max_bytes)),
+                    ),
+                }
+            )
+            continue
+
+        if action.action == "needs_operator":
+            response = _request_operator(
+                state,
+                kind=OperatorRequestKind.AMBIGUITY,
+                prompt=action.operator_question or action.summary,
+                context={
+                    "task": state["task"],
+                    "node_id": node_id,
+                    "role": role,
+                    "contract_id": contract_id,
+                    "loop_history": trace,
+                },
+                proposed_payload={"action": action.model_dump(mode="json")},
+                node_id=node_id,
+                role=role,
+            )
+            if str(response.get("response_type") or "") == OperatorResponseType.REJECT.value:
+                raise OperatorRejected(str(response.get("message") or "operator rejected native loop request"))
+            validation_errors = []
+            trace.append(
+                {
+                    "step": step_index + 1,
+                    "action": action.action,
+                    "summary": action.summary,
+                    "operator_question": action.operator_question,
+                    "operator_response": response,
+                }
+            )
+            continue
+
+        try:
+            validated = default_contract_registry().validate_payload(contract_id, action.payload)
+        except ValidationError as exc:
+            validation_errors = [f"final payload does not match contract {contract_id}: {exc}"]
+            trace.append(
+                {
+                    "step": step_index + 1,
+                    "action": action.action,
+                    "summary": action.summary,
+                    "payload": action.payload,
+                    "error": validation_errors[0],
+                }
+            )
+            continue
+        payload = validated.model_dump(mode="json")
+        trace.append(
+            {
+                "step": step_index + 1,
+                "action": action.action,
+                "summary": action.summary,
+                "payload": payload,
+            }
+        )
+        await _persist_native_loop_trace(
+            deps,
+            state,
+            role=role,
+            node_id=node_id,
+            contract_id=contract_id,
+            status="completed",
+            trace=trace,
+        )
+        return NativeLoopResult(payload=payload, tool_results=tool_results, trace=trace)
+
+    error = f"native loop exceeded {max_steps} steps without valid {contract_id} payload"
+    await _persist_native_loop_trace(
+        deps,
+        state,
+        role=role,
+        node_id=node_id,
+        contract_id=contract_id,
+        status="failed",
+        trace=trace,
+        error=error,
+    )
+    raise RuntimeError(error)
+
+
+def _native_loop_prompt(prompt: str, *, contract_id: str) -> str:
+    return (
+        "Execute this Synode native worker node as a bounded action/observation loop.\n"
+        f"Node objective: {prompt}\n"
+        f"Final contract: {contract_id}\n"
+        "Choose exactly one action: tool_call, needs_operator, or finish.\n"
+        "Use only allowed_tools for tool_call. Do not invent tool names.\n"
+        "Use needs_operator when the task is ambiguous or blocked by missing operator intent.\n"
+        "Use finish only when payload validates against the final contract schema.\n"
+        "Return only the requested structured JSON."
+    )
+
+
+async def _persist_native_loop_trace(
+    deps: GraphDependencies,
+    state: SynodeState | dict[str, Any],
+    *,
+    role: str,
+    node_id: str,
+    contract_id: str,
+    status: str,
+    trace: list[dict[str, Any]],
+    error: str | None = None,
+) -> None:
+    content: dict[str, Any] = {
+        "runtime_backend": "native_langgraph",
+        "node_id": node_id,
+        "role": role,
+        "contract_id": contract_id,
+        "status": status,
+        "steps": trace,
+    }
+    if error:
+        content["error"] = error
+    async with deps.database.session() as session:
+        repo = Repository(session)
+        await repo.add_artifact(str(state["run_id"]), "native_loop_trace", content)
+        if error:
+            await repo.add_artifact(
+                str(state["run_id"]),
+                "native_loop_contract_error",
+                content,
+            )
+
+
+def _trim_loop_context(context: dict[str, Any], *, max_bytes: int) -> dict[str, Any]:
+    encoded = json.dumps(context, ensure_ascii=False, default=str).encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return context
+    trimmed = dict(context)
+    for key in ("agent_graph_snapshot", "conversation_context", "previous_worker_outputs", "upstream_outputs"):
+        value = trimmed.get(key)
+        if isinstance(value, list):
+            trimmed[key] = value[-2:]
+        elif isinstance(value, dict):
+            trimmed[key] = {"truncated": True}
+    encoded = json.dumps(trimmed, ensure_ascii=False, default=str).encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return trimmed
+    trimmed["truncated"] = True
+    for key, value in list(trimmed.items()):
+        if isinstance(value, str) and len(value.encode("utf-8")) > 1000:
+            trimmed[key] = value.encode("utf-8")[:1000].decode("utf-8", errors="ignore") + " ...[truncated]"
+    return trimmed
+
+
 def _coding_inspect_node(deps: GraphDependencies):
     async def node(state: SynodeState) -> SynodeState:
         seed_calls = [
@@ -450,24 +739,20 @@ def _coding_inspect_node(deps: GraphDependencies):
         results: list[ToolResult] = []
         for call in seed_calls:
             results.append(await _execute_native_tool(deps, state, RoleName.CODER.value, call))
-        provider = await _provider_for_role(deps, state, RoleName.CODER.value)
-        inspection = await _invoke_structured(
+        loop_result = await _run_native_loop(
             deps,
             state,
-            provider,
-            CodingInspection,
-            ModelRequest(
-                role=RoleName.CODER.value,
-                prompt="Inspect repository evidence and identify files/tests needed for the coding task.",
-                context={
-                    "task": state["task"],
-                    "conversation_context": state.get("conversation_context", []),
-                    "tool_results": [result.model_dump(mode="json") for result in results],
-                },
-                response_schema=CodingInspection,
-                model_options=provider.model_options or {},
-            ),
+            role=RoleName.CODER.value,
+            node_id="coding_inspect",
+            contract_id=CODING_INSPECTION_CONTRACT,
+            prompt="Inspect repository evidence and identify files/tests needed for the coding task.",
+            context={
+                "seed_tool_results": [result.model_dump(mode="json") for result in results],
+            },
+            plan_task=state["task"],
+            planned_tool_calls=[],
         )
+        inspection = CodingInspection.model_validate(loop_result.payload)
         inspection = _augment_inspection_with_search_matches(inspection, results)
         inspection = await _augment_inspection_with_pre_patch_verification(deps, state, inspection)
         async with deps.database.session() as session:
@@ -543,22 +828,21 @@ def _coding_patch_propose_node(deps: GraphDependencies, *, repair_verification: 
             if validation_errors:
                 proposal_context["previous_patch_validation_errors"] = validation_errors
                 proposal_context["previous_patch_proposal"] = proposal.model_dump(mode="json") if proposal else {}
-            proposal = await _invoke_structured(
+            loop_result = await _run_native_loop(
                 deps,
                 state,
-                provider,
-                PatchProposal,
-                ModelRequest(
-                    role=RoleName.CODER.value,
-                    prompt=_patch_proposal_prompt(
-                        repair=bool(validation_errors),
-                        repair_verification=repair_verification,
-                    ),
-                    context=proposal_context,
-                    response_schema=PatchProposal,
-                    model_options=provider.model_options or {},
+                role=RoleName.CODER.value,
+                node_id="coding_patch_repair" if repair_verification else "coding_patch_propose",
+                contract_id=CODING_PATCH_PROPOSAL_CONTRACT,
+                prompt=_patch_proposal_prompt(
+                    repair=bool(validation_errors),
+                    repair_verification=repair_verification,
                 ),
+                context=proposal_context,
+                plan_task=state["task"],
+                planned_tool_calls=[],
             )
+            proposal = PatchProposal.model_validate(loop_result.payload)
             proposal = _normalize_patch_proposal(proposal, file_context)
             validation_errors = _patch_proposal_validation_errors(
                 proposal,

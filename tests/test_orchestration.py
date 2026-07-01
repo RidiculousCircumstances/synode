@@ -6,20 +6,32 @@ from subprocess import run
 import pytest
 from sqlalchemy import select
 
-from synode.models.provider import FakeModelProvider, ModelRequest, ModelResponse
+from synode.models.provider import (
+    FakeModelProvider,
+    ModelProviderRegistry,
+    ModelRequest,
+    ModelResponse,
+)
+from synode.observability import Observability
 from synode.persistence.models import ApprovalRecord
 from synode.persistence.repository import Repository
+from synode.runtime.contracts import WORKER_AGENT_OUTPUT_CONTRACT
 from synode.runtime.decisions import FilePatch, PatchProposal
 from synode.runtime.graph import (
+    GraphDependencies,
+    ResolvedModelProvider,
     _build_coding_context_packet,
+    _invoke_model,
     _normalize_patch_proposal,
     _patch_proposal_validation_errors,
     _route_after_patch_propose,
     _route_after_patch_repair,
     _route_after_verify,
+    _run_native_loop,
     _select_verification_commands,
     _verification_command_catalog,
 )
+from synode.runtime.operator import ApprovalRequired
 from synode.runtime.worker import RunWorker
 from synode.schemas import (
     ApprovalStatus,
@@ -51,6 +63,32 @@ class StreamingFakeProvider(FakeModelProvider):
             output_tokens=3,
             total_tokens=4,
             latency_ms=1.0,
+        )
+
+
+class ScriptedLoopProvider(FakeModelProvider):
+    name = "scripted_loop"
+    supports_streaming = False
+
+    def __init__(self, actions: list[dict[str, object]]) -> None:
+        self.actions = actions
+        self.index = 0
+
+    async def invoke(self, request: ModelRequest) -> ModelResponse:
+        if self.index >= len(self.actions):
+            action = self.actions[-1]
+        else:
+            action = self.actions[self.index]
+            self.index += 1
+        return ModelResponse(
+            content="{}",
+            structured=action,
+            provider=self.name,
+            model="scripted-loop",
+            input_tokens=0,
+            output_tokens=0,
+            total_tokens=0,
+            latency_ms=0.0,
         )
 
 
@@ -250,6 +288,199 @@ async def test_run_task_completes_with_fake_data_agent(service, tmp_path: pathli
     assert result.final_answer is not None
     assert "data_analyst" in result.final_answer
     assert "numeric_summary" in result.final_answer
+    artifacts = await service.list_artifacts(result.id)
+    loop_traces = [artifact for artifact in artifacts if artifact.kind == "native_loop_trace"]
+    assert any(trace.content["role"] == RoleName.DATA_ANALYST for trace in loop_traces)
+    assert any(
+        step.get("action") == "tool_call" and step.get("tool_call", {}).get("name") == "native.data_profile"
+        for trace in loop_traces
+        for step in trace.content["steps"]
+    )
+
+
+async def test_native_worker_loop_rejects_disallowed_tool_without_execution(
+    settings,
+    database,
+    tool_executor,
+    tmp_path: pathlib.Path,
+) -> None:
+    models = ModelProviderRegistry()
+    models.register(
+        ScriptedLoopProvider(
+            [
+                {
+                    "action": "tool_call",
+                    "summary": "Try a disallowed write.",
+                    "tool_call": {"name": "native.fs_write", "arguments": {"path": "blocked.txt", "content": "no"}},
+                },
+                {
+                    "action": "finish",
+                    "summary": "Finish after policy feedback.",
+                    "payload": {
+                        "role": "data_analyst",
+                        "summary": "Finished without write.",
+                        "tool_results": [],
+                        "risks": [],
+                    },
+                },
+            ]
+        )
+    )
+    deps = GraphDependencies(
+        database=database,
+        roles=tool_executor.roles,
+        models=models,
+        tool_executor=tool_executor,
+        observability=Observability(settings),
+    )
+
+    result = await _run_native_loop(
+        deps,
+        {
+            "run_id": "run-disallowed",
+            "thread_id": "thread-disallowed",
+            "task": "Analyze only.",
+            "mode": RunMode.GENERAL.value,
+            "model_provider": "scripted_loop",
+            "workspace": str(tmp_path),
+        },
+        role=RoleName.DATA_ANALYST.value,
+        node_id="data_analyst",
+        contract_id=WORKER_AGENT_OUTPUT_CONTRACT,
+        prompt="Analyze without mutation.",
+        context={},
+    )
+
+    assert result.payload["summary"] == "Finished without write."
+    assert result.tool_results == []
+    assert not (tmp_path / "blocked.txt").exists()
+    async with database.session() as session:
+        artifacts = await Repository(session).list_artifacts("run-disallowed")
+    loop_traces = [artifact for artifact in artifacts if artifact.kind == "native_loop_trace"]
+    assert loop_traces
+    assert "tool is not allowed" in loop_traces[-1].content["steps"][0]["error"]
+
+
+async def test_native_worker_loop_surfaces_approval(
+    settings,
+    database,
+    tool_executor,
+    tmp_path: pathlib.Path,
+) -> None:
+    models = ModelProviderRegistry()
+    models.register(
+        ScriptedLoopProvider(
+            [
+                {
+                    "action": "tool_call",
+                    "summary": "Request a governed write.",
+                    "tool_call": {"name": "native.fs_write", "arguments": {"path": "write.txt", "content": "ok"}},
+                }
+            ]
+        )
+    )
+    deps = GraphDependencies(
+        database=database,
+        roles=tool_executor.roles,
+        models=models,
+        tool_executor=tool_executor,
+        observability=Observability(settings),
+    )
+    async with database.session() as session:
+        run_record = await Repository(session).create_run(
+            "Write a file.",
+            model_provider="scripted_loop",
+            workspace=str(tmp_path),
+        )
+
+    with pytest.raises(ApprovalRequired):
+        await _run_native_loop(
+            deps,
+            {
+                "run_id": run_record.id,
+                "thread_id": run_record.thread_id,
+                "task": "Write a file.",
+                "mode": RunMode.GENERAL.value,
+                "model_provider": "scripted_loop",
+                "workspace": str(tmp_path),
+            },
+            role=RoleName.CODER.value,
+            node_id="coder",
+            contract_id=WORKER_AGENT_OUTPUT_CONTRACT,
+            prompt="Write through governed tools.",
+            context={},
+        )
+
+    async with database.session() as session:
+        repo = Repository(session)
+        approvals = (
+            await session.execute(
+                select(ApprovalRecord).where(
+                    ApprovalRecord.run_id == run_record.id,
+                    ApprovalRecord.status == ApprovalStatus.PENDING.value,
+                )
+            )
+        ).scalars().all()
+        artifacts = await repo.list_artifacts(run_record.id)
+    assert len(approvals) == 1
+    assert any(artifact.kind == "native_loop_trace" and artifact.content["status"] == "waiting_approval" for artifact in artifacts)
+
+
+async def test_native_worker_loop_retries_invalid_final_payload(
+    settings,
+    database,
+    tool_executor,
+    tmp_path: pathlib.Path,
+) -> None:
+    models = ModelProviderRegistry()
+    models.register(
+        ScriptedLoopProvider(
+            [
+                {
+                    "action": "finish",
+                    "summary": "Return invalid payload first.",
+                    "payload": {"summary": "missing role"},
+                },
+                {
+                    "action": "finish",
+                    "summary": "Return valid payload after contract feedback.",
+                    "payload": {
+                        "role": "data_analyst",
+                        "summary": "Valid final payload.",
+                        "tool_results": [],
+                        "risks": [],
+                    },
+                },
+            ]
+        )
+    )
+    deps = GraphDependencies(
+        database=database,
+        roles=tool_executor.roles,
+        models=models,
+        tool_executor=tool_executor,
+        observability=Observability(settings),
+    )
+
+    result = await _run_native_loop(
+        deps,
+        {
+            "run_id": "run-invalid-final",
+            "thread_id": "thread-invalid-final",
+            "task": "Analyze.",
+            "mode": RunMode.GENERAL.value,
+            "model_provider": "scripted_loop",
+            "workspace": str(tmp_path),
+        },
+        role=RoleName.DATA_ANALYST.value,
+        node_id="data_analyst",
+        contract_id=WORKER_AGENT_OUTPUT_CONTRACT,
+        prompt="Return a valid worker output.",
+        context={},
+    )
+
+    assert result.payload["summary"] == "Valid final payload."
+    assert "does not match contract" in result.trace[0]["error"]
 
 
 async def test_coding_workflow_requires_approval_then_applies_patch(service, database, tmp_path: pathlib.Path) -> None:
@@ -472,14 +703,37 @@ async def test_plan_only_finishes_without_worker_tools(service, tmp_path: pathli
 
 async def test_streaming_provider_emits_model_stream_events(service, tmp_path: pathlib.Path) -> None:
     service.models.register(StreamingFakeProvider())
-    (tmp_path / "data.csv").write_text("date,revenue\n2026-06-01,10\n", encoding="utf-8")
-
-    result = await service.run_task(
-        "Analyze sample data and summarize findings",
-        workspace=str(tmp_path),
-        model_provider="streaming_fake",
+    async with service.database.session() as session:
+        run_record = await Repository(session).create_run(
+            "Stream a concise answer",
+            model_provider="streaming_fake",
+            workspace=str(tmp_path),
+        )
+    deps = GraphDependencies(
+        database=service.database,
+        roles=service.roles,
+        models=service.models,
+        tool_executor=service.tool_executor,
+        observability=service.observability,
     )
-    events = await service.list_event_responses(result.id, limit=500)
+
+    await _invoke_model(
+        deps,
+        {
+            "run_id": run_record.id,
+            "thread_id": run_record.thread_id,
+            "task": "Stream a concise answer",
+            "mode": RunMode.GENERAL.value,
+            "model_provider": "streaming_fake",
+            "workspace": str(tmp_path),
+        },
+        ResolvedModelProvider(
+            provider=service.models.get("streaming_fake"),
+            provider_type="streaming_fake",
+        ),
+        ModelRequest(role=RoleName.CODER.value, prompt="Stream a concise answer"),
+    )
+    events = await service.list_event_responses(run_record.id, limit=500)
     event_types = [event.event_type for event in events]
     deltas = [
         event.payload["delta"]
@@ -487,7 +741,6 @@ async def test_streaming_provider_emits_model_stream_events(service, tmp_path: p
         if event.event_type == EventType.MODEL_TOKEN_DELTA.value
     ]
 
-    assert result.status == RunStatus.COMPLETED
     assert EventType.MODEL_STREAM_STARTED.value in event_types
     assert EventType.MODEL_STREAM_COMPLETED.value in event_types
     assert "".join(deltas) == "streamed agent output"

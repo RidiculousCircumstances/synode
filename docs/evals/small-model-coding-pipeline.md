@@ -5,6 +5,12 @@ shrinking each model call into a strict, evidence-based step.
 
 ## Runtime behavior
 
+- Native worker execution runs as a bounded action/observation loop. Each step
+  must be a structured `NativeLoopAction`: call one allowed tool, ask the
+  operator, or finish with a valid node contract payload.
+- Coding inspection and patch proposal use the same native loop boundary, so
+  small models can inspect, observe, and retry before returning structured
+  `CodingInspection` or `PatchProposal` payloads.
 - Coding runs create a `coding_context_packet` artifact before patch proposal.
 - The packet repeats the task, strict editing rules, allowed verification
   commands, relevant file windows, file hashes, inspection output, and repair

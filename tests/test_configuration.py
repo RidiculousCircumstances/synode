@@ -158,6 +158,7 @@ async def test_openhands_node_backend_completes_coding_run(settings, database, t
     assert result.status == RunStatus.COMPLETED
     assert result.agent_graph_snapshot["node_runtime_bindings"]["coder"] == RuntimeBackend.OPENHANDS
     assert "OpenHands completed" in (result.final_answer or "")
+    assert len(client.payloads) == 1
     assert any(artifact.kind == "openhands_coder" for artifact in artifacts)
     proxy_config = client.payloads[0]["mcp_servers"]["synode"]
     assert "/mcp/proxy/" in proxy_config["url"]

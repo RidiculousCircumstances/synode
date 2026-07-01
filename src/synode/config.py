@@ -27,6 +27,9 @@ class Settings(BaseSettings):
     coding_repair_attempts: int = 2
     coding_context_max_bytes: int = 24000
     coding_file_window_lines: int = 120
+    native_loop_max_steps: int = 8
+    native_loop_context_max_bytes: int = 24000
+    native_loop_observation_max_bytes: int = 6000
     sandbox_backend: Literal["process", "docker", "none"] = "process"
     sandbox_cpu_seconds: int = 30
     sandbox_memory_mb: int = 512
@@ -128,6 +131,9 @@ class Settings(BaseSettings):
             "SYNODE_CODING_REPAIR_ATTEMPTS": self.coding_repair_attempts,
             "SYNODE_CODING_CONTEXT_MAX_BYTES": self.coding_context_max_bytes,
             "SYNODE_CODING_FILE_WINDOW_LINES": self.coding_file_window_lines,
+            "SYNODE_NATIVE_LOOP_MAX_STEPS": self.native_loop_max_steps,
+            "SYNODE_NATIVE_LOOP_CONTEXT_MAX_BYTES": self.native_loop_context_max_bytes,
+            "SYNODE_NATIVE_LOOP_OBSERVATION_MAX_BYTES": self.native_loop_observation_max_bytes,
             "SYNODE_SANDBOX_CPU_SECONDS": self.sandbox_cpu_seconds,
             "SYNODE_SANDBOX_MEMORY_MB": self.sandbox_memory_mb,
             "SYNODE_SANDBOX_DISK_MB": self.sandbox_disk_mb,

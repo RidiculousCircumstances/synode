@@ -14,8 +14,13 @@ from synode.models.errors import (
     ModelResponseError,
     StructuredOutputValidationError,
 )
+from synode.runtime.contracts import (
+    CODING_INSPECTION_CONTRACT,
+    CODING_PATCH_PROPOSAL_CONTRACT,
+)
 from synode.runtime.decisions import (
     CodingInspection,
+    NativeLoopAction,
     PatchProposal,
     ReviewerDecision,
     ReviewerVerdict,
@@ -153,6 +158,59 @@ class FakeModelProvider:
             if isinstance(proposal, dict):
                 return PatchProposal.model_validate(proposal).model_dump(mode="json")
             raise StructuredOutputValidationError("fake PatchProposal requires fake_patch_proposal context")
+        if schema is NativeLoopAction:
+            action = request.context.get("fake_native_loop_action")
+            if isinstance(action, dict):
+                return NativeLoopAction.model_validate(action).model_dump(mode="json")
+            planned = request.context.get("planned_tool_calls")
+            history = request.context.get("loop_history")
+            has_tool_result = isinstance(history, list) and any(
+                isinstance(item, dict) and item.get("action") == "tool_call"
+                for item in history
+            )
+            if isinstance(planned, list) and planned and not has_tool_result:
+                return NativeLoopAction(
+                    action="tool_call",
+                    summary="Execute the first deterministic planned tool call.",
+                    tool_call=ToolCall.model_validate(planned[0]),
+                ).model_dump(mode="json")
+            contract_id = str(request.context.get("contract_id") or "")
+            if contract_id == CODING_INSPECTION_CONTRACT:
+                return NativeLoopAction(
+                    action="finish",
+                    summary="Finish deterministic coding inspection.",
+                    payload=CodingInspection(
+                        summary="Deterministic fake coding inspection.",
+                        relevant_files=["README.md"],
+                        observed_failures=[],
+                        proposed_test_commands=[["python", "-m", "pytest"]],
+                    ).model_dump(mode="json"),
+                ).model_dump(mode="json")
+            if contract_id == CODING_PATCH_PROPOSAL_CONTRACT:
+                proposal = request.context.get("fake_patch_proposal")
+                if isinstance(proposal, dict):
+                    payload = PatchProposal.model_validate(proposal).model_dump(mode="json")
+                else:
+                    payload = PatchProposal(
+                        action="no_change",
+                        summary="No deterministic fake patch fixture was provided.",
+                        verification_commands=[["python", "-m", "pytest"]],
+                    ).model_dump(mode="json")
+                return NativeLoopAction(
+                    action="finish",
+                    summary="Finish deterministic patch proposal.",
+                    payload=payload,
+                ).model_dump(mode="json")
+            return NativeLoopAction(
+                action="finish",
+                summary="Finish deterministic worker loop.",
+                payload={
+                    "role": request.role,
+                    "summary": f"{request.role} completed deterministic native loop.",
+                    "tool_results": [],
+                    "risks": [],
+                },
+            ).model_dump(mode="json")
         if schema is VerificationPlan:
             commands = request.context.get("commands") or [["python", "-m", "pytest"]]
             verification_plan = VerificationPlan(commands=commands, reason="Deterministic fake verification plan.")

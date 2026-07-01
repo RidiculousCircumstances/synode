@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -112,3 +112,21 @@ class PatchProposal(BaseModel):
 class VerificationPlan(BaseModel):
     commands: list[list[str]] = Field(min_length=1)
     reason: str = Field(min_length=1)
+
+
+class NativeLoopAction(BaseModel):
+    action: Literal["tool_call", "finish", "needs_operator"]
+    summary: str = Field(min_length=1)
+    tool_call: ToolCall | None = None
+    payload: dict[str, Any] = Field(default_factory=dict)
+    operator_question: str | None = None
+
+    @model_validator(mode="after")
+    def validate_action_payload(self) -> "NativeLoopAction":
+        if self.action == "tool_call" and self.tool_call is None:
+            raise ValueError("tool_call action requires tool_call")
+        if self.action == "finish" and not self.payload:
+            raise ValueError("finish action requires payload")
+        if self.action == "needs_operator" and not (self.operator_question or "").strip():
+            raise ValueError("needs_operator action requires operator_question")
+        return self

@@ -191,6 +191,10 @@
   `no_change`, or `needs_operator`, verification commands are selected from a
   Synode-generated allowlist, invalid candidates become typed failure
   categories, and repair attempts are bounded by runtime settings.
+- Native worker nodes now run through a bounded `NativeLoopAction`
+  action/observation loop. Tools are executed only through Synode's governed
+  `ToolExecutor`, final payloads must validate against node contracts, and
+  `native_loop_trace` artifacts capture loop steps.
 - API-driven coding eval tooling is available through `synode eval coding` and
   `make eval-coding`. Tracked task templates live in
   `src/synode/evals/coding_tasks.json`; runtime workspaces/reports remain under
