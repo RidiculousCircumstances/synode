@@ -919,6 +919,15 @@ function runtimeFixture() {
     stale_running_count: 0,
     worker_concurrency: 2,
     secrets_configured: true,
+    queue: {
+      backend: "procrastinate",
+      available: true,
+      detail: "Procrastinate queue is reachable",
+      queue_name: "synode_runs",
+      pending_jobs: 1,
+      running_jobs: 1,
+      failed_jobs: 0,
+    },
     workers: [
       {
         worker_id: "layout-worker:slot-1",

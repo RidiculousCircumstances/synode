@@ -16,8 +16,9 @@ curl http://127.0.0.1:8787/runtime/status
 ```
 
 The stack runs a one-shot `migrate` service before the API and worker start.
-Ollama remains outside Docker and is reached through the host network at
-`127.0.0.1:11434` by default.
+That job applies both Synode's Alembic migrations and the Procrastinate queue
+schema. Ollama remains outside Docker and is reached through the host network
+at `127.0.0.1:11434` by default.
 
 For trusted LAN access, bind only the ports you intend to share and use a host
 firewall to restrict clients. If a reverse proxy is used, terminate TLS there
@@ -25,13 +26,15 @@ and restrict access to trusted source networks.
 
 ## Worker Runtime
 
-HTTP requests create runs and move them to `queued`. The worker claims queued
-runs from Postgres, heartbeats while executing, and records state in the run
-row plus `worker_heartbeats`.
+HTTP requests create runs and move them to `queued`. Procrastinate dispatches a
+small `run_id` job to the worker; the Synode `runs` table remains the source of
+truth for execution state. The worker exact-claims the dispatched run, heartbeats
+while executing, and records state in the run row plus `worker_heartbeats`.
 
 Useful checks:
 
 ```bash
+synode queue upgrade
 synode runtime status
 synode worker once
 synode worker run

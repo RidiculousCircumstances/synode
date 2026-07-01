@@ -254,6 +254,15 @@ class Repository:
             query = query.where(RunRecord.status == status.value)
         return int(await self.session.scalar(query) or 0)
 
+    async def list_queued_run_ids(self, limit: int = 1000) -> list[str]:
+        result = await self.session.execute(
+            select(RunRecord.id)
+            .where(RunRecord.status == RunStatus.QUEUED.value)
+            .order_by(RunRecord.queued_at.asc().nulls_last(), RunRecord.created_at.asc(), RunRecord.id.asc())
+            .limit(limit)
+        )
+        return [str(run_id) for run_id in result.scalars().all()]
+
     async def count_stale_running_runs(self, stale_before: datetime) -> int:
         return int(
             await self.session.scalar(
@@ -356,12 +365,10 @@ class Repository:
             await self.add_event(run_id, EventType.RUN_QUEUED.value, None, {})
         return run
 
-    async def claim_next_queued_run(self, worker_id: str) -> RunRecord | None:
-        query = (
-            select(RunRecord)
-            .where(RunRecord.status == RunStatus.QUEUED.value)
-            .order_by(RunRecord.queued_at.asc().nulls_last(), RunRecord.created_at.asc(), RunRecord.id.asc())
-            .limit(1)
+    async def claim_queued_run(self, run_id: str, worker_id: str) -> RunRecord | None:
+        query = select(RunRecord).where(
+            RunRecord.id == run_id,
+            RunRecord.status == RunStatus.QUEUED.value,
         )
         if self.session.bind is not None and self.session.bind.dialect.name == "postgresql":
             query = query.with_for_update(skip_locked=True)
@@ -413,7 +420,7 @@ class Repository:
         await self.session.flush()
         return run
 
-    async def recover_stale_runs(self, stale_before: datetime) -> dict[str, int]:
+    async def recover_stale_runs(self, stale_before: datetime) -> dict[str, Any]:
         running = await self.session.execute(
             select(RunRecord).where(
                 RunRecord.status == RunStatus.RUNNING.value,
@@ -434,6 +441,8 @@ class Repository:
         )
         recovered = 0
         cancelled = 0
+        recovered_run_ids: list[str] = []
+        cancelled_run_ids: list[str] = []
         for run in running.scalars().all():
             now = datetime.now(UTC)
             run.status = RunStatus.QUEUED.value
@@ -450,6 +459,7 @@ class Repository:
                 {"reason": "stale_worker_recovery"},
             )
             recovered += 1
+            recovered_run_ids.append(run.id)
         for run in cancelling.scalars().all():
             run.worker_id = None
             run.heartbeat_at = None
@@ -466,8 +476,14 @@ class Repository:
                 {"reason": run.error or "Run stopped by user.", "stale": True},
             )
             cancelled += 1
+            cancelled_run_ids.append(run.id)
         await self.session.flush()
-        return {"requeued": recovered, "cancelled": cancelled}
+        return {
+            "requeued": recovered,
+            "cancelled": cancelled,
+            "requeued_run_ids": recovered_run_ids,
+            "cancelled_run_ids": cancelled_run_ids,
+        }
 
     async def add_event(
         self, run_id: str, event_type: str, role: str | None, payload: dict[str, Any]

@@ -527,6 +527,16 @@ class WorkerHeartbeatResponse(BaseModel):
     heartbeat_at: datetime
 
 
+class QueueStatusResponse(BaseModel):
+    backend: str
+    available: bool
+    detail: str | None = None
+    queue_name: str | None = None
+    pending_jobs: int | None = None
+    running_jobs: int | None = None
+    failed_jobs: int | None = None
+
+
 class RuntimeStatusResponse(BaseModel):
     queue_depth: int
     running_count: int
@@ -534,6 +544,7 @@ class RuntimeStatusResponse(BaseModel):
     stale_running_count: int
     worker_concurrency: int
     secrets_configured: bool
+    queue: QueueStatusResponse
     workers: list[WorkerHeartbeatResponse] = Field(default_factory=list)
     sandbox: SandboxStatusResponse
 

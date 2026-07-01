@@ -28,6 +28,11 @@ from synode.persistence.repository import (
 )
 from synode.registry import RoleRegistry, RoleSpec
 from synode.runtime.graph import GraphDependencies, build_graph
+from synode.runtime.queue import (
+    MissingRunQueueTransport,
+    RunQueueTransport,
+    build_run_queue_transport,
+)
 from synode.schemas import (
     AgentGraphCreateRequest,
     AgentGraphResponse,
@@ -49,6 +54,7 @@ from synode.schemas import (
     ModelProfileUpdateRequest,
     ModelProviderType,
     ProcessMetrics,
+    QueueStatusResponse,
     RoleName,
     RunEventResponse,
     RunMetricsResponse,
@@ -112,6 +118,7 @@ class OrchestrationService:
         models: ModelProviderRegistry,
         tools: ToolRegistry,
         observability: Observability | None = None,
+        run_queue: RunQueueTransport | None = None,
     ):
         self.settings = settings
         self.database = database
@@ -119,12 +126,14 @@ class OrchestrationService:
         self.models = models
         self.tools = tools
         self.observability = observability or Observability(settings)
+        self.run_queue: RunQueueTransport = run_queue or MissingRunQueueTransport()
         self.secret_cipher = SecretCipher(settings) if settings.secrets_key else None
         self.tool_executor = ToolExecutor(database, roles, tools, settings, self.observability)
         self._run_tasks: dict[str, asyncio.Task[None]] = {}
         self._stop_reasons: dict[str, str] = {}
 
     async def start_run(self, run_id: str) -> None:
+        log_fields: dict[str, Any] = {}
         async with self.database.session() as session:
             repo = Repository(session)
             run = await repo.get_run(run_id)
@@ -135,14 +144,30 @@ class OrchestrationService:
             if run.status in {RunStatus.RUNNING.value, RunStatus.CANCELLING.value}:
                 raise ValueError(f"run is already active: {run_id}")
             await repo.enqueue_run(run_id)
+            log_fields = {
+                "run_id": run.id,
+                "thread_id": run.thread_id,
+                "trace_id": run.observability_trace_id,
+                "provider": run.model_provider,
+            }
+        try:
+            await self.run_queue.enqueue_run(run_id)
+        except Exception as exc:
             log_event(
                 logger,
-                EventType.RUN_QUEUED.value,
-                run_id=run.id,
-                thread_id=run.thread_id,
-                trace_id=run.observability_trace_id,
-                provider=run.model_provider,
+                "run_queue_enqueue_failed",
+                **log_fields,
+                queue_backend=self.run_queue.backend,
+                error_class=exc.__class__.__name__,
+                error=str(exc),
             )
+            raise
+        log_event(
+            logger,
+            EventType.RUN_QUEUED.value,
+            **log_fields,
+            queue_backend=self.run_queue.backend,
+        )
 
     async def _execute_run_background(self, run_id: str) -> None:
         try:
@@ -737,7 +762,7 @@ class OrchestrationService:
                 raise LookupError(f"run not found: {run_id}")
             if run.status in TERMINAL_RUN_STATUSES:
                 raise ValueError(f"run is terminal: {run_id}")
-        await self.execute_run(run_id)
+        await self.start_run(run_id)
 
     async def stop_run(self, run_id: str, reason: str | None = None) -> RunResponse:
         stop_reason = reason or "Run stopped by user."
@@ -803,10 +828,10 @@ class OrchestrationService:
                 return run.error
         return "Run stopped by user."
 
-    async def claim_next_queued_run(self, worker_id: str) -> RunResponse | None:
+    async def claim_queued_run(self, run_id: str, worker_id: str) -> RunResponse | None:
         async with self.database.session() as session:
             repo = Repository(session)
-            run = await repo.claim_next_queued_run(worker_id)
+            run = await repo.claim_queued_run(run_id, worker_id)
             return to_run_response(run) if run is not None else None
 
     async def heartbeat_run(self, run_id: str, worker_id: str) -> None:
@@ -844,11 +869,17 @@ class OrchestrationService:
                 heartbeat_at=record.heartbeat_at,
             )
 
-    async def recover_stale_runs(self) -> dict[str, int]:
+    async def recover_stale_runs(self) -> dict[str, Any]:
         stale_before = datetime.now(UTC) - timedelta(seconds=self.settings.worker_stale_after_seconds)
         async with self.database.session() as session:
             repo = Repository(session)
             return await repo.recover_stale_runs(stale_before)
+
+    async def reconcile_run_queue(self) -> int:
+        async with self.database.session() as session:
+            repo = Repository(session)
+            run_ids = await repo.list_queued_run_ids(limit=self.settings.db_row_limit)
+        return await self.run_queue.reconcile_runs(run_ids)
 
     async def runtime_status(self) -> RuntimeStatusResponse:
         stale_before = datetime.now(UTC) - timedelta(seconds=self.settings.worker_stale_after_seconds)
@@ -859,6 +890,7 @@ class OrchestrationService:
             running_count = await repo.count_runs(RunStatus.RUNNING)
             cancelling_count = await repo.count_runs(RunStatus.CANCELLING)
             stale_running_count = await repo.count_stale_running_runs(stale_before)
+        queue = await self.run_queue.status()
         return RuntimeStatusResponse(
             queue_depth=queue_depth,
             running_count=running_count,
@@ -866,6 +898,15 @@ class OrchestrationService:
             stale_running_count=stale_running_count,
             worker_concurrency=self.settings.worker_concurrency,
             secrets_configured=bool(self.settings.secrets_key and self.settings.secrets_key.strip()),
+            queue=QueueStatusResponse(
+                backend=queue.backend,
+                available=queue.available,
+                detail=queue.detail,
+                queue_name=queue.queue_name,
+                pending_jobs=queue.pending_jobs,
+                running_jobs=queue.running_jobs,
+                failed_jobs=queue.failed_jobs,
+            ),
             workers=[
                 WorkerHeartbeatResponse(
                     worker_id=heartbeat.worker_id,
@@ -1455,6 +1496,7 @@ class OrchestrationService:
             with suppress(asyncio.CancelledError):
                 await task
         self._run_tasks.clear()
+        await self.run_queue.close()
         await self.database.close()
         self.observability.shutdown()
 
@@ -1488,9 +1530,15 @@ async def create_service(settings: Settings, include_mcp: bool = True) -> Orches
     models = ModelProviderRegistry(settings)
     observability = Observability(settings)
     tools = await build_tool_registry(settings, include_mcp=include_mcp)
-    service = OrchestrationService(settings, database, roles, models, tools, observability)
-    await service.ensure_default_configuration()
-    return service
+    run_queue = build_run_queue_transport(settings)
+    service = OrchestrationService(settings, database, roles, models, tools, observability, run_queue)
+    try:
+        await run_queue.open()
+        await service.ensure_default_configuration()
+        return service
+    except Exception:
+        await service.close()
+        raise
 
 
 def _sum_token_usage(items: Any) -> TokenUsage:

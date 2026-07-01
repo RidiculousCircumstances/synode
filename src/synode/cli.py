@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
-import signal
 from pathlib import Path
 
 import typer
@@ -15,6 +13,7 @@ from rich.console import Console
 from synode.config import Settings
 from synode.persistence.database import Database
 from synode.persistence.urls import to_sync_database_url
+from synode.runtime.queue import build_run_queue_transport
 from synode.runtime.service import create_service
 from synode.runtime.worker import RunWorker
 from synode.schemas import RunMode
@@ -26,6 +25,7 @@ tools_app = typer.Typer(help="Tool registry commands")
 mcp_app = typer.Typer(help="MCP commands")
 models_app = typer.Typer(help="Model provider commands")
 worker_app = typer.Typer(help="Worker commands")
+queue_app = typer.Typer(help="Run queue commands")
 runtime_app = typer.Typer(help="Runtime diagnostics")
 maintenance_app = typer.Typer(help="Maintenance commands")
 app.add_typer(db_app, name="db")
@@ -34,6 +34,7 @@ app.add_typer(tools_app, name="tools")
 app.add_typer(mcp_app, name="mcp")
 app.add_typer(models_app, name="models")
 app.add_typer(worker_app, name="worker")
+app.add_typer(queue_app, name="queue")
 app.add_typer(runtime_app, name="runtime")
 app.add_typer(maintenance_app, name="maintenance")
 console = Console()
@@ -93,7 +94,25 @@ def db_upgrade() -> None:
         cfg = Config(str(Path(__file__).resolve().parents[2] / "alembic.ini"))
         cfg.set_main_option("sqlalchemy.url", to_sync_database_url(settings.database_url))
         command.upgrade(cfg, "head")
+    if settings.run_queue_transport == "procrastinate":
+        applied = asyncio.run(_queue_upgrade(settings))
+        console.print("queue schema applied" if applied else "queue schema already present")
     console.print("database upgraded")
+
+
+@queue_app.command("upgrade")
+def queue_upgrade() -> None:
+    settings = Settings()
+    applied = asyncio.run(_queue_upgrade(settings))
+    console.print("queue schema applied" if applied else "queue schema already present")
+
+
+async def _queue_upgrade(settings: Settings) -> bool:
+    queue = build_run_queue_transport(settings)
+    try:
+        return await queue.apply_schema()
+    finally:
+        await queue.close()
 
 
 @agents_app.command("list")
@@ -205,10 +224,6 @@ def worker_run(worker_id: str | None = typer.Option(None, "--worker-id")) -> Non
     async def _run() -> None:
         service = await create_service(Settings(), include_mcp=True)
         worker = RunWorker(service, worker_id=worker_id)
-        loop = asyncio.get_running_loop()
-        for signame in ("SIGINT", "SIGTERM"):
-            with contextlib.suppress(NotImplementedError):
-                loop.add_signal_handler(getattr(signal, signame), worker.stop)
         try:
             await worker.serve_forever()
         finally:
@@ -238,6 +253,8 @@ def runtime_status(check: bool = typer.Option(False, "--check")) -> None:
         try:
             status = await service.runtime_status()
             if check and not status.workers:
+                raise typer.Exit(1)
+            if check and not status.queue.available:
                 raise typer.Exit(1)
             console.print_json(data=status.model_dump(mode="json"))
         finally:

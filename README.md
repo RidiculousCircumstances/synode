@@ -113,14 +113,20 @@ run-detail tabs, agent graph monitoring, timeline, approvals, artifacts,
 diff/tests, settings, and observability views. Threads are the user-facing
 workspace; runs are immutable execution attempts inside a thread.
 
-API requests enqueue runs and return quickly. A worker process claims queued
-runs from Postgres, heartbeats while executing, and requeues stale running runs
-after worker heartbeat expiry. Active runs can be stopped from the API/UI. A
+API requests enqueue runs and return quickly. Procrastinate dispatches `run_id`
+jobs to the worker, while the Synode `runs` table remains the source of truth
+for queued/running/completed state. Workers exact-claim the dispatched run,
+heartbeat while executing, and requeue stale running runs after worker heartbeat
+expiry. Active runs can be stopped from the API/UI. A
 queued or waiting run becomes terminal `cancelled`; a worker-owned run first
 enters `cancelling` so the worker can cancel the in-flight graph. Rejecting an
 approval also cancels that run, because the rejected mutation must not resume
 implicitly. Growing list endpoints accept `limit` and `offset`; repository
 queries apply pagination in the database.
+
+`synode db upgrade` also applies the Procrastinate queue schema. Use
+`synode queue upgrade` only when you need to repair or verify the queue schema
+separately.
 
 Deterministic test smoke without a real model:
 

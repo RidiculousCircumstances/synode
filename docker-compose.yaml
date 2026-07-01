@@ -34,6 +34,9 @@ services:
     environment:
       SYNODE_DATABASE_URL: postgresql+asyncpg://synode:synode@127.0.0.1:${SYNODE_POSTGRES_PORT:-15432}/synode
       SYNODE_CHECKPOINT_DATABASE_URL: postgresql://synode:synode@127.0.0.1:${SYNODE_POSTGRES_PORT:-15432}/synode?sslmode=disable
+      SYNODE_RUN_QUEUE_TRANSPORT: procrastinate
+      SYNODE_QUEUE_DATABASE_URL: postgresql://synode:synode@127.0.0.1:${SYNODE_POSTGRES_PORT:-15432}/synode?sslmode=disable
+      SYNODE_QUEUE_NAME: ${SYNODE_QUEUE_NAME:-synode_runs}
       SYNODE_ENABLE_POSTGRES_CHECKPOINTER: "true"
       SYNODE_SEARXNG_URL: http://127.0.0.1:${SYNODE_SEARXNG_PORT:-18080}
       SYNODE_MODEL_PROVIDER: ollama
@@ -64,6 +67,9 @@ services:
     environment:
       SYNODE_DATABASE_URL: postgresql+asyncpg://synode:synode@127.0.0.1:${SYNODE_POSTGRES_PORT:-15432}/synode
       SYNODE_CHECKPOINT_DATABASE_URL: postgresql://synode:synode@127.0.0.1:${SYNODE_POSTGRES_PORT:-15432}/synode?sslmode=disable
+      SYNODE_RUN_QUEUE_TRANSPORT: procrastinate
+      SYNODE_QUEUE_DATABASE_URL: postgresql://synode:synode@127.0.0.1:${SYNODE_POSTGRES_PORT:-15432}/synode?sslmode=disable
+      SYNODE_QUEUE_NAME: ${SYNODE_QUEUE_NAME:-synode_runs}
       SYNODE_ENABLE_POSTGRES_CHECKPOINTER: "true"
       SYNODE_SEARXNG_URL: http://127.0.0.1:${SYNODE_SEARXNG_PORT:-18080}
       SYNODE_MODEL_PROVIDER: ollama
@@ -97,6 +103,9 @@ services:
     environment:
       SYNODE_DATABASE_URL: postgresql+asyncpg://synode:synode@127.0.0.1:${SYNODE_POSTGRES_PORT:-15432}/synode
       SYNODE_CHECKPOINT_DATABASE_URL: postgresql://synode:synode@127.0.0.1:${SYNODE_POSTGRES_PORT:-15432}/synode?sslmode=disable
+      SYNODE_RUN_QUEUE_TRANSPORT: procrastinate
+      SYNODE_QUEUE_DATABASE_URL: postgresql://synode:synode@127.0.0.1:${SYNODE_POSTGRES_PORT:-15432}/synode?sslmode=disable
+      SYNODE_QUEUE_NAME: ${SYNODE_QUEUE_NAME:-synode_runs}
       SYNODE_WORKSPACE_ALLOWLIST: /workspace,/app/samples,/tmp
       SYNODE_MCP_CONFIG_PATH: /app/.mcp.json
       SYNODE_SANDBOX_BACKEND: ${SYNODE_SANDBOX_BACKEND:-process}

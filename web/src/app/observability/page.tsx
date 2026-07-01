@@ -64,11 +64,14 @@ export default function ObservabilityPage() {
         <Panel title="Runtime">
           <div className="summary-grid">
             <MetricTile label="Queued" value={runtime?.queue_depth ?? 0} />
+            <MetricTile label="Queue backend" value={runtime?.queue.backend ?? "unknown"} />
+            <MetricTile label="Queue status" value={<StatusBadge value={runtime?.queue.available ? "ready" : "error"} />} />
             <MetricTile label="Running" value={runtime?.running_count ?? 0} />
             <MetricTile label="Cancelling" value={runtime?.cancelling_count ?? 0} />
             <MetricTile label="Stale" value={runtime?.stale_running_count ?? 0} tone={(runtime?.stale_running_count ?? 0) > 0 ? "danger" : "normal"} />
             <MetricTile label="Concurrency" value={runtime?.worker_concurrency ?? 1} />
           </div>
+          {runtime?.queue.detail ? <div className="muted">{runtime.queue.detail}</div> : null}
           <CompactList>
             {(runtime?.workers ?? []).map((worker) => (
               <CompactRow key={worker.worker_id} className="provider-row">

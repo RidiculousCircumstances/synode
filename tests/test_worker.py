@@ -82,7 +82,7 @@ async def test_worker_service_honors_configured_concurrency(
 async def test_stale_running_run_is_requeued(service, database, tmp_path: pathlib.Path) -> None:
     run = await service.create_run("Recover this", workspace=str(tmp_path), model_provider="fake")
     await service.start_run(run.id)
-    claimed = await service.claim_next_queued_run("stale-worker")
+    claimed = await service.claim_queued_run(run.id, "stale-worker")
     assert claimed is not None
 
     async with database.session() as session:
@@ -104,7 +104,7 @@ async def test_stale_running_run_is_requeued(service, database, tmp_path: pathli
 async def test_stop_external_running_run_requests_cancellation(service, tmp_path: pathlib.Path) -> None:
     run = await service.create_run("Cancel this", workspace=str(tmp_path), model_provider="fake")
     await service.start_run(run.id)
-    claimed = await service.claim_next_queued_run("external-worker")
+    claimed = await service.claim_queued_run(run.id, "external-worker")
     assert claimed is not None
 
     stopped = await service.stop_run(run.id, "operator stop")

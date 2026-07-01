@@ -2,13 +2,16 @@ PYTHON ?= python3
 UV ?= uv
 PYTEST ?= $(UV) run pytest
 
-.PHONY: dev-install test lint typecheck guardrails smoke smoke-ollama fabricator-validate fabricator-smoke db-upgrade serve worker runtime-status cleanup backup restore ui-dev ui-build ui-lint ui-test docker-up docker-down docker-logs docker-smoke docker-sandbox-build docker-sandbox-up docker-observability-up docker-observability-down
+.PHONY: dev-install test lint typecheck guardrails smoke smoke-ollama fabricator-validate fabricator-smoke db-upgrade queue-upgrade serve worker runtime-status cleanup backup restore ui-dev ui-build ui-lint ui-test docker-up docker-down docker-logs docker-smoke docker-sandbox-build docker-sandbox-up docker-observability-up docker-observability-down
 
 dev-install:
 	$(UV) sync --extra dev
 
 db-upgrade:
 	$(UV) run synode db upgrade
+
+queue-upgrade:
+	$(UV) run synode queue upgrade
 
 test:
 	$(PYTEST)

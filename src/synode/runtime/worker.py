@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import socket
@@ -24,70 +25,79 @@ class RunWorker:
         self._stopping = False
 
     async def serve_forever(self) -> None:
-        slot_ids = self._slot_ids()
-        active: dict[str, asyncio.Task[None]] = {}
-        while not self._stopping or active:
-            if not self._stopping:
-                await self.service.recover_stale_runs()
-                for slot_id in slot_ids:
-                    if slot_id in active:
-                        continue
-                    run = await self.service.claim_next_queued_run(slot_id)
-                    if run is None:
-                        continue
-                    log_event(
-                        logger,
-                        "worker_claimed_run",
-                        worker_id=slot_id,
-                        run_id=run.id,
-                        thread_id=run.thread_id,
-                        trace_id=run.observability_trace_id,
-                        provider=run.model_provider,
-                    )
-                    active[slot_id] = asyncio.create_task(self._execute_claimed_run(run.id, slot_id))
-
-            completed_slots = [slot_id for slot_id, task in active.items() if task.done()]
-            for slot_id in completed_slots:
-                task = active.pop(slot_id)
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    logger.exception("worker slot failed", extra={"worker_id": slot_id})
-
-            if active:
-                await asyncio.wait(
-                    set(active.values()),
-                    timeout=self.service.settings.worker_poll_interval_seconds,
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-                continue
-
-            if self._stopping:
-                break
-            for slot_id in slot_ids:
-                await self._heartbeat("idle", None, slot_id)
-            await asyncio.sleep(self.service.settings.worker_poll_interval_seconds)
+        await self._recover_and_reconcile()
+        heartbeat = asyncio.create_task(self._idle_heartbeat_loop())
+        try:
+            await self.service.run_queue.run_worker(
+                worker_id=self.worker_id,
+                concurrency=self.service.settings.worker_concurrency,
+                wait=True,
+                handler=self._execute_queued_run,
+            )
+        finally:
+            heartbeat.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await heartbeat
 
     def stop(self) -> None:
         self._stopping = True
+        stop = getattr(self.service.run_queue, "stop", None)
+        if callable(stop):
+            stop()
 
     async def run_once(self) -> bool:
-        await self.service.recover_stale_runs()
-        run = await self.service.claim_next_queued_run(self.worker_id)
+        await self._recover_and_reconcile()
+        await self._heartbeat("idle", None, self.worker_id)
+        did_work = False
+
+        async def _handler(run_id: str, worker_id: str) -> bool:
+            nonlocal did_work
+            result = await self._execute_queued_run(run_id, worker_id)
+            did_work = did_work or result
+            return result
+
+        await self.service.run_queue.run_worker(
+            worker_id=self.worker_id,
+            concurrency=1,
+            wait=False,
+            handler=_handler,
+        )
+        return did_work
+
+    async def _idle_heartbeat_loop(self) -> None:
+        while not self._stopping:
+            await self._heartbeat("idle", None, self.worker_id)
+            await asyncio.sleep(self.service.settings.worker_heartbeat_interval_seconds)
+
+    async def _recover_and_reconcile(self) -> None:
+        recovered = await self.service.recover_stale_runs()
+        reconciled = await self.service.reconcile_run_queue()
+        log_event(
+            logger,
+            "worker_queue_reconciled",
+            worker_id=self.worker_id,
+            queue_backend=self.service.run_queue.backend,
+            requeued=recovered.get("requeued", 0),
+            cancelled=recovered.get("cancelled", 0),
+            reconciled=reconciled,
+        )
+
+    async def _execute_queued_run(self, run_id: str, worker_id: str) -> bool:
+        if self._stopping:
+            return False
+        run = await self.service.claim_queued_run(run_id, worker_id)
         if run is None:
             return False
         log_event(
             logger,
             "worker_claimed_run",
-            worker_id=self.worker_id,
+            worker_id=worker_id,
             run_id=run.id,
             thread_id=run.thread_id,
             trace_id=run.observability_trace_id,
             provider=run.model_provider,
         )
-        await self._execute_claimed_run(run.id, self.worker_id)
+        await self._execute_claimed_run(run.id, worker_id)
         return True
 
     async def _execute_claimed_run(self, run_id: str, worker_id: str) -> None:

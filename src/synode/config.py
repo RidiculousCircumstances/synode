@@ -42,6 +42,9 @@ class Settings(BaseSettings):
     worker_heartbeat_interval_seconds: float = 5.0
     worker_stale_after_seconds: float = 120.0
     worker_concurrency: int = 1
+    run_queue_transport: Literal["procrastinate"] = "procrastinate"
+    queue_database_url: str | None = None
+    queue_name: str = "synode_runs"
     run_event_retention_days: int = 30
     model_delta_retention_days: int = 7
     tool_audit_retention_days: int = 30
@@ -74,9 +77,23 @@ class Settings(BaseSettings):
     def api_cors_origin_list(self) -> list[str]:
         return [origin.strip() for origin in self.api_cors_origins.split(",") if origin.strip()]
 
+    @property
+    def resolved_queue_database_url(self) -> str:
+        return self.queue_database_url or self.checkpoint_database_url
+
     def validate_startup(self) -> None:
         if not self.database_url.strip():
             raise RuntimeError("SYNODE_DATABASE_URL is required")
+        if self.run_queue_transport != "procrastinate":
+            raise RuntimeError(f"unsupported SYNODE_RUN_QUEUE_TRANSPORT: {self.run_queue_transport}")
+        if not self.resolved_queue_database_url.strip():
+            raise RuntimeError("SYNODE_QUEUE_DATABASE_URL must not be blank")
+        if not self.resolved_queue_database_url.startswith(
+            ("postgresql://", "postgresql+psycopg://", "postgresql+asyncpg://")
+        ):
+            raise RuntimeError("SYNODE_QUEUE_DATABASE_URL must use PostgreSQL for Procrastinate")
+        if not self.queue_name.strip():
+            raise RuntimeError("SYNODE_QUEUE_NAME must not be blank")
         if not self.workspace_allowlist_paths:
             raise RuntimeError("SYNODE_WORKSPACE_ALLOWLIST must include at least one path")
         if self.shell_timeout_seconds <= 0:

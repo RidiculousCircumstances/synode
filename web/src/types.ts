@@ -182,6 +182,16 @@ export interface WorkerHeartbeat {
   heartbeat_at: string;
 }
 
+export interface QueueStatus {
+  backend: string;
+  available: boolean;
+  detail: string | null;
+  queue_name: string | null;
+  pending_jobs: number | null;
+  running_jobs: number | null;
+  failed_jobs: number | null;
+}
+
 export interface RuntimeStatus {
   queue_depth: number;
   running_count: number;
@@ -189,6 +199,7 @@ export interface RuntimeStatus {
   stale_running_count: number;
   worker_concurrency: number;
   secrets_configured: boolean;
+  queue: QueueStatus;
   workers: WorkerHeartbeat[];
   sandbox: SandboxStatus;
 }

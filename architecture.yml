@@ -10,6 +10,7 @@ components:
       - Tool policy, native tools, and MCP bridge
       - Persistence, conversational threads, agent graphs, encrypted secrets, audit log, and approval state
       - Structured run read models, SSE event stream with model deltas, run cancellation, and metrics endpoints
+      - Run queue adapter, Procrastinate dispatch, worker heartbeat, stale-run recovery, and exact run claims
       - Optional Langfuse trace emission
   - name: web
     path: web
@@ -73,6 +74,7 @@ rules:
   - UI must consume structured API read models and events, not parse final_answer.
   - MCP tools must pass the same policy and audit path as native tools.
   - Persistence owns mutable thread, run, event, approval, artifact, audit, and memory state.
+  - The run queue transports only `run_id` jobs; the `runs` table remains the source of truth for execution state.
   - Threads are the user-facing work unit; runs are immutable execution attempts inside threads.
   - Agent role YAML files must not name concrete model IDs.
   - DB-backed model profiles, role profile bindings, and agent graph snapshots own runtime model routing.
@@ -99,6 +101,14 @@ entrypoints:
     path: src/synode/cli.py
     type: cli
     command: synode db upgrade
+  - name: queue-upgrade
+    path: src/synode/cli.py
+    type: cli
+    command: synode queue upgrade
+  - name: worker
+    path: src/synode/cli.py
+    type: cli
+    command: synode worker run
   - name: model-health
     path: src/synode/cli.py
     type: cli
@@ -130,7 +140,7 @@ entrypoints:
 
 critical_flows:
   - name: run-task
-    description: User message becomes a thread run, graph execution, audited tool calls, reviewer output, and final answer.
+    description: User message becomes a thread run, Procrastinate `run_id` dispatch, exact worker claim, graph execution, audited tool calls, reviewer output, and final answer.
   - name: coding-task
     description: Coding task flows through structured planning, inspection, patch proposal, approval, patch apply, focused verification, and review.
   - name: structured-decision

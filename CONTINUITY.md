@@ -144,6 +144,9 @@
   slots while preserving single-run `worker once` behavior.
 - Workflows UI now uses compact top tabs and table views for graph presets and
   role catalog, with `/agents` kept as a compatible route.
+- Run execution dispatch now uses a Procrastinate-backed queue adapter. API
+  requests enqueue `run_id` jobs after marking runs queued, workers exact-claim
+  the dispatched run, and `synode db upgrade` applies the queue schema.
 
 ### Now:
 - MVP backend and operator UI include DB-backed runtime configuration screens
@@ -156,8 +159,8 @@
   runs from UI approval actions, and renders compact live status in the chat.
 - Default sandbox remains `process`; Docker sandbox is opt-in with an explicit
   local operator overlay that mounts `/var/run/docker.sock`.
-- Runtime diagnostics expose worker concurrency and whether
-  `SYNODE_SECRETS_KEY` is configured.
+- Runtime diagnostics expose worker concurrency, queue backend/status, and
+  whether `SYNODE_SECRETS_KEY` is configured.
 - Fabricator is available through `synode fabricator ...` and remains advisory:
   it creates planning/review artifacts but does not commit, push, or bypass
   Synode runtime tool policy.

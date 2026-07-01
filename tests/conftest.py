@@ -8,6 +8,7 @@ from synode.config import Settings
 from synode.models.provider import ModelProviderRegistry
 from synode.persistence.database import Database
 from synode.registry import RoleRegistry
+from synode.runtime.queue import InMemoryRunQueueTransport
 from synode.runtime.service import OrchestrationService
 from synode.tools import ToolExecutor, build_tool_registry
 
@@ -37,7 +38,14 @@ async def service(settings: Settings, database: Database) -> OrchestrationServic
     roles = RoleRegistry.load_builtin()
     models = ModelProviderRegistry()
     tools = await build_tool_registry(settings, include_mcp=False)
-    return OrchestrationService(settings, database, roles, models, tools)
+    return OrchestrationService(
+        settings,
+        database,
+        roles,
+        models,
+        tools,
+        run_queue=InMemoryRunQueueTransport(),
+    )
 
 
 @pytest.fixture()

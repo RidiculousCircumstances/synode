@@ -9,6 +9,7 @@ from sqlalchemy import select
 from synode.models.provider import FakeModelProvider, ModelRequest, ModelResponse
 from synode.persistence.models import ApprovalRecord
 from synode.persistence.repository import Repository
+from synode.runtime.worker import RunWorker
 from synode.schemas import ApprovalStatus, EventType, RunMode, RunStatus
 
 
@@ -68,6 +69,7 @@ async def test_coding_workflow_requires_approval_then_applies_patch(service, dat
 
     await service.approve(approval.id, "test approval")
     await service.resume_run(first.id)
+    assert await RunWorker(service, worker_id="approval-worker").run_once() is True
     second = await service.get_run(first.id)
 
     assert second.status == RunStatus.COMPLETED
@@ -101,6 +103,7 @@ async def test_coding_workflow_failed_tests_set_failed_verification(
 
     await service.approve(approval.id, "test approval")
     await service.resume_run(first.id)
+    assert await RunWorker(service, worker_id="approval-worker").run_once() is True
     second = await service.get_run(first.id)
 
     assert second.status == RunStatus.FAILED_VERIFICATION
