@@ -195,6 +195,12 @@
   action/observation loop. Tools are executed only through Synode's governed
   `ToolExecutor`, final payloads must validate against node contracts, and
   `native_loop_trace` artifacts capture loop steps.
+- Native loop policy modes are implemented for `strict`, `guided`, and
+  `autonomous`. Run creation resolves each node's effective mode from graph
+  node overrides, model profile `options.native_loop_mode`, or
+  `SYNODE_NATIVE_LOOP_DEFAULT_MODE`; native traces record phase/state,
+  duplicate guard feedback, finish-gate feedback, verification failure
+  summaries, and compact training transitions.
 - API-driven coding eval tooling is available through `synode eval coding` and
   `make eval-coding`. Tracked task templates live in
   `src/synode/evals/coding_tasks.json`; runtime workspaces/reports remain under
@@ -207,6 +213,9 @@
   patch+verify evidence, and grounded success. Reports are written
   incrementally after each task so long real-model runs preserve partial
   results.
+- Coding eval CLI accepts `--loop-mode strict|guided|autonomous`; the selected
+  mode is written into the eval model profile and native coder node policy for
+  reproducible comparisons.
 - Real native coding gate matrix ran against local Ollama `qwen3:8b`,
   `hermes3:8b`, `deepseek-coder:6.7b-instruct`,
   `opencoder:8b-instruct-q8_0`, and `yi-coder:9b-chat`. Raw reports are under
@@ -261,10 +270,13 @@
 - Chat UI should render structured reports, patch results, verification, and
   tool activity as compact views; raw JSON belongs in collapsed diagnostics or
   run artifacts.
+- Native loop policy mode defaults to `guided`; Workflows can override loop
+  policy per node through the compact node bindings table.
 
 ### Next:
-- Run `synode eval coding` against `llama3.1:8b` and `qwen2.5-coder:7b`, compare
-  functional/safety/contract pass rates, and tune small-model prompts/settings.
+- Commit and push the native loop policy mode implementation as `[SY-29]`, then
+  rebuild the Compose API/worker/UI from that commit and run a full
+  `yi-coder:9b-chat` native `guided` coding eval.
 - Route harder coding work to OpenHands/Codex/Claude Code if local native
   coding remains below the 5/7 functional benchmark target.
 - Add production auth before exposing UI/API outside localhost.

@@ -6,6 +6,8 @@ from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from synode.domain.runtime.loop_policy import NATIVE_LOOP_MODES, NativeLoopMode
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="SYNODE_", env_file=".env", extra="ignore")
@@ -30,6 +32,7 @@ class Settings(BaseSettings):
     native_loop_max_steps: int = 8
     native_loop_context_max_bytes: int = 24000
     native_loop_observation_max_bytes: int = 6000
+    native_loop_default_mode: NativeLoopMode = "guided"
     sandbox_backend: Literal["process", "docker", "none"] = "process"
     sandbox_cpu_seconds: int = 30
     sandbox_memory_mb: int = 512
@@ -112,6 +115,8 @@ class Settings(BaseSettings):
             raise RuntimeError("SYNODE_QUEUE_DATABASE_URL must use PostgreSQL for Procrastinate")
         if not self.queue_name.strip():
             raise RuntimeError("SYNODE_QUEUE_NAME must not be blank")
+        if self.native_loop_default_mode not in NATIVE_LOOP_MODES:
+            raise RuntimeError(f"unsupported SYNODE_NATIVE_LOOP_DEFAULT_MODE: {self.native_loop_default_mode}")
         if self.openhands_enabled:
             if not self.openhands_base_url or not self.openhands_base_url.strip():
                 raise RuntimeError("SYNODE_OPENHANDS_BASE_URL is required when OpenHands is enabled")

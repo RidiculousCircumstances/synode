@@ -36,6 +36,7 @@ components:
       - AgentGraph v2 node schema, code-based node contracts, node execution state, and backend registry with native LangGraph and optional external OpenHands execution for control and worker nodes
       - Operator planning gates, ambiguity interrupts, durable operator requests, and LangGraph checkpoint resume
       - Deterministic validation layer for operator questions, patch proposals, verification commands, and language-specific patch checks
+      - Native loop policy modes, phase/state guidance, finish gates, duplicate-call guards, and trace artifacts for small-model coding loops
   - name: web
     path: web
     responsibilities:
@@ -109,6 +110,7 @@ rules:
   - DB-backed model profiles, role profile bindings, and agent graph snapshots own runtime model routing.
   - AgentGraph v2 nodes have stable node ids, explicit node edges, node runtime bindings, and code-registered node contracts; role-level graph fields are not part of the API/runtime contract.
   - Agent graph node runtime bindings select execution backends; missing bindings mean `native_langgraph`.
+  - Agent graph node loop policies select native loop strictness; missing node policies resolve from model profile options and then `SYNODE_NATIVE_LOOP_DEFAULT_MODE`.
   - External node backends must not own Synode run state, final review, approvals, tool policy, or audit authority.
   - Node backend bindings are valid only when the backend declares support for the node contract.
   - DB secrets must be encrypted with `SYNODE_SECRETS_KEY`; missing keys are explicit errors.
@@ -175,11 +177,11 @@ critical_flows:
   - name: run-task
     description: User message becomes a thread run, Procrastinate `run_id` dispatch, exact worker claim, graph execution, audited tool calls, reviewer output, and final answer.
   - name: coding-task
-    description: Coding task flows through structured planning, inspection, deterministic patch validation, approval, patch apply, focused verification, and review.
+    description: Coding task flows through structured planning, native loop policy guidance, inspection, deterministic patch validation, approval, patch apply, focused verification, and review.
   - name: structured-decision
     description: Supervisor and reviewer model calls must return schema-valid JSON or stop with an explicit error.
   - name: configurable-agent-graph
-    description: Run creation resolves a DB AgentGraph v2, model profile bindings, node runtime backend bindings, node contracts, and role records into an immutable run snapshot before execution.
+    description: Run creation resolves a DB AgentGraph v2, model profile bindings, node runtime backend bindings, node contracts, node loop policies, and role records into an immutable run snapshot before execution.
   - name: node-execution-backend
     description: Synode executes graph nodes through the snapshot-selected backend when that backend supports the node contract, records runtime_node_states, and validates external backend payloads back into Synode contracts before continuing graph execution.
   - name: approval

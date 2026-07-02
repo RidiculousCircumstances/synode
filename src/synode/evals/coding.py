@@ -13,6 +13,8 @@ from importlib import resources
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal, cast
 
+from synode.domain.runtime.loop_policy import NativeLoopMode, normalize_native_loop_mode
+
 TERMINAL_STATUSES = {"completed", "failed", "failed_verification", "cancelled"}
 EvalBackend = Literal["native_langgraph", "openhands"]
 
@@ -68,6 +70,7 @@ class CodingEvalResult:
     workspace: str
     api_workspace: str | None = None
     backend: str = "native_langgraph"
+    loop_mode: str | None = None
     run_id: str | None = None
     thread_id: str | None = None
     status: str | None = None
@@ -178,8 +181,10 @@ def run_coding_eval(
     timeout_seconds: float = 1200,
     approve_mutations: bool = True,
     skip_contract_only_for_openhands: bool = True,
+    loop_mode: str | None = None,
 ) -> dict[str, Any]:
     backend = _eval_backend(backend)
+    resolved_loop_mode = _eval_loop_mode(loop_mode) if loop_mode else None
     output_root.mkdir(parents=True, exist_ok=True)
     tasks = load_tasks()
     if task_ids:
@@ -190,12 +195,13 @@ def run_coding_eval(
             raise ValueError(f"unknown eval tasks: {', '.join(missing)}")
     workspace_root = workspace_root or output_root
     client = SynodeApiClient(api_url)
-    profile = ensure_profile(client, model=model, ollama_base_url=ollama_base_url)
+    profile = ensure_profile(client, model=model, ollama_base_url=ollama_base_url, loop_mode=resolved_loop_mode)
     graph = ensure_graph(
         client,
         profile["id"],
         backend=backend,
         graph_name_suffix=graph_name_suffix,
+        loop_mode=resolved_loop_mode,
     )
     results: list[CodingEvalResult] = []
     report: dict[str, Any] | None = None
@@ -210,6 +216,7 @@ def run_coding_eval(
                 profile_id=profile["id"],
                 graph_id=graph["id"],
                 backend=backend,
+                loop_mode=resolved_loop_mode,
                 timeout_seconds=timeout_seconds,
                 approve_mutations=approve_mutations,
                 skip_contract_only_for_openhands=skip_contract_only_for_openhands,
@@ -220,6 +227,7 @@ def run_coding_eval(
             api_url=api_url,
             model=model,
             backend=backend,
+            loop_mode=resolved_loop_mode,
             profile_id=profile["id"],
             graph_id=graph["id"],
             workspace_root=workspace_root,
@@ -232,6 +240,7 @@ def run_coding_eval(
             api_url=api_url,
             model=model,
             backend=backend,
+            loop_mode=resolved_loop_mode,
             profile_id=profile["id"],
             graph_id=graph["id"],
             workspace_root=workspace_root,
@@ -247,6 +256,7 @@ def write_coding_eval_report(
     api_url: str,
     model: str,
     backend: EvalBackend,
+    loop_mode: NativeLoopMode | None,
     profile_id: str,
     graph_id: str,
     workspace_root: Path,
@@ -258,6 +268,7 @@ def write_coding_eval_report(
         "api_url": api_url,
         "model": model,
         "backend": backend,
+        "loop_mode": loop_mode,
         "profile_id": profile_id,
         "graph_id": graph_id,
         "workspace_root": str(workspace_root),
@@ -280,6 +291,7 @@ def run_task_eval(
     profile_id: str,
     graph_id: str,
     backend: EvalBackend,
+    loop_mode: NativeLoopMode | None,
     timeout_seconds: float,
     approve_mutations: bool,
     skip_contract_only_for_openhands: bool,
@@ -293,6 +305,7 @@ def run_task_eval(
         workspace=str(workspace),
         api_workspace=api_workspace,
         backend=backend,
+        loop_mode=loop_mode,
     )
     if backend == "openhands" and task.contract_only and skip_contract_only_for_openhands:
         result.status = "skipped"
@@ -420,9 +433,17 @@ def poll_run(
     result.notes.append("run did not reach terminal status after timeout stop")
 
 
-def ensure_profile(client: SynodeApiClient, *, model: str, ollama_base_url: str) -> dict[str, Any]:
+def ensure_profile(
+    client: SynodeApiClient,
+    *,
+    model: str,
+    ollama_base_url: str,
+    loop_mode: NativeLoopMode | None = None,
+) -> dict[str, Any]:
     name = f"eval {model}"
-    options = {"temperature": 0.1, "top_p": 0.9, "num_predict": 800, "timeout_seconds": 180}
+    options: dict[str, Any] = {"temperature": 0.1, "top_p": 0.9, "num_predict": 800, "timeout_seconds": 180}
+    if loop_mode:
+        options["native_loop_mode"] = loop_mode
     for profile in client.get("/model-profiles"):
         if profile["name"] == name:
             payload = {
@@ -454,6 +475,7 @@ def ensure_graph(
     *,
     backend: EvalBackend = "native_langgraph",
     graph_name_suffix: str | None = None,
+    loop_mode: NativeLoopMode | None = None,
 ) -> dict[str, Any]:
     backend = _eval_backend(backend)
     suffix = graph_name_suffix or backend
@@ -481,6 +503,7 @@ def ensure_graph(
         "role_model_profile_ids": {},
         "node_runtime_bindings": node_runtime_bindings,
         "node_contracts": {},
+        "node_loop_policies": {"coder": loop_mode} if backend == "native_langgraph" and loop_mode else {},
         "is_default": False,
         "enabled": True,
     }
@@ -877,6 +900,7 @@ def render_markdown_report(report: dict[str, Any]) -> str:
         f"- created_at: `{report['created_at']}`",
         f"- api_url: `{report['api_url']}`",
         f"- backend: `{report.get('backend', 'native_langgraph')}`",
+        f"- loop_mode: `{report.get('loop_mode') or ''}`",
         f"- workspace_root: `{report.get('workspace_root', '')}`",
         f"- api_workspace_root: `{report.get('api_workspace_root') or ''}`",
         f"- summary: `{report['summary']['ok']}/{evaluated}` ok, `{skipped}` skipped",
@@ -934,6 +958,10 @@ def _eval_backend(backend: str) -> EvalBackend:
     if backend not in {"native_langgraph", "openhands"}:
         raise ValueError(f"unsupported eval backend: {backend}")
     return cast(EvalBackend, backend)
+
+
+def _eval_loop_mode(loop_mode: str) -> NativeLoopMode:
+    return normalize_native_loop_mode(loop_mode)
 
 
 def _write_files(root: Path, files: dict[str, str]) -> None:

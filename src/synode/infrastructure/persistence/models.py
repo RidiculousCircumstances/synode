@@ -333,6 +333,9 @@ class AgentGraphRecord(Base):
     node_contracts: Mapped[dict[str, str]] = mapped_column(
         JsonType().with_variant(JSONB, "postgresql"), default=dict
     )
+    node_loop_policies: Mapped[dict[str, str]] = mapped_column(
+        JsonType().with_variant(JSONB, "postgresql"), default=dict
+    )
     is_default: Mapped[bool] = mapped_column(Boolean(), default=False, nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean(), default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

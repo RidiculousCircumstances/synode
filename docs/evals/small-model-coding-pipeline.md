@@ -10,6 +10,13 @@ shrinking each model call into a strict, evidence-based step.
   operator, or finish with a valid node contract payload.
 - Each native loop receives a per-role `tool_catalog` with descriptions,
   JSON-style input schemas, examples, and tool-specific mistakes to avoid.
+- Native loop policy can be `strict`, `guided`, or `autonomous`. Resolution is
+  node graph override, then model profile `options.native_loop_mode`, then
+  `SYNODE_NATIVE_LOOP_DEFAULT_MODE` (`guided` by default).
+- `strict` filters tools by phase, `guided` keeps all tools visible but blocks
+  premature coding finish and post-mutation finish without verification, and
+  `autonomous` mostly records guidance while still requiring verification after
+  mutation.
 - Filesystem navigation is split deliberately: `native.fs_list` lists files,
   while `native.fs_search` searches file contents with a required regex
   `pattern`. Invalid arguments are returned as tool observations instead of
@@ -65,7 +72,7 @@ Run the real API/worker/sandbox benchmark:
 
 ```bash
 uv run synode eval coding --backend native_langgraph --model llama3.1:8b
-uv run synode eval coding --backend native_langgraph --model qwen2.5-coder:7b
+uv run synode eval coding --backend native_langgraph --model qwen2.5-coder:7b --loop-mode guided
 uv run synode eval coding --backend openhands --model llama3.1:8b
 ```
 

@@ -105,6 +105,7 @@ from synode.domain.models import (
 from synode.domain.roles import RoleRegistry, RoleSpec
 from synode.domain.runtime.capabilities import validate_backend_contract
 from synode.domain.runtime.contracts import default_contract_for_role, default_contract_registry
+from synode.domain.runtime.loop_policy import normalize_native_loop_mode
 from synode.domain.runtime.operator import ApprovalRequired, OperatorInterrupt, OperatorRejected
 from synode.logging import log_event
 
@@ -1607,6 +1608,7 @@ class OrchestrationService:
                 role_model_profile_ids=payload.role_model_profile_ids,
                 node_runtime_bindings=payload.node_runtime_bindings,
                 node_contracts=payload.node_contracts,
+                node_loop_policies=payload.node_loop_policies,
                 is_default=payload.is_default,
                 enabled=payload.enabled,
             )
@@ -1725,21 +1727,6 @@ class OrchestrationService:
                 **role_model_profile_ids,
             },
         )
-        node_contracts = self._resolve_node_contracts(snapshot, graph.node_contracts or {})
-        node_runtime_bindings = self._resolve_node_runtime_bindings(
-            snapshot,
-            graph.node_runtime_bindings or {},
-        )
-        for node_id, backend in node_runtime_bindings.items():
-            validate_backend_contract(backend, node_contracts[node_id])
-        for node in snapshot["nodes"]:
-            node_id = str(node["id"])
-            node["runtime_backend"] = node_runtime_bindings[node_id]
-            node["contract_id"] = node_contracts[node_id]
-        snapshot["node_runtime_bindings"] = node_runtime_bindings
-        snapshot["node_contracts"] = node_contracts
-        if RuntimeBackend.OPENHANDS.value in node_runtime_bindings.values() and not self.settings.openhands_enabled:
-            raise ValueError("agent graph requires OpenHands but SYNODE_OPENHANDS_ENABLED is false")
         profile_id = None
         if default_model_profile_id is not None:
             profile_id = default_model_profile_id
@@ -1754,6 +1741,31 @@ class OrchestrationService:
             if not profile.enabled:
                 raise ValueError(f"model profile is disabled: {profile.name}")
             provider_label = profile.provider_type
+
+        node_contracts = self._resolve_node_contracts(snapshot, graph.node_contracts or {})
+        node_runtime_bindings = self._resolve_node_runtime_bindings(
+            snapshot,
+            graph.node_runtime_bindings or {},
+        )
+        node_loop_policies = await self._resolve_node_loop_policies(
+            repo,
+            snapshot,
+            graph.node_loop_policies or {},
+            role_model_profile_ids=role_bindings,
+            default_model_profile_id=profile_id,
+        )
+        for node_id, backend in node_runtime_bindings.items():
+            validate_backend_contract(backend, node_contracts[node_id])
+        for node in snapshot["nodes"]:
+            node_id = str(node["id"])
+            node["runtime_backend"] = node_runtime_bindings[node_id]
+            node["contract_id"] = node_contracts[node_id]
+            node["native_loop_mode"] = node_loop_policies[node_id]
+        snapshot["node_runtime_bindings"] = node_runtime_bindings
+        snapshot["node_contracts"] = node_contracts
+        snapshot["node_loop_policies"] = node_loop_policies
+        if RuntimeBackend.OPENHANDS.value in node_runtime_bindings.values() and not self.settings.openhands_enabled:
+            raise ValueError("agent graph requires OpenHands but SYNODE_OPENHANDS_ENABLED is false")
 
         role_names = {role["name"] for role in snapshot["roles"]}
         required = {RoleName.SUPERVISOR.value, RoleName.REVIEWER.value}
@@ -1884,6 +1896,52 @@ class OrchestrationService:
             contract_id = str(node_contracts.get(node_id) or default_contract_for_role(role_name))
             registry.validate_binding(contract_id, role_name=role_name, node_kind=str(node["kind"]))
             resolved[node_id] = contract_id
+        return resolved
+
+    async def _resolve_node_loop_policies(
+        self,
+        repo: Any,
+        snapshot: dict[str, Any],
+        node_loop_policies: dict[str, Any],
+        *,
+        role_model_profile_ids: dict[str, str],
+        default_model_profile_id: str | None,
+    ) -> dict[str, str]:
+        nodes = snapshot.get("nodes", [])
+        node_ids = {str(node["id"]) for node in nodes if isinstance(node, dict) and node.get("id")}
+        unknown = set(node_loop_policies) - node_ids
+        if unknown:
+            raise LookupError(f"agent graph node not found: {sorted(unknown)}")
+
+        default_mode = normalize_native_loop_mode(self.settings.native_loop_default_mode)
+        profile_mode_cache: dict[str, str | None] = {}
+
+        async def profile_mode(profile_id: str | None) -> str | None:
+            if not profile_id:
+                return None
+            if profile_id in profile_mode_cache:
+                return profile_mode_cache[profile_id]
+            profile = await repo.get_model_profile(profile_id)
+            if profile is None:
+                raise LookupError(f"model profile not found: {profile_id}")
+            if not profile.enabled:
+                raise ValueError(f"model profile is disabled: {profile.name}")
+            options = profile.options if isinstance(profile.options, dict) else {}
+            raw_mode = options.get("native_loop_mode")
+            resolved = normalize_native_loop_mode(raw_mode) if raw_mode is not None else None
+            profile_mode_cache[profile_id] = resolved
+            return resolved
+
+        resolved: dict[str, str] = {}
+        for node in nodes:
+            node_id = str(node["id"])
+            if node_id in node_loop_policies:
+                resolved[node_id] = normalize_native_loop_mode(node_loop_policies[node_id])
+                continue
+            role = str(node.get("role") or "")
+            resolved[node_id] = (
+                await profile_mode(role_model_profile_ids.get(role) or default_model_profile_id)
+            ) or default_mode
         return resolved
 
     def _runtime_backend_id(self, backend: Any) -> str:

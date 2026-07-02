@@ -32,6 +32,7 @@ from synode.domain.models import (
 )
 from synode.domain.runtime.capabilities import validate_backend_contract
 from synode.domain.runtime.contracts import default_contract_for_role, default_contract_registry
+from synode.domain.runtime.loop_policy import normalize_native_loop_mode
 from synode.infrastructure.persistence.models import (
     AgentGraphRecord,
     AgentRoleRecord,
@@ -1374,6 +1375,7 @@ class Repository:
         role_model_profile_ids: dict[str, str] | None = None,
         node_runtime_bindings: Mapping[str, str | RuntimeBackend] | None = None,
         node_contracts: Mapping[str, str] | None = None,
+        node_loop_policies: Mapping[str, str] | None = None,
         is_default: bool = False,
         enabled: bool = True,
     ) -> AgentGraphRecord:
@@ -1385,6 +1387,7 @@ class Repository:
             node_edges=node_edges,
             node_runtime_bindings=node_runtime_bindings or {},
             node_contracts=node_contracts or {},
+            node_loop_policies=node_loop_policies or {},
         )
         if is_default:
             await self._clear_default_graphs()
@@ -1398,6 +1401,7 @@ class Repository:
             role_model_profile_ids=role_model_profile_ids or {},
             node_runtime_bindings=graph_config["node_runtime_bindings"],
             node_contracts=graph_config["node_contracts"],
+            node_loop_policies=graph_config["node_loop_policies"],
             is_default=is_default,
             enabled=enabled,
         )
@@ -1440,6 +1444,7 @@ class Repository:
         role_model_profile_ids = values.get("role_model_profile_ids", record.role_model_profile_ids)
         node_runtime_bindings = values.get("node_runtime_bindings", record.node_runtime_bindings) or {}
         node_contracts = values.get("node_contracts", record.node_contracts) or {}
+        node_loop_policies = values.get("node_loop_policies", record.node_loop_policies) or {}
         graph_config = await self._normalize_graph_config(
             default_model_profile_id,
             role_model_profile_ids or {},
@@ -1448,6 +1453,7 @@ class Repository:
             node_edges=node_edges,
             node_runtime_bindings=node_runtime_bindings,
             node_contracts=node_contracts,
+            node_loop_policies=node_loop_policies,
         )
         if values.get("is_default") is True:
             await self._clear_default_graphs()
@@ -1457,6 +1463,7 @@ class Repository:
             "node_edges",
             "node_runtime_bindings",
             "node_contracts",
+            "node_loop_policies",
         }
         if graph_keys.intersection(values):
             for key in graph_keys:
@@ -1574,6 +1581,7 @@ class Repository:
         node_edges: list[dict[str, str]],
         node_runtime_bindings: Mapping[str, str | RuntimeBackend],
         node_contracts: Mapping[str, str],
+        node_loop_policies: Mapping[str, str],
     ) -> dict[str, Any]:
         if default_model_profile_id and await self.get_model_profile(default_model_profile_id) is None:
             raise LookupError(f"model profile not found: {default_model_profile_id}")
@@ -1606,6 +1614,7 @@ class Repository:
             normalized_nodes,
             node_runtime_bindings,
         )
+        loop_policies = self._resolve_node_loop_policies(normalized_nodes, node_loop_policies)
         for node_id, backend in runtime_by_node.items():
             validate_backend_contract(backend, contracts[node_id])
         return {
@@ -1614,6 +1623,7 @@ class Repository:
             "node_edges": normalized_node_edges,
             "node_runtime_bindings": runtime_by_node,
             "node_contracts": contracts,
+            "node_loop_policies": loop_policies,
         }
 
     async def _normalize_explicit_nodes(
@@ -1674,6 +1684,20 @@ class Repository:
         if unknown:
             raise LookupError(f"agent graph node not found: {sorted(unknown)}")
         return resolved
+
+    def _resolve_node_loop_policies(
+        self,
+        nodes: list[dict[str, str]],
+        node_loop_policies: Mapping[str, str],
+    ) -> dict[str, str]:
+        node_ids = {node["id"] for node in nodes}
+        unknown = set(node_loop_policies) - node_ids
+        if unknown:
+            raise LookupError(f"agent graph node not found: {sorted(unknown)}")
+        return {
+            str(node_id): normalize_native_loop_mode(mode)
+            for node_id, mode in node_loop_policies.items()
+        }
 
 
 def _thread_title(value: str) -> str:

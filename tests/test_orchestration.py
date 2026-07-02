@@ -25,6 +25,11 @@ from synode.application.graph.engine import (
     _validate_supervisor_decision,
     _verification_command_catalog,
 )
+from synode.application.graph.native_loop_policy import (
+    native_loop_allowed_tools_for_phase,
+    native_loop_finish_gate_error,
+    parse_verification_failures,
+)
 from synode.domain.errors import StructuredOutputValidationError
 from synode.domain.models import (
     ApprovalStatus,
@@ -41,7 +46,7 @@ from synode.domain.models import (
     ToolResult,
 )
 from synode.domain.roles import RoleRegistry
-from synode.domain.runtime.contracts import WORKER_AGENT_OUTPUT_CONTRACT
+from synode.domain.runtime.contracts import CODING_INSPECTION_CONTRACT, WORKER_AGENT_OUTPUT_CONTRACT
 from synode.domain.runtime.decisions import NativeLoopAction, PatchProposal, SupervisorDecision
 from synode.domain.runtime.operator import ApprovalRequired
 from synode.infrastructure.models.provider import (
@@ -785,6 +790,138 @@ async def test_native_worker_loop_rejects_duplicate_tool_call_without_reexecutio
     assert len(result.tool_results) == 1
     assert result.tool_results[0].tool_name == "native.fs_list"
     assert "duplicate tool call" in result.trace[1]["error"]
+
+
+def test_native_loop_policy_filters_tools_and_gates_finish() -> None:
+    allowed = ["native.fs_list", "native.fs_write", "native.verify"]
+
+    assert native_loop_allowed_tools_for_phase(allowed, policy_mode="strict", phase="inspect") == [
+        "native.fs_list"
+    ]
+    assert native_loop_allowed_tools_for_phase(allowed, policy_mode="guided", phase="inspect") == allowed
+    assert "premature" in (
+        native_loop_finish_gate_error(
+            "strict",
+            contract_id=WORKER_AGENT_OUTPUT_CONTRACT,
+            trace=[],
+            tool_results=[],
+        )
+        or ""
+    )
+    assert "coding contracts" in (
+        native_loop_finish_gate_error(
+            "guided",
+            contract_id=CODING_INSPECTION_CONTRACT,
+            trace=[],
+            tool_results=[],
+        )
+        or ""
+    )
+    assert native_loop_finish_gate_error(
+        "guided",
+        contract_id=WORKER_AGENT_OUTPUT_CONTRACT,
+        trace=[],
+        tool_results=[ToolResult(tool_name="native.fs_list", ok=True)],
+    ) is None
+    assert "verification" in (
+        native_loop_finish_gate_error(
+            "guided",
+            contract_id=WORKER_AGENT_OUTPUT_CONTRACT,
+            trace=[],
+            tool_results=[ToolResult(tool_name="native.fs_write", ok=True)],
+        )
+        or ""
+    )
+    assert native_loop_finish_gate_error(
+        "guided",
+        contract_id=WORKER_AGENT_OUTPUT_CONTRACT,
+        trace=[],
+        tool_results=[
+            ToolResult(tool_name="native.fs_write", ok=True),
+            ToolResult(tool_name="native.verify", ok=True),
+        ],
+    ) is None
+
+
+def test_native_loop_parse_verification_failures() -> None:
+    failures = parse_verification_failures(
+        "FAILED tests/test_demo.py::test_demo\n"
+        "E   AssertionError: expected 2\n"
+        "normal output\n"
+    )
+
+    assert failures == ["FAILED tests/test_demo.py::test_demo", "E   AssertionError: expected 2"]
+
+
+async def test_native_worker_loop_strict_phase_rejects_mutation_before_inspection(
+    settings,
+    database,
+    tool_executor,
+    tmp_path: pathlib.Path,
+) -> None:
+    (tmp_path / "README.md").write_text("# Demo\n", encoding="utf-8")
+    models = ModelProviderRegistry()
+    models.register(
+        ScriptedLoopProvider(
+            [
+                {
+                    "action": "tool_call",
+                    "summary": "Try write before inspection.",
+                    "tool_call": {"name": "native.fs_write", "arguments": {"path": "blocked.txt", "content": "no"}},
+                },
+                {
+                    "action": "tool_call",
+                    "summary": "Inspect files instead.",
+                    "tool_call": {"name": "native.fs_list", "arguments": {"glob": "*.md"}},
+                },
+                {
+                    "action": "finish",
+                    "summary": "Finish after inspection.",
+                    "payload": {
+                        "role": "coder",
+                        "summary": "Used inspection evidence.",
+                        "tool_results": [],
+                        "risks": [],
+                    },
+                },
+            ]
+        )
+    )
+    deps = GraphDependencies(
+        database=database,
+        repository_factory=Repository,
+        roles=tool_executor.roles,
+        models=models,
+        tool_executor=tool_executor,
+        observability=Observability(settings),
+    )
+
+    result = await _run_native_loop(
+        deps,
+        {
+            "run_id": "run-strict-phase",
+            "thread_id": "thread-strict-phase",
+            "task": "Inspect before changing.",
+            "mode": RunMode.GENERAL.value,
+            "model_provider": "scripted_loop",
+            "workspace": str(tmp_path),
+            "agent_graph_snapshot": {
+                "nodes": [{"id": "coder", "role": "coder", "native_loop_mode": "strict"}],
+                "node_loop_policies": {"coder": "strict"},
+            },
+        },
+        role=RoleName.CODER.value,
+        node_id="coder",
+        contract_id=WORKER_AGENT_OUTPUT_CONTRACT,
+        prompt="Inspect before changing.",
+        context={},
+    )
+
+    assert result.payload["summary"] == "Used inspection evidence."
+    assert not (tmp_path / "blocked.txt").exists()
+    assert result.trace[0]["phase"] == "inspect"
+    assert "not available during native_loop_phase=inspect" in result.trace[0]["error"]
+    assert result.tool_results[0].tool_name == "native.fs_list"
 
 
 async def test_native_worker_loop_includes_tool_catalog(

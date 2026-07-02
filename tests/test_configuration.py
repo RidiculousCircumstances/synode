@@ -43,6 +43,7 @@ def _graph_payload(
     workers: list[str],
     node_runtime_bindings: dict[str, RuntimeBackend] | None = None,
     node_contracts: dict[str, str] | None = None,
+    node_loop_policies: dict[str, str] | None = None,
     default_model_profile_id: str | None = None,
 ) -> AgentGraphCreateRequest:
     role_names = ["supervisor", *workers, "reviewer"]
@@ -64,6 +65,7 @@ def _graph_payload(
         ],
         node_runtime_bindings=node_runtime_bindings or {},
         node_contracts=node_contracts or {},
+        node_loop_policies=node_loop_policies or {},
         default_model_profile_id=default_model_profile_id,
     )
 
@@ -161,6 +163,60 @@ async def test_graph_runtime_bindings_accept_control_roles_when_contract_support
 
     assert graph.node_runtime_bindings["reviewer"] == RuntimeBackend.OPENHANDS
     assert graph.node_contracts["reviewer"] == "reviewer_decision"
+
+
+async def test_agent_graph_loop_policies_are_persisted_and_resolved_in_snapshot(
+    service,
+    tmp_path: pathlib.Path,
+) -> None:
+    profile = await service.create_model_profile(
+        ModelProfileCreateRequest(
+            name="strict loop profile",
+            provider_type=ModelProviderType.FAKE,
+            model="fake",
+            options={"native_loop_mode": "strict"},
+        )
+    )
+    roles = {role.name: role for role in await service.list_agent_roles()}
+    graph = await service.create_agent_graph(
+        _graph_payload(
+            roles,
+            name="loop policy graph",
+            workers=["coder"],
+            default_model_profile_id=profile.id,
+            node_loop_policies={"coder": "autonomous"},
+        )
+    )
+
+    run = await service.create_run(
+        "Inspect loop policy resolution.",
+        workspace=str(tmp_path),
+        mode=RunMode.CODING,
+        agent_graph_id=graph.id,
+    )
+
+    assert graph.node_loop_policies == {"coder": "autonomous"}
+    assert run.agent_graph_snapshot["node_loop_policies"]["coder"] == "autonomous"
+    assert run.agent_graph_snapshot["node_loop_policies"]["supervisor"] == "strict"
+    assert run.agent_graph_snapshot["nodes"][1]["native_loop_mode"] == "autonomous"
+
+
+async def test_agent_graph_loop_policies_reject_unknown_mode(service, database) -> None:
+    roles = {role.name: role for role in await service.list_agent_roles()}
+    payload = _graph_payload(
+        roles,
+        name="bad loop policy graph",
+        workers=["coder"],
+    )
+
+    with pytest.raises(ValueError, match="unknown native loop mode"):
+        async with database.session() as session:
+            await Repository(session).create_agent_graph(
+                name=payload.name,
+                nodes=[node.model_dump(mode="json") for node in payload.nodes],
+                node_edges=[edge.model_dump(mode="json") for edge in payload.node_edges],
+                node_loop_policies={"coder": "careful"},
+            )
 
 
 async def test_openhands_node_backend_completes_coding_run(settings, database, tmp_path: pathlib.Path) -> None:

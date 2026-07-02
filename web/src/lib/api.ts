@@ -344,6 +344,7 @@ export function createAgentGraph(payload: {
   role_model_profile_ids?: Record<string, string>;
   node_runtime_bindings?: Record<string, string>;
   node_contracts?: Record<string, string>;
+  node_loop_policies?: Record<string, string>;
   is_default?: boolean;
   enabled?: boolean;
 }): Promise<AgentGraph> {
@@ -364,6 +365,7 @@ export function updateAgentGraph(
     role_model_profile_ids?: Record<string, string>;
     node_runtime_bindings?: Record<string, string>;
     node_contracts?: Record<string, string>;
+    node_loop_policies?: Record<string, string>;
     is_default?: boolean;
     enabled?: boolean;
   },

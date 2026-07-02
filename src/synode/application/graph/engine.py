@@ -12,6 +12,27 @@ from langgraph.graph import StateGraph
 from langgraph.types import interrupt
 from pydantic import BaseModel, ValidationError
 
+from synode.application.graph.native_loop_policy import (
+    native_loop_allowed_tools_for_phase as _native_loop_allowed_tools_for_phase,
+)
+from synode.application.graph.native_loop_policy import (
+    native_loop_duplicate_fail_after as _native_loop_duplicate_fail_after,
+)
+from synode.application.graph.native_loop_policy import (
+    native_loop_finish_gate_error as _native_loop_finish_gate_error,
+)
+from synode.application.graph.native_loop_policy import (
+    native_loop_phase as _native_loop_phase,
+)
+from synode.application.graph.native_loop_policy import (
+    native_loop_state_summary as _native_loop_state_summary,
+)
+from synode.application.graph.native_loop_policy import (
+    native_loop_tool_policy_error as _native_loop_tool_policy_error,
+)
+from synode.application.graph.native_loop_policy import (
+    native_loop_training_transitions as _native_loop_training_transitions,
+)
 from synode.application.ports import (
     DatabasePort,
     ExecutionBackendPort,
@@ -56,6 +77,7 @@ from synode.domain.runtime.decisions import (
     SupervisorDecision,
     VerificationPlan,
 )
+from synode.domain.runtime.loop_policy import NativeLoopMode, normalize_native_loop_mode
 from synode.domain.runtime.operator import (
     ApprovalRequired,
     OperatorRejected,
@@ -600,6 +622,7 @@ async def _run_native_loop(
     allowed_tools = deps.tool_executor.allowed_tool_names(role)
     tool_catalog = deps.tool_executor.tool_catalog(role)
     max_steps = max(1, int(deps.tool_executor.settings.native_loop_max_steps))
+    policy_mode = _native_loop_mode_for_node(deps, state, role, provider)
     tool_results: list[ToolResult] = []
     trace: list[dict[str, Any]] = []
     validation_errors: list[str] = []
@@ -617,8 +640,8 @@ async def _run_native_loop(
             "previous_worker_outputs": state.get("worker_outputs", []),
             "upstream_outputs": state.get("worker_outputs", []),
             "role_spec": _role_spec_for_role_with_state(state, role),
-            "allowed_tools": allowed_tools,
-            "tool_catalog": tool_catalog,
+            "allowed_tools_all": allowed_tools,
+            "tool_catalog_all": tool_catalog,
             "planned_tool_calls": planned_tool_calls or [],
             **context,
         },
@@ -626,10 +649,30 @@ async def _run_native_loop(
     )
 
     for step_index in range(max_steps):
+        phase = _native_loop_phase(
+            policy_mode,
+            contract_id=contract_id,
+            trace=trace,
+            tool_results=tool_results,
+            validation_errors=validation_errors,
+        )
+        effective_allowed_tools = _native_loop_allowed_tools_for_phase(
+            allowed_tools,
+            policy_mode=policy_mode,
+            phase=phase,
+        )
+        effective_tool_catalog = [
+            tool for tool in tool_catalog if str(tool.get("name") or "") in effective_allowed_tools
+        ]
         request_context = {
             **base_context,
             "loop_step": step_index + 1,
             "remaining_steps": max_steps - step_index,
+            "native_loop_mode": policy_mode,
+            "native_loop_phase": phase,
+            "native_loop_state": _native_loop_state_summary(trace, tool_results, validation_errors),
+            "allowed_tools": effective_allowed_tools,
+            "tool_catalog": effective_tool_catalog,
             "loop_history": trace,
             "previous_validation_errors": validation_errors,
         }
@@ -641,7 +684,7 @@ async def _run_native_loop(
                 NativeLoopAction,
                 ModelRequest(
                     role=role,
-                    prompt=_native_loop_prompt(prompt, contract_id=contract_id),
+                    prompt=_native_loop_prompt(prompt, contract_id=contract_id, policy_mode=policy_mode),
                     context=request_context,
                     response_schema=NativeLoopAction,
                     model_options=provider.model_options or {},
@@ -652,6 +695,8 @@ async def _run_native_loop(
             trace.append(
                 {
                     "step": step_index + 1,
+                    "policy_mode": policy_mode,
+                    "phase": phase,
                     "action": "invalid_action",
                     "error": validation_errors[0],
                 }
@@ -665,17 +710,23 @@ async def _run_native_loop(
                 trace.append(
                     {
                         "step": step_index + 1,
+                        "policy_mode": policy_mode,
+                        "phase": phase,
                         "action": action.action,
                         "summary": action.summary,
                         "error": validation_errors[0],
                     }
                 )
                 continue
-            if call.name not in allowed_tools:
-                validation_errors = [f"tool is not allowed for role {role}: {call.name}"]
+            if call.name not in effective_allowed_tools:
+                validation_errors = [
+                    _native_loop_tool_policy_error(role, call.name, allowed_tools, effective_allowed_tools, phase)
+                ]
                 trace.append(
                     {
                         "step": step_index + 1,
+                        "policy_mode": policy_mode,
+                        "phase": phase,
                         "action": action.action,
                         "summary": action.summary,
                         "tool_call": call.model_dump(mode="json"),
@@ -685,31 +736,18 @@ async def _run_native_loop(
                 continue
             call_signature = _tool_call_signature(call)
             repeat_count = seen_tool_calls.get(call_signature, 0)
-            if repeat_count == 1:
-                seen_tool_calls[call_signature] = 2
-                validation_errors = [
-                    "duplicate tool call repeated without new information: "
-                    f"{call.name} with the same arguments. Use the prior observation from loop_history, "
-                    "call a different tool, or finish with the contract payload."
-                ]
-                trace.append(
-                    {
-                        "step": step_index + 1,
-                        "action": action.action,
-                        "summary": action.summary,
-                        "tool_call": call.model_dump(mode="json"),
-                        "error": validation_errors[0],
-                    }
-                )
-                continue
-            if repeat_count >= 2:
+            duplicate_fail_after = _native_loop_duplicate_fail_after(policy_mode)
+            if repeat_count >= duplicate_fail_after:
                 error = f"native loop repeated duplicate tool call after feedback: {call.name}"
                 trace.append(
                     {
                         "step": step_index + 1,
+                        "policy_mode": policy_mode,
+                        "phase": phase,
                         "action": action.action,
                         "summary": action.summary,
                         "tool_call": call.model_dump(mode="json"),
+                        "duplicate_count": repeat_count,
                         "error": error,
                     }
                 )
@@ -719,11 +757,32 @@ async def _run_native_loop(
                     role=role,
                     node_id=node_id,
                     contract_id=contract_id,
+                    policy_mode=policy_mode,
                     status="failed",
                     trace=trace,
                     error=error,
                 )
                 raise NativeLoopContractError(error, trace=trace, tool_results=tool_results)
+            if repeat_count >= 1:
+                seen_tool_calls[call_signature] = repeat_count + 1
+                validation_errors = [
+                    "duplicate tool call repeated without new information: "
+                    f"{call.name} with the same arguments. Use the prior observation from loop_history, "
+                    "call a different tool, or finish with the contract payload."
+                ]
+                trace.append(
+                    {
+                        "step": step_index + 1,
+                        "policy_mode": policy_mode,
+                        "phase": phase,
+                        "action": action.action,
+                        "summary": action.summary,
+                        "tool_call": call.model_dump(mode="json"),
+                        "duplicate_count": repeat_count,
+                        "error": validation_errors[0],
+                    }
+                )
+                continue
             seen_tool_calls[call_signature] = 1
             try:
                 result = await _execute_native_tool(deps, state, role, call)
@@ -731,6 +790,8 @@ async def _run_native_loop(
                 trace.append(
                     {
                         "step": step_index + 1,
+                        "policy_mode": policy_mode,
+                        "phase": phase,
                         "action": action.action,
                         "summary": action.summary,
                         "tool_call": call.model_dump(mode="json"),
@@ -744,6 +805,7 @@ async def _run_native_loop(
                     role=role,
                     node_id=node_id,
                     contract_id=contract_id,
+                    policy_mode=policy_mode,
                     status="waiting_approval",
                     trace=trace,
                 )
@@ -753,6 +815,8 @@ async def _run_native_loop(
             trace.append(
                 {
                     "step": step_index + 1,
+                    "policy_mode": policy_mode,
+                    "phase": phase,
                     "action": action.action,
                     "summary": action.summary,
                     "tool_call": call.model_dump(mode="json"),
@@ -771,6 +835,8 @@ async def _run_native_loop(
                 trace.append(
                     {
                         "step": step_index + 1,
+                        "policy_mode": policy_mode,
+                        "phase": phase,
                         "action": action.action,
                         "summary": action.summary,
                         "operator_question": action.operator_question,
@@ -799,10 +865,33 @@ async def _run_native_loop(
             trace.append(
                 {
                     "step": step_index + 1,
+                    "policy_mode": policy_mode,
+                    "phase": phase,
                     "action": action.action,
                     "summary": action.summary,
                     "operator_question": action.operator_question,
                     "operator_response": response,
+                }
+            )
+            continue
+
+        finish_gate_error = _native_loop_finish_gate_error(
+            policy_mode,
+            contract_id=contract_id,
+            trace=trace,
+            tool_results=tool_results,
+        )
+        if finish_gate_error:
+            validation_errors = [finish_gate_error]
+            trace.append(
+                {
+                    "step": step_index + 1,
+                    "policy_mode": policy_mode,
+                    "phase": phase,
+                    "action": action.action,
+                    "summary": action.summary,
+                    "payload": action.payload,
+                    "error": finish_gate_error,
                 }
             )
             continue
@@ -814,6 +903,8 @@ async def _run_native_loop(
             trace.append(
                 {
                     "step": step_index + 1,
+                    "policy_mode": policy_mode,
+                    "phase": phase,
                     "action": action.action,
                     "summary": action.summary,
                     "payload": action.payload,
@@ -825,6 +916,8 @@ async def _run_native_loop(
         trace.append(
             {
                 "step": step_index + 1,
+                "policy_mode": policy_mode,
+                "phase": phase,
                 "action": action.action,
                 "summary": action.summary,
                 "payload": payload,
@@ -836,6 +929,7 @@ async def _run_native_loop(
             role=role,
             node_id=node_id,
             contract_id=contract_id,
+            policy_mode=policy_mode,
             status="completed",
             trace=trace,
         )
@@ -848,6 +942,7 @@ async def _run_native_loop(
         role=role,
         node_id=node_id,
         contract_id=contract_id,
+        policy_mode=policy_mode,
         status="failed",
         trace=trace,
         error=error,
@@ -860,11 +955,13 @@ def _invalid_operator_request_reason(action: NativeLoopAction, *, contract_id: s
     return invalid_operator_question_text_reason(text, contract_id=contract_id)
 
 
-def _native_loop_prompt(prompt: str, *, contract_id: str) -> str:
+def _native_loop_prompt(prompt: str, *, contract_id: str, policy_mode: NativeLoopMode) -> str:
     return (
         "Execute this Synode native worker node as a bounded action/observation loop.\n"
         f"Node objective: {prompt}\n"
         f"Final contract: {contract_id}\n"
+        f"Loop policy mode: {policy_mode}.\n"
+        "Use native_loop_phase and native_loop_state to decide the next smallest grounded step.\n"
         "Choose exactly one action: tool_call, needs_operator, or finish.\n"
         "Use only allowed_tools for tool_call. Do not invent tool names.\n"
         "Before every tool_call, read tool_catalog and use the exact input schema.\n"
@@ -873,6 +970,7 @@ def _native_loop_prompt(prompt: str, *, contract_id: str) -> str:
         'For tool_call return {"action":"tool_call","summary":"why","tool_call":{"name":"native.fs_list","arguments":{"glob":"*.py"}},"payload":{}}.\n'
         "Do not put tool arguments directly in payload for tool_call unless you cannot emit tool_call.name.\n"
         "Do not repeat an identical tool_call after its observation appears in loop_history.\n"
+        f"{_native_loop_policy_prompt(policy_mode)}"
         "Use needs_operator when the task is ambiguous or blocked by missing operator intent. "
         "Do not use needs_operator to ask the operator to do your implementation, review, patching, or verification work. "
         'For needs_operator return {"action":"needs_operator","summary":"why blocked","operator_question":"specific question"}.\n'
@@ -880,6 +978,23 @@ def _native_loop_prompt(prompt: str, *, contract_id: str) -> str:
         "Never return finish with only summary; finish MUST include a payload object.\n"
         f"{_native_loop_finish_example(contract_id)}"
         "Return only the requested structured JSON."
+    )
+
+
+def _native_loop_policy_prompt(policy_mode: NativeLoopMode) -> str:
+    if policy_mode == "strict":
+        return (
+            "Strict mode: first ground the task with read/search/list evidence, then propose or make the minimal change, "
+            "then verify after any mutation before finish. A first-step finish is invalid.\n"
+        )
+    if policy_mode == "guided":
+        return (
+            "Guided mode: prefer inspect -> patch/answer -> verify. For coding contracts, do at least one real tool_call "
+            "before finish. After any mutation, verify before finish.\n"
+        )
+    return (
+        "Autonomous mode: you may choose the shortest useful path, but do not claim success after a mutation "
+        "without verification evidence.\n"
     )
 
 
@@ -900,6 +1015,28 @@ def _native_loop_finish_example(contract_id: str) -> str:
     return 'For finish shape: {"action":"finish","summary":"done","payload":{...contract fields...}}.\n'
 
 
+def _native_loop_mode_for_node(
+    deps: GraphDependencies,
+    state: SynodeState | dict[str, Any],
+    role: str,
+    provider: ResolvedModelProvider,
+) -> NativeLoopMode:
+    node = _node_for_role(state, role)
+    raw_node_mode = node.get("native_loop_mode")
+    if raw_node_mode:
+        return normalize_native_loop_mode(raw_node_mode)
+    snapshot = state.get("agent_graph_snapshot") or {}
+    node_policies = snapshot.get("node_loop_policies")
+    node_id = node.get("id")
+    if isinstance(node_policies, dict) and node_id in node_policies:
+        return normalize_native_loop_mode(node_policies[node_id])
+    options = provider.model_options if isinstance(provider.model_options, dict) else {}
+    raw_profile_mode = options.get("native_loop_mode")
+    if raw_profile_mode:
+        return normalize_native_loop_mode(raw_profile_mode)
+    return normalize_native_loop_mode(deps.tool_executor.settings.native_loop_default_mode)
+
+
 def _tool_call_signature(call: ToolCall) -> str:
     return json.dumps(call.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
 
@@ -911,6 +1048,7 @@ async def _persist_native_loop_trace(
     role: str,
     node_id: str,
     contract_id: str,
+    policy_mode: str | None = None,
     status: str,
     trace: list[dict[str, Any]],
     error: str | None = None,
@@ -920,8 +1058,10 @@ async def _persist_native_loop_trace(
         "node_id": node_id,
         "role": role,
         "contract_id": contract_id,
+        "policy_mode": policy_mode,
         "status": status,
         "steps": trace,
+        "training_transitions": _native_loop_training_transitions(trace),
     }
     if error:
         content["error"] = error
@@ -2067,7 +2207,7 @@ async def _provider_for_role(
         options = {
             str(key): value
             for key, value in (profile.options or {}).items()
-            if key != "timeout_seconds"
+            if key not in {"timeout_seconds", "native_loop_mode"}
         }
         return ResolvedModelProvider(
             provider=provider,

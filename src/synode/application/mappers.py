@@ -25,6 +25,7 @@ from synode.domain.models import (
     ThreadResponse,
     ThreadStatus,
 )
+from synode.domain.runtime.loop_policy import normalize_native_loop_mode
 
 
 def to_run_response(run: Any) -> RunResponse:
@@ -142,6 +143,10 @@ def to_agent_graph_response(graph: Any) -> AgentGraphResponse:
         role_model_profile_ids={str(key): str(value) for key, value in (graph.role_model_profile_ids or {}).items()},
         node_runtime_bindings={str(key): str(value) for key, value in (graph.node_runtime_bindings or {}).items()},
         node_contracts={str(key): str(value) for key, value in (graph.node_contracts or {}).items()},
+        node_loop_policies={
+            str(key): normalize_native_loop_mode(value)
+            for key, value in (graph.node_loop_policies or {}).items()
+        },
         is_default=graph.is_default,
         enabled=graph.enabled,
         created_at=graph.created_at,

@@ -27,12 +27,13 @@ import {
   updateAgent,
   updateAgentGraph,
 } from "@/lib/api";
-import type { AgentGraph as AgentGraphConfig, AgentSpec, RuntimeBackend } from "@/types";
+import type { AgentGraph as AgentGraphConfig, AgentSpec, NativeLoopMode, RuntimeBackend } from "@/types";
 
 type RoleFormMode = "create" | "edit";
 type GraphFormMode = "create" | "edit" | "clone";
 type GraphTemplateId = "coding" | "data_analysis" | "research" | "db_investigation" | "blank";
 type WorkflowTab = "workflows" | "roles" | "execution";
+type LoopPolicySelection = "" | NativeLoopMode;
 
 type RoleFormState = {
   id: string | null;
@@ -55,6 +56,7 @@ type GraphFormState = {
   roleProfileIds: Record<string, string>;
   roleRuntimeBindings: Record<string, RuntimeBackend>;
   roleContracts: Record<string, string>;
+  roleLoopPolicies: Record<string, LoopPolicySelection>;
   isDefault: boolean;
   enabled: boolean;
 };
@@ -80,6 +82,7 @@ const EMPTY_GRAPH_FORM: GraphFormState = {
   roleProfileIds: {},
   roleRuntimeBindings: {},
   roleContracts: {},
+  roleLoopPolicies: {},
   isDefault: false,
   enabled: true,
 };
@@ -127,6 +130,7 @@ export default function WorkflowConfigPage() {
   const graphRoleModelBindings = compactBindings(graphForm.roleProfileIds);
   const graphNodeRuntimeBindings = roleRuntimeBindingsToNodeBindings(graphForm.roleRuntimeBindings, graphNodes);
   const graphNodeContracts = roleContractsToNodeContracts(graphForm.roleContracts, graphNodes);
+  const graphNodeLoopPolicies = roleLoopPoliciesToNodeLoopPolicies(graphForm.roleLoopPolicies, graphNodes);
 
   const closeRoleDialog = () => {
     setRoleDialogOpen(false);
@@ -227,6 +231,7 @@ export default function WorkflowConfigPage() {
         node_edges: graphNodeEdges,
         node_runtime_bindings: graphNodeRuntimeBindings,
         node_contracts: graphNodeContracts,
+        node_loop_policies: graphNodeLoopPolicies,
         is_default: graphForm.isDefault,
         enabled: graphForm.enabled,
       };
@@ -651,6 +656,7 @@ export default function WorkflowConfigPage() {
                     <tr>
                       <th>Node</th>
                       <th>Backend</th>
+                      <th>Loop</th>
                       <th>Contract</th>
                     </tr>
                   </thead>
@@ -681,6 +687,25 @@ export default function WorkflowConfigPage() {
                             >
                               <option value="native_langgraph">native LangGraph</option>
                               <option value="openhands">OpenHands</option>
+                            </select>
+                          </td>
+                          <td>
+                            <select
+                              value={graphForm.roleLoopPolicies[roleId] ?? ""}
+                              onChange={(event) =>
+                                setGraphForm({
+                                  ...graphForm,
+                                  roleLoopPolicies: {
+                                    ...graphForm.roleLoopPolicies,
+                                    [roleId]: event.target.value as LoopPolicySelection,
+                                  },
+                                })
+                              }
+                            >
+                              <option value="">profile/default</option>
+                              <option value="strict">strict</option>
+                              <option value="guided">guided</option>
+                              <option value="autonomous">autonomous</option>
                             </select>
                           </td>
                           <td>
@@ -765,8 +790,9 @@ function applyTemplate(form: GraphFormState, templateId: GraphTemplateId, agents
     roleIds,
     workerOrder,
     roleProfileIds: retainBindings(form.roleProfileIds, roleIds),
-    roleRuntimeBindings: retainRuntimeBindings(form.roleRuntimeBindings, workerOrder),
+    roleRuntimeBindings: retainRuntimeBindings(form.roleRuntimeBindings, roleIds),
     roleContracts: retainBindings(form.roleContracts, roleIds),
+    roleLoopPolicies: retainLoopPolicies(form.roleLoopPolicies, roleIds),
   };
 }
 
@@ -785,8 +811,9 @@ function graphToForm(graph: AgentGraphConfig, agents: AgentSpec[], mode: "edit" 
     workerOrder,
     defaultProfileId: graph.default_model_profile_id ?? "",
     roleProfileIds: graph.role_model_profile_ids,
-    roleRuntimeBindings: retainRuntimeBindings(nodeBindingsToRoleIds(graph.node_runtime_bindings, graph), workerOrder),
+    roleRuntimeBindings: retainRuntimeBindings(nodeBindingsToRoleIds(graph.node_runtime_bindings, graph), roleIds),
     roleContracts: retainBindings(nodeContractsToRoleIds(graph.node_contracts, graph), roleIds),
+    roleLoopPolicies: retainLoopPolicies(nodeLoopPoliciesToRoleIds(graph.node_loop_policies ?? {}, graph), roleIds),
     isDefault: mode === "edit" ? graph.is_default : false,
     enabled: graph.enabled,
   };
@@ -804,8 +831,9 @@ function updateWorkers(form: GraphFormState, select: HTMLSelectElement, agents: 
     roleIds,
     workerOrder,
     roleProfileIds: retainBindings(form.roleProfileIds, roleIds),
-    roleRuntimeBindings: retainRuntimeBindings(form.roleRuntimeBindings, workerOrder),
+    roleRuntimeBindings: retainRuntimeBindings(form.roleRuntimeBindings, roleIds),
     roleContracts: retainBindings(form.roleContracts, roleIds),
+    roleLoopPolicies: retainLoopPolicies(form.roleLoopPolicies, roleIds),
   };
 }
 
@@ -872,6 +900,18 @@ function roleContractsToNodeContracts(bindings: Record<string, string>, nodes: A
   return Object.fromEntries(nodes.map((node) => [node.id, bindings[node.role_id] || defaultContractForRole(node.label)]));
 }
 
+function roleLoopPoliciesToNodeLoopPolicies(
+  bindings: Record<string, LoopPolicySelection>,
+  nodes: Array<{ id: string; role_id: string }>,
+) {
+  return Object.fromEntries(
+    nodes.flatMap((node) => {
+      const mode = bindings[node.role_id];
+      return mode ? [[node.id, mode]] : [];
+    }),
+  );
+}
+
 function retainBindings(bindings: Record<string, string>, roleIds: string[]) {
   const allowed = new Set(roleIds);
   return Object.fromEntries(Object.entries(bindings).filter(([roleId]) => allowed.has(roleId)));
@@ -880,6 +920,11 @@ function retainBindings(bindings: Record<string, string>, roleIds: string[]) {
 function retainRuntimeBindings(bindings: Record<string, RuntimeBackend>, roleIds: string[]) {
   const allowed = new Set(roleIds);
   return Object.fromEntries(Object.entries(bindings).filter(([roleId]) => allowed.has(roleId)));
+}
+
+function retainLoopPolicies(bindings: Record<string, LoopPolicySelection>, roleIds: string[]) {
+  const allowed = new Set(roleIds);
+  return Object.fromEntries(Object.entries(bindings).filter(([roleId, mode]) => allowed.has(roleId) && Boolean(mode)));
 }
 
 function nodeBindingsToRoleIds(bindings: Record<string, RuntimeBackend>, graph: AgentGraphConfig) {
@@ -898,6 +943,16 @@ function nodeContractsToRoleIds(bindings: Record<string, string>, graph: AgentGr
     Object.entries(bindings).flatMap(([nodeId, contract]) => {
       const roleId = roleByNodeId.get(nodeId);
       return roleId ? [[roleId, contract]] : [];
+    }),
+  );
+}
+
+function nodeLoopPoliciesToRoleIds(bindings: Record<string, NativeLoopMode>, graph: AgentGraphConfig) {
+  const roleByNodeId = new Map(graph.nodes.map((node) => [node.id, node.role_id]));
+  return Object.fromEntries(
+    Object.entries(bindings).flatMap(([nodeId, mode]) => {
+      const roleId = roleByNodeId.get(nodeId);
+      return roleId ? [[roleId, mode]] : [];
     }),
   );
 }

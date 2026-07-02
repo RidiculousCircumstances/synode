@@ -8,6 +8,7 @@ from synode.evals.coding import (
     changed_files,
     collect_behavior_metrics,
     ensure_graph,
+    ensure_profile,
     load_tasks,
     map_workspace_for_api,
     materialize_task,
@@ -42,13 +43,24 @@ def test_ensure_graph_binds_coder_backend_for_native_and_openhands() -> None:
     native_client = FakeEvalClient()
     openhands_client = FakeEvalClient()
 
-    native = ensure_graph(native_client, "profile-1", backend="native_langgraph")
-    openhands = ensure_graph(openhands_client, "profile-1", backend="openhands")
+    native = ensure_graph(native_client, "profile-1", backend="native_langgraph", loop_mode="strict")
+    openhands = ensure_graph(openhands_client, "profile-1", backend="openhands", loop_mode="strict")
 
     assert native["node_runtime_bindings"]["coder"] == "native_langgraph"
+    assert native["node_loop_policies"] == {"coder": "strict"}
     assert openhands["node_runtime_bindings"]["coder"] == "openhands"
+    assert openhands["node_loop_policies"] == {}
     assert openhands["node_runtime_bindings"]["supervisor"] == "native_langgraph"
     assert openhands["node_runtime_bindings"]["reviewer"] == "native_langgraph"
+
+
+def test_ensure_profile_writes_native_loop_mode_option() -> None:
+    client = FakeProfileClient()
+
+    profile = ensure_profile(client, model="yi-coder:9b-chat", ollama_base_url="http://ollama", loop_mode="guided")
+
+    assert profile["options"]["native_loop_mode"] == "guided"
+    assert client.profile_payloads[0]["options"]["native_loop_mode"] == "guided"
 
 
 def test_openhands_eval_skips_native_contract_only_task(tmp_path: pathlib.Path) -> None:
@@ -63,6 +75,7 @@ def test_openhands_eval_skips_native_contract_only_task(tmp_path: pathlib.Path) 
         profile_id="profile-1",
         graph_id="graph-1",
         backend="openhands",
+        loop_mode=None,
         timeout_seconds=1,
         approve_mutations=True,
         skip_contract_only_for_openhands=True,
@@ -273,6 +286,25 @@ class FakeEvalClient:
         if path == "/agent-graphs" and payload is not None:
             self.graph_payloads.append(payload)
             return {"id": "graph-1", **payload}
+        raise AssertionError(f"unexpected POST {path}")
+
+    def patch(self, path: str, payload: dict[str, Any]) -> Any:
+        raise AssertionError(f"unexpected PATCH {path}")
+
+
+class FakeProfileClient:
+    def __init__(self) -> None:
+        self.profile_payloads: list[dict[str, Any]] = []
+
+    def get(self, path: str) -> Any:
+        if path == "/model-profiles":
+            return []
+        raise AssertionError(f"unexpected GET {path}")
+
+    def post(self, path: str, payload: dict[str, Any] | None = None) -> Any:
+        if path == "/model-profiles" and payload is not None:
+            self.profile_payloads.append(payload)
+            return {"id": "profile-1", **payload}
         raise AssertionError(f"unexpected POST {path}")
 
     def patch(self, path: str, payload: dict[str, Any]) -> Any:

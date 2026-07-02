@@ -7,6 +7,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, field_validator
 
 from synode.domain.reports import RunReport
+from synode.domain.runtime.loop_policy import NativeLoopMode
 
 
 def now_utc() -> datetime:
@@ -374,6 +375,7 @@ class AgentGraphCreateRequest(BaseModel):
     role_model_profile_ids: dict[str, str] = Field(default_factory=dict)
     node_runtime_bindings: dict[str, str] = Field(default_factory=dict)
     node_contracts: dict[str, str] = Field(default_factory=dict)
+    node_loop_policies: dict[str, NativeLoopMode] = Field(default_factory=dict)
     is_default: bool = False
     enabled: bool = True
 
@@ -392,6 +394,7 @@ class AgentGraphUpdateRequest(BaseModel):
     role_model_profile_ids: dict[str, str] | None = None
     node_runtime_bindings: dict[str, str] | None = None
     node_contracts: dict[str, str] | None = None
+    node_loop_policies: dict[str, NativeLoopMode] | None = None
     is_default: bool | None = None
     enabled: bool | None = None
 
@@ -406,6 +409,7 @@ class AgentGraphResponse(BaseModel):
     role_model_profile_ids: dict[str, str] = Field(default_factory=dict)
     node_runtime_bindings: dict[str, str] = Field(default_factory=dict)
     node_contracts: dict[str, str] = Field(default_factory=dict)
+    node_loop_policies: dict[str, NativeLoopMode] = Field(default_factory=dict)
     is_default: bool
     enabled: bool
     created_at: datetime

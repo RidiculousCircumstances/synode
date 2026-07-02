@@ -138,6 +138,22 @@ class FakeModelProvider:
                     }
                 ).model_dump(mode="json")
             contract_id = str(request.context.get("contract_id") or "")
+            loop_mode = str(request.context.get("native_loop_mode") or "")
+            allowed_tools = request.context.get("allowed_tools")
+            if (
+                contract_id in {CODING_INSPECTION_CONTRACT, CODING_PATCH_PROPOSAL_CONTRACT}
+                and loop_mode in {"strict", "guided"}
+                and not has_tool_result
+                and isinstance(allowed_tools, list)
+                and "native.fs_list" in allowed_tools
+            ):
+                return NativeLoopAction.model_validate(
+                    {
+                        "action": "tool_call",
+                        "summary": "Inspect workspace files before deterministic coding finish.",
+                        "tool_call": {"name": "native.fs_list", "arguments": {"glob": "*"}},
+                    }
+                ).model_dump(mode="json")
             if contract_id == CODING_INSPECTION_CONTRACT:
                 return NativeLoopAction.model_validate(
                     {

@@ -14,6 +14,7 @@ export type RunMode = "general" | "coding";
 export type InteractionMode = "auto" | "plan_review" | "plan_only";
 
 export type RuntimeBackend = string;
+export type NativeLoopMode = "strict" | "guided" | "autonomous";
 export type AgentGraphNodeKind = "control" | "worker";
 export type MCPServerTransport = "stdio" | "sse" | "streamable_http";
 
@@ -416,6 +417,7 @@ export interface AgentGraph {
   role_model_profile_ids: Record<string, string>;
   node_runtime_bindings: Record<string, RuntimeBackend>;
   node_contracts: Record<string, string>;
+  node_loop_policies: Record<string, NativeLoopMode>;
   is_default: boolean;
   enabled: boolean;
   created_at: string;
